@@ -1,0 +1,24 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+
+# Local docs (never pushed — see AI_AGENT_Working_Rules.md, section 9)
+docs/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local/assistant working context (see docs/ai-agent-working-rules.md)
+*.local.md
+.scratch/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
