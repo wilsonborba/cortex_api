@@ -168,6 +168,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Execution Engine
+    executor_max_retries: int = Field(
+        default=1,
+        validation_alias=AliasChoices("CORTEX_EXECUTOR_MAX_RETRIES", "EXECUTOR_MAX_RETRIES"),
+    )
+    executor_max_reroutes: int = Field(
+        default=1,
+        validation_alias=AliasChoices("CORTEX_EXECUTOR_MAX_REROUTES", "EXECUTOR_MAX_REROUTES"),
+    )
+
     # Sensitive API Secrets (only read from .env / environment)
     anthropic_api_key: Optional[str] = Field(
         default=None,
