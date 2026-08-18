@@ -78,6 +78,42 @@ class Settings(BaseSettings):
         default_factory=lambda: Path.home() / ".codex" / "auth.json",
         validation_alias=AliasChoices("CORTEX_CODEX_AUTH_PATH", "CODEX_AUTH_PATH"),
     )
+    claude_docker_command: str = Field(
+        default="claude-docker",
+        validation_alias=AliasChoices("CORTEX_CLAUDE_DOCKER_COMMAND", "CLAUDE_DOCKER_COMMAND"),
+    )
+    agy_docker_command: str = Field(
+        default="agy-docker",
+        validation_alias=AliasChoices("CORTEX_AGY_DOCKER_COMMAND", "AGY_DOCKER_COMMAND"),
+    )
+    codex_command: str = Field(
+        default="codex",
+        validation_alias=AliasChoices("CORTEX_CODEX_COMMAND", "CODEX_COMMAND"),
+    )
+    driver_timeout_seconds: float = Field(
+        default=180.0,
+        validation_alias=AliasChoices("CORTEX_DRIVER_TIMEOUT_SECONDS", "DRIVER_TIMEOUT_SECONDS"),
+    )
+
+    # Quota Tracker: sliding window token budget
+    # `ollama` is intentionally excluded from these: it's local/free, so its
+    # quota factor is always 1.0 rather than measured against a ceiling.
+    default_quota_window_tokens: int = Field(
+        default=1_000_000,
+        validation_alias=AliasChoices(
+            "CORTEX_DEFAULT_QUOTA_WINDOW_TOKENS", "DEFAULT_QUOTA_WINDOW_TOKENS"
+        ),
+    )
+    quota_window_tokens_by_provider: dict[str, int] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices(
+            "CORTEX_QUOTA_WINDOW_TOKENS_BY_PROVIDER", "QUOTA_WINDOW_TOKENS_BY_PROVIDER"
+        ),
+    )
+    cooldown_minutes: int = Field(
+        default=15,
+        validation_alias=AliasChoices("CORTEX_COOLDOWN_MINUTES", "COOLDOWN_MINUTES"),
+    )
 
     # Sensitive API Secrets (only read from .env / environment)
     anthropic_api_key: Optional[str] = Field(

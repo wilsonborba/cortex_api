@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
 from sqlalchemy.orm import Session
 
 from lib.core.settings import Settings, get_settings
+from lib.core.time_utils import ensure_utc
 from lib.dal.local.database import session_scope
 from lib.dal.models import AccessStatus, ModelCatalogEntry
 from lib.dal.repositories.model_repository import ModelRepository
@@ -24,6 +26,9 @@ class ModelRegistryService:
     - manually curated fields (`tier_eligibility`, `capabilities`, `cost`,
       `is_enabled`) survive a sync untouched;
     - `DISABLED_MANUALLY` models are left alone until the user re-enables them;
+    - a `COOLING_DOWN` model (set by the Quota Tracker on a 429) stays that way
+      until its `cooldown_until` elapses, even if the provider answers again
+      in the meantime;
     - a provider that can't be probed at all only affects *its own* cached
       models (marked `OFFLINE`), never the whole catalog.
     """
@@ -112,6 +117,8 @@ class ModelRegistryService:
         existing = self._repository.get_by_id(discovered.id, session=session)
         if existing is not None and existing.access_status == AccessStatus.DISABLED_MANUALLY.value:
             return existing  # manual disable wins over live discovery
+        if existing is not None and self._still_cooling_down(existing):
+            return existing  # a 429 cooldown outlives a provider simply being reachable again
 
         entry = ModelCatalogEntry(
             id=discovered.id,
@@ -130,6 +137,12 @@ class ModelRegistryService:
             is_enabled=existing.is_enabled if existing else True,
         )
         return self._repository.upsert(entry, session=session)
+
+    @staticmethod
+    def _still_cooling_down(entry: ModelCatalogEntry) -> bool:
+        if entry.access_status != AccessStatus.COOLING_DOWN.value or entry.cooldown_until is None:
+            return False
+        return ensure_utc(entry.cooldown_until) > datetime.now(timezone.utc)
 
 
 def build_default_registry_service(settings: Optional[Settings] = None) -> ModelRegistryService:
