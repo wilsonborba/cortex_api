@@ -180,6 +180,11 @@ def test_routing_pin_repository(pin_repo: RoutingPinRepository):
     assert removed is True
     assert pin_repo.get_pin(3, task_type="coding") is None
 
+    # Clean up the tier-0 pin too: the test DB persists across the whole
+    # test session (see conftest.py), and a dangling tier-level pin would
+    # otherwise shadow dynamic routing for tier 0 in unrelated tests.
+    assert pin_repo.remove_pin(0, task_type=None) is True
+
 
 def test_tier_policy_repository(tier_repo: TierPolicyRepository):
     policy = TierPolicy(
