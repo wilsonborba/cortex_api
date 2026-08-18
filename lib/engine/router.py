@@ -46,6 +46,7 @@ class ExecutionPlan:
     retrieval_mode: str
     needs_web: bool
     use_memory: bool
+    memory_topic: Optional[str]
     require_verification: bool
     max_latency_seconds: int
     max_model_calls: int
@@ -60,6 +61,7 @@ class RoutingRequest:
     task_type: str = "general"
     needs_web: bool = False
     use_memory: bool = False
+    memory_topic: Optional[str] = None
     force_model: Optional[str] = None
     force_provider: Optional[str] = None
     force_strategy: Optional[str] = None
@@ -253,6 +255,7 @@ class Router:
             retrieval_mode=envelope.retrieval_mode,
             needs_web=request.needs_web or auto_retrieval,
             use_memory=request.use_memory or auto_retrieval,
+            memory_topic=request.memory_topic,
             require_verification=envelope.require_verification,
             max_latency_seconds=envelope.max_latency_seconds,
             max_model_calls=envelope.max_model_calls,
