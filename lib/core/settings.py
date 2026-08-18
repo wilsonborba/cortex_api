@@ -131,6 +131,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_SEARXNG_BASE_URL", "SEARXNG_BASE_URL"),
     )
 
+    # Hippocampus: external memory/document service client
+    hippocampus_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices(
+            "CORTEX_HIPPOCAMPUS_TIMEOUT_SECONDS", "HIPPOCAMPUS_TIMEOUT_SECONDS"
+        ),
+    )
+
     # Sensitive API Secrets (only read from .env / environment)
     anthropic_api_key: Optional[str] = Field(
         default=None,
