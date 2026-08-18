@@ -178,6 +178,26 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_EXECUTOR_MAX_REROUTES", "EXECUTOR_MAX_REROUTES"),
     )
 
+    # REST API
+    cors_allow_origins: list[str] = Field(
+        default_factory=lambda: ["*"],
+        validation_alias=AliasChoices("CORTEX_CORS_ALLOW_ORIGINS", "CORS_ALLOW_ORIGINS"),
+    )
+    api_sync_models_on_startup: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CORTEX_API_SYNC_MODELS_ON_STARTUP", "API_SYNC_MODELS_ON_STARTUP"),
+    )
+    api_background_tasks_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CORTEX_API_BACKGROUND_TASKS_ENABLED", "API_BACKGROUND_TASKS_ENABLED"),
+    )
+    api_cooldown_refresh_interval_seconds: float = Field(
+        default=60.0,
+        validation_alias=AliasChoices(
+            "CORTEX_API_COOLDOWN_REFRESH_INTERVAL_SECONDS", "API_COOLDOWN_REFRESH_INTERVAL_SECONDS"
+        ),
+    )
+
     # Sensitive API Secrets (only read from .env / environment)
     anthropic_api_key: Optional[str] = Field(
         default=None,
