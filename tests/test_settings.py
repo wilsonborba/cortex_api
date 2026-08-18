@@ -8,7 +8,9 @@ import pytest
 from lib.core.settings import Settings, get_settings
 
 
-def test_default_settings():
+def test_default_settings(monkeypatch):
+    monkeypatch.delenv("CORTEX_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     settings = Settings()
     assert settings.environment == "development"
     assert settings.database_url == "sqlite:///var/cortex.db"
