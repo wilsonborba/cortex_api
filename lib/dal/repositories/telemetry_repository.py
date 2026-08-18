@@ -106,3 +106,32 @@ class TelemetryRepository:
             return _calc(session)
         with session_scope(self._session_factory) as s:
             return _calc(s)
+
+    def get_model_latency_stats(
+        self, provider: str, model: str, session: Optional[Session] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Historical latency for one model, keyed the same way the Model
+        Registry keys it: `model` is the full catalog id (e.g.
+        `"claude/claude-sonnet-5"`), not a bare model name."""
+
+        def _calc(s: Session) -> Optional[Dict[str, Any]]:
+            stmt = select(
+                func.avg(TelemetryEvent.latency_seconds).label("avg_latency_seconds"),
+                func.count(TelemetryEvent.id).label("total_runs"),
+            ).where(
+                TelemetryEvent.provider == provider,
+                TelemetryEvent.model == model,
+                TelemetryEvent.success == True,
+            )
+            row = s.execute(stmt).one()
+            if not row.total_runs:
+                return None
+            return {
+                "avg_latency_seconds": float(row.avg_latency_seconds or 0.0),
+                "total_runs": int(row.total_runs),
+            }
+
+        if session:
+            return _calc(session)
+        with session_scope(self._session_factory) as s:
+            return _calc(s)

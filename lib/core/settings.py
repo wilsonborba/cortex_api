@@ -139,6 +139,35 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Routing Engine: dynamic scoring weights + quota cutoff
+    # Score(M) = w_cap*Cap(M,task) + w_q*Q(M) - w_lat*LatencyNorm(M) - w_cost*CostNorm(M)
+    quota_critical_threshold: float = Field(
+        default=0.15,
+        validation_alias=AliasChoices("CORTEX_QUOTA_CRITICAL_THRESHOLD", "QUOTA_CRITICAL_THRESHOLD"),
+    )
+    routing_weight_capability: float = Field(
+        default=0.5,
+        validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_CAPABILITY", "ROUTING_WEIGHT_CAPABILITY"),
+    )
+    routing_weight_quota: float = Field(
+        default=0.25,
+        validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_QUOTA", "ROUTING_WEIGHT_QUOTA"),
+    )
+    routing_weight_latency: float = Field(
+        default=0.15,
+        validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_LATENCY", "ROUTING_WEIGHT_LATENCY"),
+    )
+    routing_weight_cost: float = Field(
+        default=0.10,
+        validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_COST", "ROUTING_WEIGHT_COST"),
+    )
+    routing_cost_ceiling_usd_per_million: float = Field(
+        default=20.0,
+        validation_alias=AliasChoices(
+            "CORTEX_ROUTING_COST_CEILING_USD_PER_MILLION", "ROUTING_COST_CEILING_USD_PER_MILLION"
+        ),
+    )
+
     # Sensitive API Secrets (only read from .env / environment)
     anthropic_api_key: Optional[str] = Field(
         default=None,
