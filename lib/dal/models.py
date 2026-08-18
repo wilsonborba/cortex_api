@@ -45,6 +45,9 @@ class ModelCatalogEntry(Base, TimestampMixin):
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     cost_per_million_tokens: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    cooldown_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class TelemetryEvent(Base, TimestampMixin):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -60,6 +61,7 @@ class ModelRepository:
                 existing.capabilities = entry.capabilities
                 existing.cost_per_million_tokens = entry.cost_per_million_tokens
                 existing.is_enabled = entry.is_enabled
+                existing.cooldown_until = entry.cooldown_until
                 return existing
             s.add(entry)
             return entry
@@ -84,6 +86,41 @@ class ModelRepository:
                 m.access_status = status_val
                 if reason is not None:
                     m.status_reason = reason
+            return m
+
+        if session:
+            return _update(session)
+        with session_scope(self._session_factory) as s:
+            return _update(s)
+
+    def set_cooldown(
+        self,
+        model_id: str,
+        until: datetime,
+        reason: Optional[str] = None,
+        session: Optional[Session] = None,
+    ) -> Optional[ModelCatalogEntry]:
+        def _update(s: Session) -> Optional[ModelCatalogEntry]:
+            m = s.get(ModelCatalogEntry, model_id)
+            if m:
+                m.access_status = AccessStatus.COOLING_DOWN.value
+                m.cooldown_until = until
+                if reason is not None:
+                    m.status_reason = reason
+            return m
+
+        if session:
+            return _update(session)
+        with session_scope(self._session_factory) as s:
+            return _update(s)
+
+    def clear_cooldown(
+        self, model_id: str, session: Optional[Session] = None
+    ) -> Optional[ModelCatalogEntry]:
+        def _update(s: Session) -> Optional[ModelCatalogEntry]:
+            m = s.get(ModelCatalogEntry, model_id)
+            if m:
+                m.cooldown_until = None
             return m
 
         if session:

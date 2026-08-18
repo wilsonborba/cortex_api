@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import pytest
 from sqlalchemy.orm import Session
 
+from lib.core.time_utils import ensure_utc
 from lib.dal.models import AccessStatus, ModelCatalogEntry
 from lib.dal.repositories.model_repository import ModelRepository
 from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
@@ -247,3 +249,63 @@ def test_update_config_disable_then_enable_round_trips_status(registry_repo: Mod
     re_enabled = service.update_config("ollama/reg-toggle-qwen", is_enabled=True)
     assert re_enabled.is_enabled is True
     assert re_enabled.access_status == AccessStatus.OFFLINE.value  # pending next sync
+
+
+def test_sync_does_not_resurrect_an_active_cooldown(registry_repo: ModelRepository):
+    future = datetime.now(timezone.utc) + timedelta(minutes=10)
+    _seed(
+        registry_repo,
+        "codex/reg-cooldown-active-o3",
+        "codex",
+        "OpenAI o3",
+        AccessStatus.COOLING_DOWN.value,
+        status_reason="Rate limited (429)",
+        cooldown_until=future,
+    )
+    discovered = [
+        DiscoveredModel(
+            id="codex/reg-cooldown-active-o3",
+            provider="codex",
+            display_name="OpenAI o3",
+            access_status=AccessStatus.AVAILABLE.value,
+        )
+    ]
+    service = ModelRegistryService(
+        discoveries=[_FakeDiscovery("codex", models=discovered)], repository=registry_repo
+    )
+
+    service.sync()
+
+    stored = registry_repo.get_by_id("codex/reg-cooldown-active-o3")
+    assert stored.access_status == AccessStatus.COOLING_DOWN.value
+    assert ensure_utc(stored.cooldown_until) == future
+
+
+def test_sync_clears_an_expired_cooldown(registry_repo: ModelRepository):
+    past = datetime.now(timezone.utc) - timedelta(minutes=1)
+    _seed(
+        registry_repo,
+        "codex/reg-cooldown-expired-o3",
+        "codex",
+        "OpenAI o3",
+        AccessStatus.COOLING_DOWN.value,
+        status_reason="Rate limited (429)",
+        cooldown_until=past,
+    )
+    discovered = [
+        DiscoveredModel(
+            id="codex/reg-cooldown-expired-o3",
+            provider="codex",
+            display_name="OpenAI o3",
+            access_status=AccessStatus.AVAILABLE.value,
+        )
+    ]
+    service = ModelRegistryService(
+        discoveries=[_FakeDiscovery("codex", models=discovered)], repository=registry_repo
+    )
+
+    service.sync()
+
+    stored = registry_repo.get_by_id("codex/reg-cooldown-expired-o3")
+    assert stored.access_status == AccessStatus.AVAILABLE.value
+    assert stored.cooldown_until is None
