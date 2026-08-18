@@ -115,6 +115,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_COOLDOWN_MINUTES", "COOLDOWN_MINUTES"),
     )
 
+    # Web Retrieval: search + scraping
+    web_search_max_results: int = Field(
+        default=5,
+        validation_alias=AliasChoices("CORTEX_WEB_SEARCH_MAX_RESULTS", "WEB_SEARCH_MAX_RESULTS"),
+    )
+    web_retrieval_timeout_seconds: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices(
+            "CORTEX_WEB_RETRIEVAL_TIMEOUT_SECONDS", "WEB_RETRIEVAL_TIMEOUT_SECONDS"
+        ),
+    )
+    searxng_base_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("CORTEX_SEARXNG_BASE_URL", "SEARXNG_BASE_URL"),
+    )
+
     # Sensitive API Secrets (only read from .env / environment)
     anthropic_api_key: Optional[str] = Field(
         default=None,
