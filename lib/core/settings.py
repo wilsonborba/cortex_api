@@ -61,6 +61,24 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_SLIDING_WINDOW_HOURS", "SLIDING_WINDOW_HOURS"),
     )
 
+    # Model Registry: provider discovery
+    discovery_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices("CORTEX_DISCOVERY_TIMEOUT_SECONDS", "DISCOVERY_TIMEOUT_SECONDS"),
+    )
+    agy_command: str = Field(
+        default="agy",
+        validation_alias=AliasChoices("CORTEX_AGY_COMMAND", "AGY_COMMAND"),
+    )
+    claude_credentials_path: Path = Field(
+        default_factory=lambda: Path.home() / ".claude" / ".credentials.json",
+        validation_alias=AliasChoices("CORTEX_CLAUDE_CREDENTIALS_PATH", "CLAUDE_CREDENTIALS_PATH"),
+    )
+    codex_auth_path: Path = Field(
+        default_factory=lambda: Path.home() / ".codex" / "auth.json",
+        validation_alias=AliasChoices("CORTEX_CODEX_AUTH_PATH", "CODEX_AUTH_PATH"),
+    )
+
     # Sensitive API Secrets (only read from .env / environment)
     anthropic_api_key: Optional[str] = Field(
         default=None,
