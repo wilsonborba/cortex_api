@@ -107,6 +107,56 @@ class TelemetryRepository:
         with session_scope(self._session_factory) as s:
             return _calc(s)
 
+    def get_context_format_stats(
+        self,
+        provider: str,
+        model: str,
+        session: Optional[Session] = None,
+    ) -> List[Dict[str, Any]]:
+        """One row per (context_type, context_format) actually recorded for
+        this model -- feeds issue #15's evaluation algorithm. Only steps
+        that had context injected show up here (`context_format IS NOT
+        NULL`); a T0 call with no web/memory context never used a format at
+        all, so it's not a data point for this comparison."""
+
+        def _calc(s: Session) -> List[Dict[str, Any]]:
+            stmt = (
+                select(
+                    TelemetryEvent.context_type,
+                    TelemetryEvent.context_format,
+                    func.count(TelemetryEvent.id).label("total_runs"),
+                    func.avg(TelemetryEvent.latency_seconds).label("avg_latency_seconds"),
+                    func.avg(TelemetryEvent.total_tokens).label("avg_total_tokens"),
+                    (
+                        func.sum(func.cast(TelemetryEvent.success, Integer)) * 100.0
+                        / func.count(TelemetryEvent.id)
+                    ).label("success_rate"),
+                )
+                .where(
+                    TelemetryEvent.provider == provider,
+                    TelemetryEvent.model == model,
+                    TelemetryEvent.context_format.is_not(None),
+                )
+                .group_by(TelemetryEvent.context_type, TelemetryEvent.context_format)
+            )
+            rows = s.execute(stmt).all()
+            return [
+                {
+                    "context_type": r.context_type,
+                    "context_format": r.context_format,
+                    "total_runs": int(r.total_runs),
+                    "avg_latency_seconds": round(float(r.avg_latency_seconds or 0.0), 3),
+                    "avg_total_tokens": round(float(r.avg_total_tokens or 0.0), 1),
+                    "success_rate": round(float(r.success_rate or 0.0), 2),
+                }
+                for r in rows
+            ]
+
+        if session:
+            return _calc(session)
+        with session_scope(self._session_factory) as s:
+            return _calc(s)
+
     def get_model_latency_stats(
         self, provider: str, model: str, session: Optional[Session] = None
     ) -> Optional[Dict[str, Any]]:

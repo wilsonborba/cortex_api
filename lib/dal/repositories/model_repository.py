@@ -128,6 +128,56 @@ class ModelRepository:
         with session_scope(self._session_factory) as s:
             return _update(s)
 
+    # -- context-format preference (issue #15) ---------------------------------
+
+    def set_context_format_pin(
+        self,
+        model_id: str,
+        format_name: str,
+        expires_at: Optional[datetime] = None,
+        session: Optional[Session] = None,
+    ) -> Optional[ModelCatalogEntry]:
+        def _update(s: Session) -> Optional[ModelCatalogEntry]:
+            m = s.get(ModelCatalogEntry, model_id)
+            if m:
+                m.context_format_pin = format_name
+                m.context_format_pin_expires_at = expires_at
+            return m
+
+        if session:
+            return _update(session)
+        with session_scope(self._session_factory) as s:
+            return _update(s)
+
+    def clear_context_format_pin(
+        self, model_id: str, session: Optional[Session] = None
+    ) -> Optional[ModelCatalogEntry]:
+        def _update(s: Session) -> Optional[ModelCatalogEntry]:
+            m = s.get(ModelCatalogEntry, model_id)
+            if m:
+                m.context_format_pin = None
+                m.context_format_pin_expires_at = None
+            return m
+
+        if session:
+            return _update(session)
+        with session_scope(self._session_factory) as s:
+            return _update(s)
+
+    def set_context_format_computed(
+        self, model_id: str, format_name: str, session: Optional[Session] = None
+    ) -> Optional[ModelCatalogEntry]:
+        def _update(s: Session) -> Optional[ModelCatalogEntry]:
+            m = s.get(ModelCatalogEntry, model_id)
+            if m:
+                m.context_format_computed = format_name
+            return m
+
+        if session:
+            return _update(session)
+        with session_scope(self._session_factory) as s:
+            return _update(s)
+
     def update_config(
         self,
         model_id: str,
