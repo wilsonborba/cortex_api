@@ -11,11 +11,26 @@ from lib.core.time_utils import ensure_utc
 from lib.dal.local.database import session_scope
 from lib.dal.models import AccessStatus, ModelCatalogEntry
 from lib.dal.repositories.model_repository import ModelRepository
+from lib.engine.discovery.aion_labs import AionLabsDiscovery
 from lib.engine.discovery.antigravity import AntigravityDiscovery
 from lib.engine.discovery.base import DiscoveredModel, ProviderDiscovery, ProviderDiscoveryError
 from lib.engine.discovery.claude_docker import ClaudeDockerDiscovery
+from lib.engine.discovery.cloudflare import CloudflareDiscovery
 from lib.engine.discovery.codex import CodexDiscovery
+from lib.engine.discovery.cohere import CohereDiscovery
+from lib.engine.discovery.google_ai_studio import GoogleAIStudioDiscovery
+from lib.engine.discovery.groq import GroqDiscovery
+from lib.engine.discovery.huggingface import HuggingFaceDiscovery
+from lib.engine.discovery.inference_net import InferenceNetDiscovery
+from lib.engine.discovery.mistral import MistralDiscovery
+from lib.engine.discovery.nvidia import NvidiaDiscovery
 from lib.engine.discovery.ollama import OllamaDiscovery
+from lib.engine.discovery.ollama_cloud import OllamaCloudDiscovery
+from lib.engine.discovery.openrouter import OpenRouterDiscovery
+from lib.engine.discovery.requesty import RequestyDiscovery
+from lib.engine.discovery.sambanova import SambaNovaDiscovery
+from lib.engine.discovery.siliconflow import SiliconFlowDiscovery
+from lib.engine.discovery.zai import ZaiDiscovery
 from lib.engine.format import ENCODERS
 
 
@@ -207,5 +222,34 @@ def build_default_registry_service(settings: Optional[Settings] = None) -> Model
             ),
             ClaudeDockerDiscovery(credentials_path=Path(settings.claude_credentials_path)),
             CodexDiscovery(auth_path=Path(settings.codex_auth_path)),
+            GroqDiscovery(api_key=settings.groq_api_key, timeout=settings.discovery_timeout_seconds),
+            GoogleAIStudioDiscovery(
+                api_key=settings.google_ai_studio_api_key, timeout=settings.discovery_timeout_seconds
+            ),
+            OpenRouterDiscovery(api_key=settings.openrouter_api_key, timeout=settings.discovery_timeout_seconds),
+            CloudflareDiscovery(
+                api_key=settings.cloudflare_api_key,
+                account_id=settings.cloudflare_account_id,
+                timeout=settings.discovery_timeout_seconds,
+            ),
+            CohereDiscovery(api_key=settings.cohere_api_key, timeout=settings.discovery_timeout_seconds),
+            MistralDiscovery(api_key=settings.mistral_api_key, timeout=settings.discovery_timeout_seconds),
+            NvidiaDiscovery(api_key=settings.nvidia_api_key, timeout=settings.discovery_timeout_seconds),
+            ZaiDiscovery(api_key=settings.zai_api_key, timeout=settings.discovery_timeout_seconds),
+            RequestyDiscovery(api_key=settings.requesty_api_key, timeout=settings.discovery_timeout_seconds),
+            HuggingFaceDiscovery(
+                api_key=settings.huggingface_api_key, timeout=settings.discovery_timeout_seconds
+            ),
+            OllamaCloudDiscovery(
+                api_key=settings.ollama_cloud_api_key, timeout=settings.discovery_timeout_seconds
+            ),
+            AionLabsDiscovery(api_key=settings.aion_labs_api_key, timeout=settings.discovery_timeout_seconds),
+            SiliconFlowDiscovery(
+                api_key=settings.siliconflow_api_key, timeout=settings.discovery_timeout_seconds
+            ),
+            InferenceNetDiscovery(
+                api_key=settings.inference_net_api_key, timeout=settings.discovery_timeout_seconds
+            ),
+            SambaNovaDiscovery(api_key=settings.sambanova_api_key, timeout=settings.discovery_timeout_seconds),
         ]
     )

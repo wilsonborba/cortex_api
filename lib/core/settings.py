@@ -222,6 +222,61 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     )
 
+    # Free-tier providers (docs/free-tier-adapters-plan.md): each key is its
+    # own `CORTEX_<PROVIDER>_API_KEY`, deliberately separate from the "API
+    # Secrets" section above (those use the raw names official SDKs expect;
+    # these are cortex-specific driver credentials, including
+    # `CORTEX_GOOGLE_AI_STUDIO_API_KEY`, which is NOT the same thing as
+    # `google_api_key` above).
+    groq_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_GROQ_API_KEY")
+    )
+    google_ai_studio_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_GOOGLE_AI_STUDIO_API_KEY")
+    )
+    openrouter_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_OPENROUTER_API_KEY")
+    )
+    cloudflare_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_CLOUDFLARE_API_KEY")
+    )
+    cloudflare_account_id: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_CLOUDFLARE_ACCOUNT_ID")
+    )
+    cohere_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_COHERE_API_KEY")
+    )
+    mistral_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_MISTRAL_API_KEY")
+    )
+    nvidia_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_NVIDIA_API_KEY")
+    )
+    zai_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_ZAI_API_KEY")
+    )
+    requesty_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_REQUESTY_API_KEY")
+    )
+    huggingface_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_HUGGINGFACE_API_KEY")
+    )
+    ollama_cloud_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_OLLAMA_CLOUD_API_KEY")
+    )
+    aion_labs_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_AION_LABS_API_KEY")
+    )
+    siliconflow_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_SILICONFLOW_API_KEY")
+    )
+    inference_net_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_INFERENCE_NET_API_KEY")
+    )
+    sambanova_api_key: Optional[str] = Field(
+        default=None, validation_alias=AliasChoices("CORTEX_SAMBANOVA_API_KEY")
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
