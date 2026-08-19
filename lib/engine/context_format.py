@@ -24,9 +24,27 @@ def get_preferred_context_format(model: ModelCatalogEntry) -> str:
     computed preference; otherwise TOON, the hard default when there's no
     data yet at all ("deve tentar usar o máximo o TOON").
     """
-    if model.context_format_pin and not _pin_expired(model):
+    if has_active_context_format_pin(model):
         return model.context_format_pin
     return model.context_format_computed or TOON
+
+
+def resolve_context_format(model: Optional[ModelCatalogEntry], forced: Optional[str] = None) -> str:
+    """Full 3-layer resolution for one call: `forced` (layer 3, a
+    request-level override) wins over everything, including an active pin
+    -- "se ele forçou... utiliza normal, acabou". No model on hand (e.g. the
+    primary selection's id isn't in the registry) falls back to `forced` or
+    the hard TOON default, same as `get_preferred_context_format` would.
+    """
+    if forced:
+        return forced
+    if model is None:
+        return TOON
+    return get_preferred_context_format(model)
+
+
+def has_active_context_format_pin(model: ModelCatalogEntry) -> bool:
+    return bool(model.context_format_pin) and not _pin_expired(model)
 
 
 def _pin_expired(model: ModelCatalogEntry) -> bool:

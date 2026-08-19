@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from lib.core.settings import Settings, get_settings
 from lib.engine.retrieval.base import ContentScraper, RetrievalError, ScrapedPage, SearchProvider, SearchResult
@@ -11,11 +11,19 @@ from lib.engine.retrieval.search import DuckDuckGoSearchProvider, SearXNGSearchP
 
 @dataclass(frozen=True)
 class WebContextResult:
-    """A ready-to-inject Markdown context block plus the sources it came from."""
+    """A ready-to-inject Markdown context block plus the sources it came from.
+
+    `items` (issue #16) is the same data as `markdown`, kept structured
+    instead of pre-rendered: `[{"title", "url", "content"}, ...]`, one per
+    result, so the Executor can encode it as TOON/JSON per the destination
+    model's preference instead of always Markdown. `markdown`/`sources`
+    still work exactly as before -- this is purely additive.
+    """
 
     query: str
     markdown: str
     sources: List[str] = field(default_factory=list)
+    items: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class WebRetrievalService:
@@ -46,15 +54,17 @@ class WebRetrievalService:
 
         sections: List[str] = []
         sources: List[str] = []
+        items: List[Dict[str, Any]] = []
         for result in results:
             page = self._scrape(result.url)
             heading = result.title or (page.title if page else "") or result.url
-            body = page.markdown if page and page.success and page.markdown.strip() else result.snippet
-            sections.append(f"### {heading}\nSource: {result.url}\n\n{body.strip()}")
+            body = (page.markdown if page and page.success and page.markdown.strip() else result.snippet).strip()
+            sections.append(f"### {heading}\nSource: {result.url}\n\n{body}")
             sources.append(result.url)
+            items.append({"title": heading, "url": result.url, "content": body})
 
         markdown = "\n\n---\n\n".join(sections)
-        return WebContextResult(query=query, markdown=markdown, sources=sources)
+        return WebContextResult(query=query, markdown=markdown, sources=sources, items=items)
 
     def _search(self, query: str, limit: int) -> List[SearchResult]:
         for provider in self._search_providers:

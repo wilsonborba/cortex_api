@@ -52,6 +52,7 @@ class ExecutionPlan:
     max_model_calls: int
     source: str  # "override" | "pin" | "dynamic"
     reason: str
+    context_format: Optional[str] = None  # layer-3 force (#16); None => Executor resolves it itself
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class RoutingRequest:
     force_model: Optional[str] = None
     force_provider: Optional[str] = None
     force_strategy: Optional[str] = None
+    force_context_format: Optional[str] = None  # "toon" | "json" (#16): overrides the per-model auto/pin default
 
 
 class NoEligibleModelError(RuntimeError):
@@ -261,6 +263,7 @@ class Router:
             max_model_calls=envelope.max_model_calls,
             source=source,
             reason=reason,
+            context_format=request.force_context_format,
         )
 
 

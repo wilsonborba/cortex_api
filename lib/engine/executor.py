@@ -5,18 +5,21 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from time import monotonic
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from lib.core.logs import get_logger
 from lib.core.settings import Settings, get_settings
-from lib.dal.models import TelemetryEvent
+from lib.dal.models import ModelCatalogEntry, TelemetryEvent
+from lib.engine.context_format import has_active_context_format_pin, resolve_context_format
 from lib.engine.drivers.agy_docker import AgyDockerDriver
 from lib.engine.drivers.base import DriverResult, ExecutionDriver
 from lib.engine.drivers.claude_docker import ClaudeDockerDriver
 from lib.engine.drivers.codex import CodexDriver
 from lib.engine.drivers.ollama import OllamaDriver
+from lib.engine.format import JSON, TOON, encode
 from lib.engine.quota import QuotaTracker
-from lib.engine.retrieval.hippocampus import HippocampusClient, build_default_hippocampus_client, format_memory_context
+from lib.engine.registry_service import ModelRegistryService, build_default_registry_service
+from lib.engine.retrieval.hippocampus import HippocampusClient, build_default_hippocampus_client
 from lib.engine.retrieval.service import WebRetrievalService, build_default_web_retrieval_service
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError, Router, RoutingRequest, build_default_router
 from lib.engine.telemetry import TelemetryLogger
@@ -44,10 +47,63 @@ class StepResult:
 
 
 @dataclass(frozen=True)
-class RetrievalStats:
-    source: str  # "none" | "web" | "hippocampus" | "hybrid"
-    documents: int
-    latency_ms: int
+class GatheredContext:
+    """Raw structured web/memory context, gathered once per request.
+
+    Encoding (TOON or JSON, issue #16) happens separately via `.encode()`,
+    possibly more than once -- the format-fallback retry in `_execute_plan`
+    re-encodes the *same* gathered data as JSON rather than re-fetching
+    anything, since the failure it's reacting to is (as best anyone can
+    tell) about the encoding, not the underlying search/memory results.
+    """
+
+    web_items: List[Dict[str, Any]] = field(default_factory=list)
+    memory_items: List[Dict[str, Any]] = field(default_factory=list)
+    documents: int = 0
+    source: str = "none"  # "none" | "web" | "hippocampus" | "hybrid"
+    gather_latency_ms: int = 0
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.web_items and not self.memory_items
+
+    def encode(self, format_name: str) -> str:
+        parts = []
+        if self.web_items:
+            parts.append(f"## Web context\n\n{encode({'web_results': self.web_items}, format_name)}")
+        if self.memory_items:
+            parts.append(f"## Memory context\n\n{encode({'memory_chunks': self.memory_items}, format_name)}")
+        return "\n\n".join(parts)
+
+
+@dataclass(frozen=True)
+class _ContextRetryState:
+    """Carries what `_execute_plan`'s primary step needs to attempt the
+    TOON->JSON fallback retry, without threading five separate parameters
+    through the reroute-recursive call (which deliberately does NOT get
+    one of these: reroute reuses the already-assembled prompt as-is, see
+    `_try_reroute`)."""
+
+    gathered: GatheredContext
+    format_name: str
+    base_prompt: str
+    primary_model: Optional[ModelCatalogEntry]
+    forced: bool
+
+    @property
+    def eligible_for_json_fallback(self) -> bool:
+        # Only an *unpinned* model auto-tries JSON after a TOON failure: a
+        # pin is a manual decision, it's never silently overridden. A
+        # forced format (layer 3) is the caller's explicit choice for this
+        # one call -- "se ele forçou... utiliza normal, acabou", no auto
+        # fallback either. And there's nothing to fall back *from* unless
+        # TOON was actually what got used.
+        return (
+            not self.forced
+            and self.format_name == TOON
+            and self.primary_model is not None
+            and not has_active_context_format_pin(self.primary_model)
+        )
 
 
 @dataclass(frozen=True)
@@ -86,8 +142,10 @@ class Executor:
     `selections` actually contain.
 
     Retrieval (web + memory) is assembled here, once per request, and
-    prepended to the prompt every step sees: it's the "optional RAG" stage
-    of the pipeline described in docs/specs.md, right before the model call.
+    encoded (TOON by default, per the destination model's preference --
+    issues #14/#15/#16) into the prompt every step sees: it's the "optional
+    RAG" stage of the pipeline described in docs/specs.md, right before the
+    model call.
     """
 
     def __init__(
@@ -98,6 +156,7 @@ class Executor:
         router: Optional[Router] = None,
         web_retrieval: Optional[WebRetrievalService] = None,
         hippocampus: Optional[HippocampusClient] = None,
+        registry: Optional[ModelRegistryService] = None,
         max_retries: int = 1,
         max_reroutes: int = 1,
     ) -> None:
@@ -107,6 +166,7 @@ class Executor:
         self._router = router
         self._web_retrieval = web_retrieval
         self._hippocampus = hippocampus
+        self._registry = registry
         self._max_retries = max_retries
         self._max_reroutes = max_reroutes
 
@@ -114,20 +174,37 @@ class Executor:
         if not plan.selections:
             raise UnresolvedStrategyError(plan.strategy_id)
 
-        retrieval, context_prefix = await self._gather_context(plan)
-        if context_prefix:
-            plan = replace(plan, prompt=f"{context_prefix}\n\n{plan.prompt}")
+        gathered = await self._gather_context(plan)
+        primary_model = self._lookup_model(plan.selections[0].model_id)
+        format_name = resolve_context_format(primary_model, plan.context_format)
 
-        return await self._execute_plan(plan, retrieval, reroutes_left=self._max_reroutes)
+        context_retry: Optional[_ContextRetryState] = None
+        working_plan = plan
+        if not gathered.is_empty:
+            context_text = gathered.encode(format_name)
+            if context_text:
+                working_plan = replace(plan, prompt=f"{context_text}\n\n{plan.prompt}")
+            context_retry = _ContextRetryState(
+                gathered=gathered, format_name=format_name, base_prompt=plan.prompt,
+                primary_model=primary_model, forced=plan.context_format is not None,
+            )
+
+        return await self._execute_plan(working_plan, reroutes_left=self._max_reroutes, context_retry=context_retry)
+
+    def _lookup_model(self, model_id: str) -> Optional[ModelCatalogEntry]:
+        if self._registry is None:
+            return None
+        return self._registry.get_model(model_id)
 
     # -- retrieval assembly ---------------------------------------------------
 
-    async def _gather_context(self, plan: ExecutionPlan) -> tuple[RetrievalStats, str]:
+    async def _gather_context(self, plan: ExecutionPlan) -> GatheredContext:
         if not plan.needs_web and not plan.use_memory:
-            return RetrievalStats("none", 0, 0), ""
+            return GatheredContext()
 
         started = monotonic()
-        parts: List[str] = []
+        web_items: List[Dict[str, Any]] = []
+        memory_items: List[Dict[str, Any]] = []
         documents = 0
         used_web = False
         used_memory = False
@@ -136,8 +213,8 @@ class Executor:
             try:
                 loop = asyncio.get_running_loop()
                 web_result = await loop.run_in_executor(None, self._web_retrieval.gather_context, plan.prompt)
-                if web_result.markdown:
-                    parts.append(f"## Web context\n\n{web_result.markdown}")
+                if web_result.items:
+                    web_items = web_result.items
                     documents += len(web_result.sources)
                     used_web = True
             except Exception as exc:
@@ -147,9 +224,8 @@ class Executor:
             try:
                 topic = plan.memory_topic or plan.task_type
                 chunks = await self._hippocampus.search_memory(topic, plan.prompt)
-                memory_md = format_memory_context(chunks)
-                if memory_md:
-                    parts.append(f"## Memory context\n\n{memory_md}")
+                if chunks:
+                    memory_items = [{"topic": c.topic, "content": c.content, "score": c.score} for c in chunks]
                     documents += len(chunks)
                     used_memory = True
             except Exception as exc:
@@ -157,22 +233,39 @@ class Executor:
 
         source = "hybrid" if used_web and used_memory else "web" if used_web else "hippocampus" if used_memory else "none"
         latency_ms = int((monotonic() - started) * 1000)
-        return RetrievalStats(source, documents, latency_ms), "\n\n".join(parts)
+        return GatheredContext(web_items, memory_items, documents, source, latency_ms)
 
     # -- pipeline execution -----------------------------------------------------
 
     async def _execute_plan(
-        self, plan: ExecutionPlan, retrieval: RetrievalStats, reroutes_left: int
+        self,
+        plan: ExecutionPlan,
+        reroutes_left: int,
+        context_retry: Optional[_ContextRetryState] = None,
     ) -> ExecutionResult:
         request_id = str(uuid.uuid4())
         deadline = monotonic() + plan.max_latency_seconds
         steps: List[StepResult] = []
         context = plan.prompt
 
-        for selection in plan.selections:
+        for index, selection in enumerate(plan.selections):
+            is_primary = index == 0
             step = await self._run_step(plan, selection, context, deadline)
+
+            if (
+                is_primary
+                and not step.success
+                and context_retry is not None
+                and context_retry.eligible_for_json_fallback
+            ):
+                self._log_step(plan, request_id, selection, step, context_retry.gathered, context_retry.format_name)
+                step = await self._retry_with_json_context(plan, selection, context, deadline, context_retry, request_id)
+            else:
+                gathered = context_retry.gathered if context_retry is not None else None
+                step_format = context_retry.format_name if (is_primary and context_retry is not None) else None
+                self._log_step(plan, request_id, selection, step, gathered, step_format)
+
             steps.append(step)
-            self._log_step(plan, request_id, selection, step, retrieval)
 
             if selection.role != "primary":
                 continue
@@ -180,16 +273,48 @@ class Executor:
                 context = step.response_text or context
                 continue
 
-            # Primary failed: refining/critiquing a failure serves no purpose.
+            # Primary failed (possibly after the JSON fallback above):
+            # refining/critiquing a failure serves no purpose.
             if step.error_type == "rate_limit":
                 self._quota_tracker.enter_cooldown(selection.model_id, reason=step.error_message)
                 if self._router is not None and reroutes_left > 0:
                     rerouted = self._try_reroute(plan)
                     if rerouted is not None:
-                        return await self._execute_plan(rerouted, retrieval, reroutes_left - 1)
+                        # No context_retry passed along: reroute reuses the
+                        # already-assembled prompt as-is rather than
+                        # re-gathering/re-optimizing format for the new model.
+                        return await self._execute_plan(rerouted, reroutes_left - 1)
             break
 
         return self._build_result(plan, request_id, steps)
+
+    async def _retry_with_json_context(
+        self,
+        plan: ExecutionPlan,
+        selection: ModelSelection,
+        context: str,
+        deadline: float,
+        context_retry: _ContextRetryState,
+        request_id: str,
+    ) -> StepResult:
+        """The "erro de comunicação" fallback: a TOON-context primary step
+        failed on a model with no pin, so try once more with the exact same
+        gathered data re-encoded as JSON. Success here means the model
+        genuinely does better with JSON, so it's persisted (issue #15's
+        `context_format_computed`) -- the next call to this model skips
+        straight to JSON instead of repeating a TOON attempt that already
+        failed once ("evitar erro de múltiplos try")."""
+        json_context = context_retry.gathered.encode(JSON)
+        retry_prompt = f"{json_context}\n\n{context_retry.base_prompt}" if json_context else context_retry.base_prompt
+        retry_plan = replace(plan, prompt=retry_prompt)
+
+        retry_step = await self._run_step(retry_plan, selection, context, deadline)
+        self._log_step(plan, request_id, selection, retry_step, context_retry.gathered, JSON)
+
+        if retry_step.success and context_retry.primary_model is not None and self._registry is not None:
+            self._registry.set_context_format_computed(context_retry.primary_model.id, JSON)
+
+        return retry_step
 
     def _try_reroute(self, plan: ExecutionPlan) -> Optional[ExecutionPlan]:
         assert self._router is not None
@@ -269,7 +394,8 @@ class Executor:
         request_id: str,
         selection: ModelSelection,
         step: StepResult,
-        retrieval: RetrievalStats,
+        gathered: Optional[GatheredContext],
+        context_format: Optional[str] = None,
     ) -> None:
         now = datetime.now(timezone.utc)
         event = TelemetryEvent(
@@ -291,10 +417,18 @@ class Executor:
             latency_ms=step.latency_ms,
             success=step.success,
             error_type=step.error_type,
-            retrieval_source=retrieval.source,
-            retrieval_documents=retrieval.documents,
-            retrieval_latency_ms=retrieval.latency_ms,
+            retrieval_source=gathered.source if gathered else "none",
+            retrieval_documents=gathered.documents if gathered else 0,
+            retrieval_latency_ms=gathered.gather_latency_ms if gathered else 0,
             estimated_cost_usd=step.cost_usd,
+            # context_format is only set for the step(s) that actually used
+            # an encoded context block (issues #15/#16); context_type mirrors
+            # retrieval_source for that same step -- kept as its own column
+            # since it answers a different question (what format was used
+            # for this *kind* of context) than retrieval_source does (did
+            # retrieval happen, and how).
+            context_format=context_format,
+            context_type=(gathered.source if gathered and gathered.source != "none" else None),
         )
         self._telemetry.record_async(event)
 
@@ -363,6 +497,7 @@ def build_default_executor(settings: Optional[Settings] = None) -> Executor:
         router=build_default_router(settings=settings),
         web_retrieval=build_default_web_retrieval_service(settings=settings),
         hippocampus=build_default_hippocampus_client(settings=settings),
+        registry=build_default_registry_service(settings=settings),
         max_retries=settings.executor_max_retries,
         max_reroutes=settings.executor_max_reroutes,
     )
