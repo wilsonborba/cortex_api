@@ -5,6 +5,7 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, Field
 
 from lib.engine.executor import ExecutionResult, StepResult
+from lib.presentation.api.schemas.attachments import Attachment
 
 
 class ExecuteRequest(BaseModel):
@@ -20,6 +21,7 @@ class ExecuteRequest(BaseModel):
     force_context_format: Optional[str] = Field(
         default=None, description="'toon' or 'json' -- overrides the model's auto/pinned preference for this call"
     )
+    attachments: List[Attachment] = Field(default_factory=list)
 
 
 class StepOut(BaseModel):

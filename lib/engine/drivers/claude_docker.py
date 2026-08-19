@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from lib.engine.drivers.base import DriverResult, failed, looks_like_rate_limit, parse_json_or_none
 
@@ -21,7 +21,8 @@ class ClaudeDockerDriver:
         self._timeout = timeout
         self._runner = runner or subprocess.run
 
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images: Optional[List[str]] = None) -> DriverResult:
+        # `images` unused: not verified that the `claude-docker` CLI accepts a file/image attachment.
         try:
             result = self._runner(
                 [self._command, "-p", prompt, "--output-format", "json", "--model", model],

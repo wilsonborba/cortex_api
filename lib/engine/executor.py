@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 import uuid
 from dataclasses import dataclass, field, replace
@@ -40,6 +41,7 @@ from lib.engine.retrieval.service import WebRetrievalService, build_default_web_
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError, Router, RoutingRequest, build_default_router
 from lib.engine.telemetry import TelemetryLogger
 from lib.core.text_sanitize import sanitize_text
+from lib.engine.attachments import AttachmentIngestor, IngestedAttachments, build_default_attachment_ingestor
 
 logger = get_logger(__name__)
 
@@ -182,6 +184,7 @@ class Executor:
         max_reroutes: int = 1,
         max_critic_revisions: int = 1,
         sanitize_enabled: bool = True,
+        attachment_ingestor: Optional[AttachmentIngestor] = None,
     ) -> None:
         self._drivers = drivers
         self._quota_tracker = quota_tracker
@@ -194,27 +197,58 @@ class Executor:
         self._max_reroutes = max_reroutes
         self._max_critic_revisions = max_critic_revisions
         self._sanitize_enabled = sanitize_enabled
+        self._attachment_ingestor = attachment_ingestor or build_default_attachment_ingestor()
 
     async def execute(self, plan: ExecutionPlan) -> ExecutionResult:
         if not plan.selections:
             raise UnresolvedStrategyError(plan.strategy_id)
 
-        gathered = await self._gather_context(plan)
         primary_model = self._lookup_model(plan.selections[0].model_id)
+
+        ingested = IngestedAttachments()
+        if plan.attachments:
+            vision_capable = bool(primary_model and primary_model.capabilities.get("vision", False))
+            loop = asyncio.get_running_loop()
+            ingested = await loop.run_in_executor(
+                None, lambda: self._attachment_ingestor.ingest(plan.attachments, model_is_vision_capable=vision_capable)
+            )
+            if not ingested.ok:
+                return ExecutionResult(
+                    request_id=str(uuid.uuid4()), tier_requested=plan.tier, tier_executed=plan.tier,
+                    strategy_id=plan.strategy_id, task_type=plan.task_type, success=False,
+                    response_text="; ".join(ingested.errors), error_type="attachment_error",
+                )
+            if ingested.text_context and self._hippocampus is not None and plan.use_memory:
+                try:
+                    await self._hippocampus.store_event(
+                        topic=plan.memory_topic or plan.task_type,
+                        key=f"attachment:{plan.attachments[0].filename}",
+                        value=ingested.text_context,
+                    )
+                except Exception as exc:
+                    logger.warning("failed to store attachment transcript in memory: %s", exc)
+
+        gathered = await self._gather_context(plan)
         format_name = resolve_context_format(primary_model, plan.context_format)
 
         context_retry: Optional[_ContextRetryState] = None
-        working_plan = plan
+        prompt = plan.prompt
+        if ingested.text_context:
+            prompt = f"## Attachment context\n\n{ingested.text_context}\n\n{prompt}"
+        working_plan = replace(plan, prompt=prompt) if prompt != plan.prompt else plan
         if not gathered.is_empty:
             context_text = gathered.encode(format_name)
             if context_text:
-                working_plan = replace(plan, prompt=f"{context_text}\n\n{plan.prompt}")
+                working_plan = replace(working_plan, prompt=f"{context_text}\n\n{working_plan.prompt}")
             context_retry = _ContextRetryState(
-                gathered=gathered, format_name=format_name, base_prompt=plan.prompt,
+                gathered=gathered, format_name=format_name, base_prompt=working_plan.prompt,
                 primary_model=primary_model, forced=plan.context_format is not None,
             )
 
-        return await self._execute_plan(working_plan, reroutes_left=self._max_reroutes, context_retry=context_retry)
+        return await self._execute_plan(
+            working_plan, reroutes_left=self._max_reroutes, context_retry=context_retry,
+            images=ingested.image_data_uris,
+        )
 
     def _lookup_model(self, model_id: str) -> Optional[ModelCatalogEntry]:
         if self._registry is None:
@@ -267,6 +301,7 @@ class Executor:
         plan: ExecutionPlan,
         reroutes_left: int,
         context_retry: Optional[_ContextRetryState] = None,
+        images: Optional[List[str]] = None,
     ) -> ExecutionResult:
         request_id = str(uuid.uuid4())
         deadline = monotonic() + plan.max_latency_seconds
@@ -281,7 +316,9 @@ class Executor:
 
         for index, selection in enumerate(plan.selections):
             is_primary = index == 0
-            step = await self._run_step(plan, selection, context, deadline, draft=draft_text)
+            step = await self._run_step(
+                plan, selection, context, deadline, draft=draft_text, images=images if is_primary else None
+            )
 
             if (
                 is_primary
@@ -335,7 +372,7 @@ class Executor:
                         # No context_retry passed along: reroute reuses the
                         # already-assembled prompt as-is rather than
                         # re-gathering/re-optimizing format for the new model.
-                        return await self._execute_plan(rerouted, reroutes_left - 1)
+                        return await self._execute_plan(rerouted, reroutes_left - 1, images=images)
             break
 
         return self._build_result(plan, request_id, steps)
@@ -438,6 +475,7 @@ class Executor:
         deadline: float,
         draft: Optional[str] = None,
         feedback: Optional[str] = None,
+        images: Optional[List[str]] = None,
     ) -> StepResult:
         driver = self._drivers.get(selection.provider)
         if driver is None:
@@ -465,7 +503,8 @@ class Executor:
                 break
             try:
                 result = await asyncio.wait_for(
-                    loop.run_in_executor(None, driver.run, bare_model, prompt), timeout=remaining
+                    loop.run_in_executor(None, functools.partial(driver.run, bare_model, prompt, images=images)),
+                    timeout=remaining
                 )
             except asyncio.TimeoutError:
                 # The thread may still be running underneath (drivers use

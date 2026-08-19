@@ -192,6 +192,26 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_SANITIZE_PROVIDER_TEXT", "SANITIZE_PROVIDER_TEXT"),
     )
 
+    # Attachments: local audio transcription + local vision model
+    whisper_local_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CORTEX_WHISPER_LOCAL_ENABLED", "WHISPER_LOCAL_ENABLED"),
+    )
+    whisper_local_model: str = Field(
+        default="large-v3-turbo-q5_0",
+        validation_alias=AliasChoices("CORTEX_WHISPER_LOCAL_MODEL", "WHISPER_LOCAL_MODEL"),
+    )
+    whisper_models_dir: str = Field(
+        default="var/whisper-models",
+        validation_alias=AliasChoices("CORTEX_WHISPER_MODELS_DIR", "WHISPER_MODELS_DIR"),
+    )
+    # Resolved once by the setup process (ollama pull qwen2.5vl:7b, falling
+    # back to llava:7b) -- never two vision models installed/used at once.
+    vision_model: str = Field(
+        default="qwen2.5vl:7b",
+        validation_alias=AliasChoices("CORTEX_VISION_MODEL", "VISION_MODEL"),
+    )
+
     # REST API
     cors_allow_origins: list[str] = Field(
         default_factory=lambda: ["*"],

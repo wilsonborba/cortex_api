@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from lib.engine.attachments import Attachment
 from lib.engine.executor import Executor
 from lib.engine.format import ENCODERS
 from lib.engine.router import Router, RoutingRequest
@@ -33,6 +34,10 @@ async def execute(
         force_provider=payload.force_provider,
         force_strategy=payload.override_strategy,
         force_context_format=payload.force_context_format,
+        attachments=[
+            Attachment(filename=a.filename, mime_type=a.mime_type, data_base64=a.data_base64)
+            for a in payload.attachments
+        ],
     )
     # NoEligibleModelError / UnresolvedStrategyError propagate to the
     # app-level exception handlers registered in lib.presentation.api.app.

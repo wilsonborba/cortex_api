@@ -141,6 +141,19 @@ class ModelRegistryService:
     def set_context_format_computed(self, model_id: str, format_name: str) -> Optional[ModelCatalogEntry]:
         return self._repository.set_context_format_computed(model_id, format_name)
 
+    # -- vision capability (image attachments) --------------------------------
+
+    def set_vision_capable(self, model_id: str, is_vision_capable: bool) -> Optional[ModelCatalogEntry]:
+        """Marks whether `model_id` accepts image input. Not populated from
+        live discovery -- an operator opts a model in explicitly, since most
+        free-tier providers don't support vision even when their API is
+        otherwise OpenAI-compatible."""
+        return self._repository.set_vision_capable(model_id, is_vision_capable)
+
+    @staticmethod
+    def is_vision_capable(model: ModelCatalogEntry) -> bool:
+        return bool(model.capabilities.get("vision", False))
+
     # -- live discovery / sync --------------------------------------------------
 
     def sync(self, providers: Optional[Iterable[str]] = None) -> List[ModelCatalogEntry]:

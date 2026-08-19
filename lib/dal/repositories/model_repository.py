@@ -178,6 +178,20 @@ class ModelRepository:
         with session_scope(self._session_factory) as s:
             return _update(s)
 
+    def set_vision_capable(
+        self, model_id: str, is_vision_capable: bool, session: Optional[Session] = None
+    ) -> Optional[ModelCatalogEntry]:
+        def _update(s: Session) -> Optional[ModelCatalogEntry]:
+            m = s.get(ModelCatalogEntry, model_id)
+            if m:
+                m.capabilities = {**m.capabilities, "vision": is_vision_capable}
+            return m
+
+        if session:
+            return _update(session)
+        with session_scope(self._session_factory) as s:
+            return _update(s)
+
     def update_config(
         self,
         model_id: str,

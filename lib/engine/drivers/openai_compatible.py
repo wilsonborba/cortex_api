@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import httpx
 
@@ -31,9 +31,15 @@ class OpenAICompatibleDriver:
         self._timeout = timeout
         self._client_factory = client_factory or (lambda: httpx.Client(timeout=self._timeout))
 
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images: Optional[List[str]] = None) -> DriverResult:
         if not self._api_key:
             return failed("unreachable", f"{self.provider}: no API key configured")
+
+        content: object = prompt
+        if images:
+            content = [{"type": "text", "text": prompt}] + [
+                {"type": "image_url", "image_url": {"url": data_uri}} for data_uri in images
+            ]
 
         started = time.monotonic()
         try:
@@ -41,7 +47,7 @@ class OpenAICompatibleDriver:
                 response = client.post(
                     f"{self._base_url}{self._chat_path}",
                     headers=self._headers(),
-                    json={"model": model, "messages": [{"role": "user", "content": prompt}]},
+                    json={"model": model, "messages": [{"role": "user", "content": content}]},
                 )
                 response.raise_for_status()
                 data = response.json()

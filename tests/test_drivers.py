@@ -11,6 +11,7 @@ from lib.engine.drivers.agy_docker import AgyDockerDriver
 from lib.engine.drivers.claude_docker import ClaudeDockerDriver
 from lib.engine.drivers.codex import CodexDriver
 from lib.engine.drivers.ollama import OllamaDriver
+from lib.engine.drivers.openai_compatible import OpenAICompatibleDriver
 
 
 def _completed(stdout: str = "", stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess:
@@ -67,6 +68,67 @@ def test_ollama_driver_parses_real_generate_payload():
     assert result.input_tokens == 39
     assert result.output_tokens == 2
     assert result.latency_ms == 11691  # total_duration (ns) / 1_000_000
+
+
+class _CapturingClient:
+    """Records the JSON body of the last POST and replies with `payload`."""
+
+    def __init__(self, payload: Any, status_code: int = 200) -> None:
+        self._payload = payload
+        self._status_code = status_code
+        self.last_json: Any = None
+
+    def __enter__(self) -> "_CapturingClient":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        return None
+
+    def post(self, url: str, json: dict | None = None, headers: dict | None = None, **kwargs: Any) -> _FakeResponse:  # noqa: A002
+        self.last_json = json
+        return _FakeResponse(self._payload, self._status_code)
+
+
+def test_ollama_driver_includes_images_field_when_given():
+    client = _CapturingClient({"response": "ok"})
+    driver = OllamaDriver(base_url="http://localhost:11434", client_factory=lambda: client)
+
+    driver.run("qwen2.5vl:7b", "describe this", images=["data:image/png;base64,AAAA"])
+
+    assert client.last_json["images"] == ["AAAA"]  # data: prefix stripped for Ollama's native field
+
+
+def test_ollama_driver_omits_images_field_when_none_given():
+    client = _CapturingClient({"response": "ok"})
+    driver = OllamaDriver(base_url="http://localhost:11434", client_factory=lambda: client)
+
+    driver.run("dolphin3:8b", "hello")
+
+    assert "images" not in client.last_json
+
+
+def test_openai_compatible_driver_sends_image_url_content_array():
+    client = _CapturingClient({"choices": [{"message": {"content": "a red pixel"}}], "usage": {}})
+    driver = OpenAICompatibleDriver(
+        provider="test", base_url="http://fake", api_key="key", client_factory=lambda: client
+    )
+
+    driver.run("some-vision-model", "what is this?", images=["data:image/png;base64,AAAA"])
+
+    content = client.last_json["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "what is this?"}
+    assert content[1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+
+def test_openai_compatible_driver_sends_plain_string_content_without_images():
+    client = _CapturingClient({"choices": [{"message": {"content": "hi"}}], "usage": {}})
+    driver = OpenAICompatibleDriver(
+        provider="test", base_url="http://fake", api_key="key", client_factory=lambda: client
+    )
+
+    driver.run("some-model", "hello")
+
+    assert client.last_json["messages"][0]["content"] == "hello"
 
 
 def test_ollama_driver_maps_429_to_rate_limit():

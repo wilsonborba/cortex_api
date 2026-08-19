@@ -26,7 +26,8 @@ class CodexDriver:
         self._timeout = timeout
         self._runner = runner or subprocess.run
 
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images: Optional[List[str]] = None) -> DriverResult:
+        # `images` unused: not verified that the `codex` CLI accepts a file/image attachment.
         try:
             result = self._runner(
                 [self._command, "exec", "--json", "-m", model, prompt],

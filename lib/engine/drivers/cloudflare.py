@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import httpx
 
@@ -30,7 +30,7 @@ class CloudflareDriver(OpenAICompatibleDriver):
             provider="cloudflare", base_url=base_url, api_key=api_key, timeout=timeout, client_factory=client_factory
         )
 
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images: Optional[List[str]] = None) -> DriverResult:
         if not self._account_id:
             return failed("unreachable", "cloudflare: no account id configured")
-        return super().run(model, prompt)
+        return super().run(model, prompt, images=images)

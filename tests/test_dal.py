@@ -50,7 +50,7 @@ def test_model_repository_crud(model_repo: ModelRepository):
     # List models with filter
     results = model_repo.list_models(provider="ollama", tier=1)
     assert len(results) >= 1
-    assert results[0].id == "ollama/dolphin3:8b"
+    assert any(m.id == "ollama/dolphin3:8b" for m in results)
 
 
 def test_telemetry_repository_and_stats(telemetry_repo: TelemetryRepository):

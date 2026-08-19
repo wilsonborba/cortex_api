@@ -30,6 +30,9 @@ postgres = [
 crawler = [
   "crawl4ai>=0.4,<1",
 ]
+media = [
+  "pywhispercpp>=1.3,<2",
+]
 dev = [
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<1",

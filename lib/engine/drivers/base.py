@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol
+from typing import Any, List, Optional, Protocol
 
 # Structured-output errors only: no free-text scraping. A driver falls back to
 # these markers only when a CLI/HTTP call fails outright and there's no JSON
@@ -61,8 +61,13 @@ class ExecutionDriver(Protocol):
 
     provider: str
 
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images: Optional[List[str]] = None) -> DriverResult:
         """Executes `prompt` against `model` non-interactively and returns
         structured token/latency/cost usage parsed from the provider's own
-        JSON output (never regex over free text)."""
+        JSON output (never regex over free text).
+
+        `images`, when given, is a list of `data:<mime>;base64,<data>` URIs
+        (already-encoded, ready to embed). Only drivers that genuinely
+        support a vision input path use it; every other driver accepts and
+        ignores it so the Executor can call every driver the same way."""
         ...

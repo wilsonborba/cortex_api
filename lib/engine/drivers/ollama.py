@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 import httpx
 
@@ -22,13 +22,14 @@ class OllamaDriver:
         self._timeout = timeout
         self._client_factory = client_factory or (lambda: httpx.Client(timeout=self._timeout))
 
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images: Optional[List[str]] = None) -> DriverResult:
+        body: dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
+        if images:
+            body["images"] = [_strip_data_uri_prefix(img) for img in images]
+
         try:
             with self._client_factory() as client:
-                response = client.post(
-                    f"{self._base_url}/api/generate",
-                    json={"model": model, "prompt": prompt, "stream": False},
-                )
+                response = client.post(f"{self._base_url}/api/generate", json=body)
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as exc:
@@ -45,3 +46,10 @@ class OllamaDriver:
             latency_ms=int((data.get("total_duration", 0) or 0) / 1_000_000),
             raw=data,
         )
+
+
+def _strip_data_uri_prefix(image: str) -> str:
+    """Ollama's `images` field wants raw base64, no `data:` URI prefix."""
+    if image.startswith("data:") and "," in image:
+        return image.split(",", 1)[1]
+    return image

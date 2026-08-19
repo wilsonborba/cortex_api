@@ -55,7 +55,7 @@ class _ScriptedDriver:
         self._results = results
         self.calls: List[tuple] = []
 
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images=None) -> DriverResult:
         self.calls.append((model, prompt))
         index = min(len(self.calls) - 1, len(self._results) - 1)
         return self._results[index]

@@ -10,9 +10,11 @@ from lib.dal.models import AccessStatus, ModelCatalogEntry
 from lib.dal.repositories.model_repository import ModelRepository
 from lib.dal.repositories.quota_repository import QuotaRepository
 from lib.dal.repositories.telemetry_repository import TelemetryRepository
+from lib.engine.attachments import Attachment, AttachmentIngestor
 from lib.engine.drivers.base import DriverResult
 from lib.engine.executor import Executor, UnresolvedStrategyError, _bare_model_name
 from lib.engine.quota import QuotaTracker
+from lib.engine.registry_service import ModelRegistryService
 from lib.engine.retrieval.hippocampus import MemoryChunk
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError
 from lib.engine.telemetry import TelemetryLogger
@@ -65,14 +67,14 @@ class _ScriptedDriver:
         self._results = results
         self.calls: List[tuple] = []
 
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images=None) -> DriverResult:
         self.calls.append((model, prompt))
         index = min(len(self.calls) - 1, len(self._results) - 1)
         return self._results[index]
 
 
 class _NeverCalledDriver:
-    def run(self, model: str, prompt: str) -> DriverResult:
+    def run(self, model: str, prompt: str, images=None) -> DriverResult:
         raise AssertionError("driver.run() should not have been called")
 
 
@@ -131,13 +133,14 @@ def _plan(
     needs_web: bool = False,
     use_memory: bool = False,
     memory_topic: Optional[str] = None,
+    attachments: Optional[List[Attachment]] = None,
 ) -> ExecutionPlan:
     return ExecutionPlan(
         tier=tier, task_type="general", strategy_id="general_t1_dynamic", prompt="explain sqlite",
         selections=selections, allow_multi_model=len(selections) > 1, retrieval_mode="none",
         needs_web=needs_web, use_memory=use_memory, memory_topic=memory_topic, require_verification=False,
         max_latency_seconds=max_latency_seconds, max_model_calls=max(1, len(selections)),
-        source="dynamic", reason="test",
+        source="dynamic", reason="test", attachments=attachments or [],
     )
 
 
@@ -152,11 +155,14 @@ def _executor(
     max_reroutes: int = 1,
     max_critic_revisions: int = 1,
     sanitize_enabled: bool = True,
+    registry=None,
+    attachment_ingestor=None,
 ) -> Executor:
     return Executor(
         drivers=drivers, quota_tracker=quota_tracker, telemetry=telemetry, router=router,
         web_retrieval=web_retrieval, hippocampus=hippocampus, max_retries=max_retries, max_reroutes=max_reroutes,
         max_critic_revisions=max_critic_revisions, sanitize_enabled=sanitize_enabled,
+        registry=registry, attachment_ingestor=attachment_ingestor,
     )
 
 
@@ -221,6 +227,102 @@ async def test_response_text_untouched_when_sanitize_disabled(quota_tracker_, te
     result = await executor.execute(plan)
 
     assert result.response_text == "Hello​World"
+
+
+# --- attachment ingestion ----------------------------------------------------
+
+
+def _seed_model(model_id: str, **overrides) -> ModelCatalogEntry:
+    repo = ModelRepository()
+    defaults = dict(
+        provider="execA", display_name="model", access_status=AccessStatus.AVAILABLE.value,
+        context_window=8192, is_local=True, tier_eligibility=[1], capabilities={},
+        cost_per_million_tokens=0.0, is_enabled=True,
+    )
+    defaults.update(overrides)
+    return repo.upsert(ModelCatalogEntry(id=model_id, **defaults))
+
+
+def _audio_attachment() -> Attachment:
+    return Attachment(filename="note.wav", mime_type="audio/wav", data_base64="ZmFrZQ==")
+
+
+def _image_attachment() -> Attachment:
+    return Attachment(filename="photo.png", mime_type="image/png", data_base64="ZmFrZQ==")
+
+
+class _FakeIngestor:
+    def __init__(self, result) -> None:
+        self._result = result
+
+    def ingest(self, attachments, *, model_is_vision_capable: bool = False):
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_audio_attachment_transcript_is_injected_into_prompt(quota_tracker_, telemetry_):
+    from lib.engine.attachments import IngestedAttachments
+
+    _seed_model("execA/model")
+    driver = _ScriptedDriver([_success("ok")])
+    ingestor = _FakeIngestor(IngestedAttachments(text_context="the audio said hello"))
+    registry = ModelRegistryService(discoveries=[], repository=ModelRepository())
+    executor = _executor(
+        {"execA": driver}, quota_tracker_, telemetry_, registry=registry, attachment_ingestor=ingestor
+    )
+    plan = _plan(
+        [ModelSelection(model_id="execA/model", provider="execA", role="primary")],
+        attachments=[_audio_attachment()],
+    )
+
+    result = await executor.execute(plan)
+
+    assert result.success is True
+    assert "the audio said hello" in driver.calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_image_attachment_error_aborts_execution_without_calling_driver(quota_tracker_, telemetry_):
+    from lib.engine.attachments import IngestedAttachments
+
+    _seed_model("execA/model")
+    driver = _NeverCalledDriver()
+    ingestor = _FakeIngestor(IngestedAttachments(errors=["attachment 'photo.png' is not vision-capable"]))
+    registry = ModelRegistryService(discoveries=[], repository=ModelRepository())
+    executor = _executor(
+        {"execA": driver}, quota_tracker_, telemetry_, registry=registry, attachment_ingestor=ingestor
+    )
+    plan = _plan(
+        [ModelSelection(model_id="execA/model", provider="execA", role="primary")],
+        attachments=[_image_attachment()],
+    )
+
+    result = await executor.execute(plan)
+
+    assert result.success is False
+    assert result.error_type == "attachment_error"
+    assert "not vision-capable" in result.response_text
+
+
+@pytest.mark.asyncio
+async def test_image_attachment_passed_to_primary_driver_call(quota_tracker_, telemetry_):
+    from lib.engine.attachments import IngestedAttachments
+
+    _seed_model("execA/model", capabilities={"vision": True})
+    driver = _ScriptedDriver([_success("it's a cat")])
+    ingestor = _FakeIngestor(IngestedAttachments(image_data_uris=["data:image/png;base64,ZmFrZQ=="]))
+    registry = ModelRegistryService(discoveries=[], repository=ModelRepository())
+    executor = _executor(
+        {"execA": driver}, quota_tracker_, telemetry_, registry=registry, attachment_ingestor=ingestor
+    )
+    plan = _plan(
+        [ModelSelection(model_id="execA/model", provider="execA", role="primary")],
+        attachments=[_image_attachment()],
+    )
+
+    result = await executor.execute(plan)
+
+    assert result.success is True
 
 
 @pytest.mark.asyncio

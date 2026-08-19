@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Union
 
 from lib.core.settings import Settings, get_settings
+from lib.engine.attachments import Attachment
 from lib.dal.models import ModelCatalogEntry, RoutingPin, TierPolicy
 from lib.dal.repositories.pin_repository import RoutingPinRepository
 from lib.engine.classifier import classify_complexity, extract_tier_directive
@@ -53,6 +54,7 @@ class ExecutionPlan:
     source: str  # "override" | "pin" | "dynamic"
     reason: str
     context_format: Optional[str] = None  # layer-3 force (#16); None => Executor resolves it itself
+    attachments: List[Attachment] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,7 @@ class RoutingRequest:
     force_provider: Optional[str] = None
     force_strategy: Optional[str] = None
     force_context_format: Optional[str] = None  # "toon" | "json" (#16): overrides the per-model auto/pin default
+    attachments: List[Attachment] = field(default_factory=list)
 
 
 class NoEligibleModelError(RuntimeError):
@@ -264,6 +267,7 @@ class Router:
             source=source,
             reason=reason,
             context_format=request.force_context_format,
+            attachments=request.attachments,
         )
 
 
