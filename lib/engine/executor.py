@@ -13,10 +13,25 @@ from lib.core.settings import Settings, get_settings
 from lib.dal.models import ModelCatalogEntry, TelemetryEvent
 from lib.engine.context_format import has_active_context_format_pin, resolve_context_format
 from lib.engine.drivers.agy_docker import AgyDockerDriver
+from lib.engine.drivers.aion_labs import AionLabsDriver
 from lib.engine.drivers.base import DriverResult, ExecutionDriver
 from lib.engine.drivers.claude_docker import ClaudeDockerDriver
+from lib.engine.drivers.cloudflare import CloudflareDriver
 from lib.engine.drivers.codex import CodexDriver
+from lib.engine.drivers.cohere import CohereDriver
+from lib.engine.drivers.google_ai_studio import GoogleAIStudioDriver
+from lib.engine.drivers.groq import GroqDriver
+from lib.engine.drivers.huggingface import HuggingFaceDriver
+from lib.engine.drivers.inference_net import InferenceNetDriver
+from lib.engine.drivers.mistral import MistralDriver
+from lib.engine.drivers.nvidia import NvidiaDriver
 from lib.engine.drivers.ollama import OllamaDriver
+from lib.engine.drivers.ollama_cloud import OllamaCloudDriver
+from lib.engine.drivers.openrouter import OpenRouterDriver
+from lib.engine.drivers.requesty import RequestyDriver
+from lib.engine.drivers.sambanova import SambaNovaDriver
+from lib.engine.drivers.siliconflow import SiliconFlowDriver
+from lib.engine.drivers.zai import ZaiDriver
 from lib.engine.format import JSON, TOON, encode
 from lib.engine.quota import QuotaTracker
 from lib.engine.registry_service import ModelRegistryService, build_default_registry_service
@@ -628,6 +643,35 @@ def build_default_drivers(settings: Optional[Settings] = None) -> Dict[str, Exec
         "claude": ClaudeDockerDriver(command=settings.claude_docker_command, timeout=settings.driver_timeout_seconds),
         "agy": AgyDockerDriver(command=settings.agy_docker_command, timeout=settings.driver_timeout_seconds),
         "codex": CodexDriver(command=settings.codex_command, timeout=settings.driver_timeout_seconds),
+        "groq": GroqDriver(api_key=settings.groq_api_key, timeout=settings.driver_timeout_seconds),
+        "google_ai_studio": GoogleAIStudioDriver(
+            api_key=settings.google_ai_studio_api_key, timeout=settings.driver_timeout_seconds
+        ),
+        "openrouter": OpenRouterDriver(api_key=settings.openrouter_api_key, timeout=settings.driver_timeout_seconds),
+        "cloudflare": CloudflareDriver(
+            api_key=settings.cloudflare_api_key,
+            account_id=settings.cloudflare_account_id,
+            timeout=settings.driver_timeout_seconds,
+        ),
+        "cohere": CohereDriver(api_key=settings.cohere_api_key, timeout=settings.driver_timeout_seconds),
+        "mistral": MistralDriver(api_key=settings.mistral_api_key, timeout=settings.driver_timeout_seconds),
+        "nvidia": NvidiaDriver(api_key=settings.nvidia_api_key, timeout=settings.driver_timeout_seconds),
+        "zai": ZaiDriver(api_key=settings.zai_api_key, timeout=settings.driver_timeout_seconds),
+        "requesty": RequestyDriver(api_key=settings.requesty_api_key, timeout=settings.driver_timeout_seconds),
+        "huggingface": HuggingFaceDriver(
+            api_key=settings.huggingface_api_key, timeout=settings.driver_timeout_seconds
+        ),
+        "ollama_cloud": OllamaCloudDriver(
+            api_key=settings.ollama_cloud_api_key, timeout=settings.driver_timeout_seconds
+        ),
+        "aion_labs": AionLabsDriver(api_key=settings.aion_labs_api_key, timeout=settings.driver_timeout_seconds),
+        "siliconflow": SiliconFlowDriver(
+            api_key=settings.siliconflow_api_key, timeout=settings.driver_timeout_seconds
+        ),
+        "inference_net": InferenceNetDriver(
+            api_key=settings.inference_net_api_key, timeout=settings.driver_timeout_seconds
+        ),
+        "sambanova": SambaNovaDriver(api_key=settings.sambanova_api_key, timeout=settings.driver_timeout_seconds),
     }
 
 
