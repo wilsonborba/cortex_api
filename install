@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+VENV_DIR="$ROOT_DIR/.venv"
+ENV_FILE="$ROOT_DIR/.env"
+ENV_EXAMPLE="$ROOT_DIR/.env.example"
+PYTHON_BIN=${PYTHON_BIN:-python3}
+SERVICE_NAME="cortex-api"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+CURRENT_USER=$(id -un)
+CURRENT_GROUP=$(id -gn)
+DEFAULT_HOST="127.0.0.1"
+DEFAULT_PORT="8000"
+
+log() {
+  printf '[cortex-install] %s\n' "$1"
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'Missing required command: %s\n' "$1" >&2
+    exit 1
+  fi
+}
+
+env_value() {
+  local key="$1" default="$2"
+  local value
+  value=$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true)
+  printf '%s' "${value:-$default}"
+}
+
+generate_env() {
+  cp "$ENV_EXAMPLE" "$ENV_FILE"
+  log "Generated .env from .env.example -- fill in the provider API keys"
+  log "(see docs/free-tier-adapters-plan.md and docs/providers_api_keys.txt) before relying on cloud models."
+}
+
+install_systemd_service() {
+  local host port
+  host=$(env_value CORTEX_API_HOST "$DEFAULT_HOST")
+  port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
+
+  sudo tee "$SERVICE_FILE" >/dev/null <<EOF
+[Unit]
+Description=Cortex API Service
+After=network.target
+
+[Service]
+Type=simple
+User=${CURRENT_USER}
+Group=${CURRENT_GROUP}
+WorkingDirectory=${ROOT_DIR}
+EnvironmentFile=${ENV_FILE}
+ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${host} --port ${port}
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=027
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable "$SERVICE_NAME"
+  sudo systemctl restart "$SERVICE_NAME"
+}
+
+configure_ufw() {
+  if ! command -v ufw >/dev/null 2>&1; then
+    log "ufw not installed; skipping firewall configuration."
+    return
+  fi
+
+  if ! sudo ufw status | grep -q 'Status: active'; then
+    log "ufw installed but inactive; skipping firewall configuration."
+    return
+  fi
+
+  local port
+  port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
+  sudo ufw allow proto tcp from 10.0.0.0/8 to any port "$port" comment 'cortex-api-lan-10' >/dev/null || true
+  sudo ufw allow proto tcp from 172.16.0.0/12 to any port "$port" comment 'cortex-api-lan-172' >/dev/null || true
+  sudo ufw allow proto tcp from 192.168.0.0/16 to any port "$port" comment 'cortex-api-lan-192' >/dev/null || true
+  sudo ufw deny "$port"/tcp comment 'cortex-api-deny-public' >/dev/null || true
+  log "ufw LAN-only rules ensured for port ${port}."
+}
+
+run_healthcheck() {
+  local port
+  port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
+  "$VENV_DIR/bin/python" - <<PY
+import time
+from urllib.error import URLError
+from urllib.request import urlopen
+
+port = ${port}
+last_error = None
+for _ in range(10):
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/docs", timeout=5) as response:
+            print(f"status {response.status}")
+            break
+    except URLError as exc:
+        last_error = exc
+        time.sleep(1)
+else:
+    raise SystemExit(f"health check failed: {last_error}")
+PY
+}
+
+main() {
+  require_command "$PYTHON_BIN"
+  require_command sudo
+  require_command systemctl
+
+  log "Creating Python virtual environment."
+  if [ ! -d "$VENV_DIR" ]; then
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+  fi
+
+  log "Installing Python dependencies."
+  "$VENV_DIR/bin/pip" install --upgrade pip >/dev/null
+  "$VENV_DIR/bin/pip" install -e "$ROOT_DIR" >/dev/null
+
+  mkdir -p "$ROOT_DIR/var"
+
+  if [ ! -f "$ENV_FILE" ]; then
+    generate_env
+  else
+    log "Using existing .env file."
+  fi
+
+  log "Installing systemd unit."
+  install_systemd_service
+
+  log "Configuring firewall when available."
+  configure_ufw
+
+  log "Running health check."
+  run_healthcheck
+
+  log "Installation complete."
+  log "Service name: ${SERVICE_NAME}"
+}
+
+main "$@"
