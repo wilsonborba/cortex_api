@@ -9,6 +9,8 @@ from lib.engine.quota import QuotaTracker
 from lib.engine.registry_service import ModelRegistryService, build_default_registry_service
 from lib.engine.router import Router, build_default_router
 from lib.engine.tiers import TierService
+from lib.engine.video_ingest import VideoIngestor
+from lib.engine.video_jobs import VideoJobStore, get_default_video_job_store
 
 # One instance per process, same pattern as lib.core.settings.get_settings.
 # Overridable per-test via FastAPI's `app.dependency_overrides[get_x] = ...`.
@@ -47,3 +49,32 @@ def get_router() -> Router:
 @lru_cache(maxsize=1)
 def get_executor() -> Executor:
     return build_default_executor()
+
+
+@lru_cache(maxsize=1)
+def get_video_job_store() -> VideoJobStore:
+    return get_default_video_job_store()
+
+
+def _summarize_via_router(text: str) -> str:
+    """Fuses a video's transcript + frame captions into prose, via the
+    normal Router/Executor pipeline (T1: cheap, no multi-step needed) --
+    not a bespoke summarization component."""
+    import asyncio
+
+    from lib.engine.router import RoutingRequest
+
+    router = get_router()
+    executor = get_executor()
+    prompt = (
+        "Summarize what happens in this video, in a few sentences, using "
+        "only the information below. Do not invent details.\n\n" + text
+    )
+    plan = router.build_execution_plan(RoutingRequest(prompt=prompt, tier=1, task_type="video_summary"))
+    result = asyncio.run(executor.execute(plan))
+    return result.response_text
+
+
+@lru_cache(maxsize=1)
+def get_video_ingestor() -> VideoIngestor:
+    return VideoIngestor(text_summarizer=_summarize_via_router)

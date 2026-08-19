@@ -17,7 +17,7 @@ from lib.engine.quota import QuotaTracker, refresh_and_resync
 from lib.engine.registry_service import build_default_registry_service
 from lib.engine.router import NoEligibleModelError
 from lib.engine.tiers import TierService
-from lib.presentation.api.routes import execute, logs_stream, models, openai_facade, pins, quota, telemetry, tiers
+from lib.presentation.api.routes import execute, logs_stream, models, openai_facade, pins, quota, telemetry, tiers, video
 
 logger = get_logger(__name__)
 
@@ -105,5 +105,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(telemetry.router)
     app.include_router(logs_stream.router)
     app.include_router(openai_facade.router)
+    app.include_router(video.router)
 
     return app

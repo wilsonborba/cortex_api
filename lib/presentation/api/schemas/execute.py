@@ -22,6 +22,9 @@ class ExecuteRequest(BaseModel):
         default=None, description="'toon' or 'json' -- overrides the model's auto/pinned preference for this call"
     )
     attachments: List[Attachment] = Field(default_factory=list)
+    attachment_job_id: Optional[str] = Field(
+        default=None, description="id of a finished /attachments/video job (see #23) whose summary to inject as context"
+    )
 
 
 class StepOut(BaseModel):

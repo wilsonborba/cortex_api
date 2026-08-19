@@ -6,8 +6,9 @@ from lib.engine.attachments import Attachment
 from lib.engine.executor import Executor
 from lib.engine.format import ENCODERS
 from lib.engine.router import Router, RoutingRequest
-from lib.presentation.api.deps import get_executor, get_router
+from lib.presentation.api.deps import get_executor, get_router, get_video_job_store
 from lib.presentation.api.schemas.execute import ExecuteRequest, ExecuteResponse
+from lib.engine.video_jobs import VideoJobStore
 
 router = APIRouter(tags=["execute"])
 
@@ -17,14 +18,28 @@ async def execute(
     payload: ExecuteRequest,
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
+    video_jobs: VideoJobStore = Depends(get_video_job_store),
 ) -> ExecuteResponse:
     if payload.force_context_format is not None and payload.force_context_format not in ENCODERS:
         raise HTTPException(
             status_code=422,
             detail=f"unknown context format {payload.force_context_format!r}; registered: {sorted(ENCODERS)}",
         )
+
+    prompt = payload.prompt
+    if payload.attachment_job_id:
+        job = video_jobs.get(payload.attachment_job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"no video job with id {payload.attachment_job_id!r}")
+        if job.status == "processing":
+            raise HTTPException(status_code=409, detail="video job is still processing; poll /attachments/video/{id}")
+        if job.status == "error" or job.result is None or not job.result.summary:
+            detail = job.error or (job.result.errors if job.result else ["video job failed"])
+            raise HTTPException(status_code=422, detail=f"video job did not produce a usable summary: {detail}")
+        prompt = f"## Video context\n\n{job.result.summary}\n\n{prompt}"
+
     routing_request = RoutingRequest(
-        prompt=payload.prompt,
+        prompt=prompt,
         tier=payload.tier,
         task_type=payload.task_type,
         needs_web=payload.needs_web,
