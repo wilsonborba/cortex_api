@@ -138,6 +138,10 @@ class Settings(BaseSettings):
             "CORTEX_HIPPOCAMPUS_TIMEOUT_SECONDS", "HIPPOCAMPUS_TIMEOUT_SECONDS"
         ),
     )
+    hippocampus_api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("CORTEX_HIPPOCAMPUS_API_KEY", "HIPPOCAMPUS_API_KEY"),
+    )
 
     # Routing Engine: dynamic scoring weights + quota cutoff
     # Score(M) = w_cap*Cap(M,task) + w_q*Q(M) - w_lat*LatencyNorm(M) - w_cost*CostNorm(M)
