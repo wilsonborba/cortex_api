@@ -48,6 +48,17 @@ class ModelCatalogEntry(Base, TimestampMixin):
     cooldown_until: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Internal context-format communication (issue #15): layer 1 is
+    # `context_format_computed` (the evaluation algorithm's current best
+    # guess, None means "no data yet, default to TOON"); layer 2 is
+    # `context_format_pin` (a manual override, optionally time-limited via
+    # `context_format_pin_expires_at`); layer 3 (request-level force) never
+    # touches these columns, it's resolved per-call in the Executor (#16).
+    context_format_computed: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    context_format_pin: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    context_format_pin_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class TelemetryEvent(Base, TimestampMixin):
@@ -84,6 +95,11 @@ class TelemetryEvent(Base, TimestampMixin):
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     user_feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Which internal communication format this step's context injection
+    # used, and what kind of context it was -- null/null for a step with no
+    # web/memory context at all. Feeds issue #15's evaluation algorithm.
+    context_format: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    context_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
 
     __table_args__ = (
         Index("idx_telemetry_strategy", "strategy_id", "task_type", "success"),
