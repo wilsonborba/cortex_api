@@ -39,9 +39,16 @@ def get_model(model_id: str, registry: ModelRegistryService = Depends(get_regist
 def configure_model(
     model_id: str, payload: ModelConfigRequest, registry: ModelRegistryService = Depends(get_registry)
 ) -> ModelOut:
-    updated = registry.update_config(
-        model_id, tier_eligibility=payload.tier_eligibility, is_enabled=payload.is_enabled
-    )
+    try:
+        updated = registry.update_config(
+            model_id,
+            tier_eligibility=payload.tier_eligibility,
+            is_enabled=payload.is_enabled,
+            context_format_pin=payload.context_format_pin,
+            context_format_pin_ttl_seconds=payload.context_format_pin_ttl_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail=f"model {model_id!r} not found")
     return ModelOut.from_entry(updated)

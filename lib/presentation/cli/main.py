@@ -71,10 +71,14 @@ def run(
     force_model: Optional[str] = typer.Option(None, "--force-model"),
     force_provider: Optional[str] = typer.Option(None, "--force-provider"),
     force_strategy: Optional[str] = typer.Option(None, "--force-strategy"),
+    context_format: Optional[str] = typer.Option(
+        None, "--context-format", help="'toon' or 'json' -- overrides the model's auto/pinned preference for this call"
+    ),
 ) -> None:
     routing_request = RoutingRequest(
         prompt=prompt, tier=tier, task_type=task, needs_web=web, use_memory=memory, memory_topic=memory_topic,
         force_model=force_model, force_provider=force_provider, force_strategy=force_strategy,
+        force_context_format=context_format,
     )
     try:
         plan = get_router().build_execution_plan(routing_request)

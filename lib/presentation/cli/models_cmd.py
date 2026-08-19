@@ -14,9 +14,12 @@ app = typer.Typer(help="Model Registry: list, inspect, and configure models (iss
 def _table(models: List[ModelOut]) -> None:
     print_table(
         "Models",
-        ["ID", "PROVIDER", "TIERS", "STATUS", "REASON", "ENABLED"],
+        ["ID", "PROVIDER", "TIERS", "STATUS", "REASON", "ENABLED", "CTX FORMAT", "PIN", "PIN EXPIRES"],
         [
-            [m.id, m.provider, m.tier_eligibility, m.access_status, m.status_reason, m.is_enabled]
+            [
+                m.id, m.provider, m.tier_eligibility, m.access_status, m.status_reason, m.is_enabled,
+                m.context_format_computed, m.context_format_pin, m.context_format_pin_expires_at,
+            ]
             for m in models
         ],
     )
@@ -51,9 +54,23 @@ def models_config(
     model_id: str,
     tiers: Optional[str] = typer.Option(None, "--tiers", help="comma-separated tier ints, e.g. 0,1,2"),
     enable: Optional[bool] = typer.Option(None, "--enable/--disable"),
+    context_format: Optional[str] = typer.Option(
+        None, "--context-format",
+        help="Pin internal communication format: 'toon', 'json', or 'none' to clear the pin (issue #17)",
+    ),
+    context_format_ttl: Optional[int] = typer.Option(
+        None, "--context-format-ttl", help="Pin expiry in seconds from now; omit for a pin with no expiry"
+    ),
 ) -> None:
     tier_eligibility = [int(t) for t in tiers.split(",")] if tiers else None
-    updated = get_registry().update_config(model_id, tier_eligibility=tier_eligibility, is_enabled=enable)
+    try:
+        updated = get_registry().update_config(
+            model_id, tier_eligibility=tier_eligibility, is_enabled=enable,
+            context_format_pin=context_format, context_format_pin_ttl_seconds=context_format_ttl,
+        )
+    except ValueError as exc:
+        error_exit(str(exc))
+        return
     if updated is None:
         error_exit(f"model {model_id!r} not found")
     model = ModelOut.from_entry(updated)
