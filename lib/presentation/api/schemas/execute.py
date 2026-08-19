@@ -17,6 +17,9 @@ class ExecuteRequest(BaseModel):
     force_model: Optional[str] = None
     force_provider: Optional[str] = None
     override_strategy: Optional[str] = None
+    force_context_format: Optional[str] = Field(
+        default=None, description="'toon' or 'json' -- overrides the model's auto/pinned preference for this call"
+    )
 
 
 class StepOut(BaseModel):

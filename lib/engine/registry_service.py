@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -16,6 +16,7 @@ from lib.engine.discovery.base import DiscoveredModel, ProviderDiscovery, Provid
 from lib.engine.discovery.claude_docker import ClaudeDockerDiscovery
 from lib.engine.discovery.codex import CodexDiscovery
 from lib.engine.discovery.ollama import OllamaDiscovery
+from lib.engine.format import ENCODERS
 
 
 class ModelRegistryService:
@@ -70,7 +71,16 @@ class ModelRegistryService:
         model_id: str,
         tier_eligibility: Optional[List[int]] = None,
         is_enabled: Optional[bool] = None,
+        context_format_pin: Optional[str] = None,
+        context_format_pin_ttl_seconds: Optional[int] = None,
     ) -> Optional[ModelCatalogEntry]:
+        """`context_format_pin`: a registered format name sets/replaces the
+        pin (optionally with a TTL via `context_format_pin_ttl_seconds`),
+        the literal string `"none"` clears it, and leaving it `None`
+        (the default) leaves the pin untouched -- same not-provided-vs-
+        explicit convention `tier_eligibility`/`is_enabled` already use
+        here, just with a string sentinel since None already means
+        "untouched" for this field."""
         updated = self._repository.update_config(
             model_id, tier_eligibility=tier_eligibility, is_enabled=is_enabled
         )
@@ -84,13 +94,30 @@ class ModelRegistryService:
             self._repository.update_status(
                 model_id, AccessStatus.OFFLINE, reason="Re-enabled; pending next sync"
             )
+
+        if context_format_pin is not None:
+            if context_format_pin == "none":
+                self._repository.clear_context_format_pin(model_id)
+            else:
+                self.set_context_format_pin(
+                    model_id, context_format_pin, ttl_seconds=context_format_pin_ttl_seconds
+                )
+
         return self._repository.get_by_id(model_id)
 
-    # -- context-format preference (issues #15/#16) -----------------------------
+    # -- context-format preference (issues #15/#16/#17) -----------------------------
 
     def set_context_format_pin(
-        self, model_id: str, format_name: str, expires_at: Optional[datetime] = None
+        self,
+        model_id: str,
+        format_name: str,
+        expires_at: Optional[datetime] = None,
+        ttl_seconds: Optional[int] = None,
     ) -> Optional[ModelCatalogEntry]:
+        if format_name not in ENCODERS:
+            raise ValueError(f"unknown context format {format_name!r}; registered: {sorted(ENCODERS)}")
+        if ttl_seconds is not None:
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
         return self._repository.set_context_format_pin(model_id, format_name, expires_at=expires_at)
 
     def clear_context_format_pin(self, model_id: str) -> Optional[ModelCatalogEntry]:

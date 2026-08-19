@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from lib.engine.executor import Executor
+from lib.engine.format import ENCODERS
 from lib.engine.router import Router, RoutingRequest
 from lib.presentation.api.deps import get_executor, get_router
 from lib.presentation.api.schemas.execute import ExecuteRequest, ExecuteResponse
@@ -16,6 +17,11 @@ async def execute(
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
 ) -> ExecuteResponse:
+    if payload.force_context_format is not None and payload.force_context_format not in ENCODERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown context format {payload.force_context_format!r}; registered: {sorted(ENCODERS)}",
+        )
     routing_request = RoutingRequest(
         prompt=payload.prompt,
         tier=payload.tier,
@@ -26,6 +32,7 @@ async def execute(
         force_model=payload.force_model,
         force_provider=payload.force_provider,
         force_strategy=payload.override_strategy,
+        force_context_format=payload.force_context_format,
     )
     # NoEligibleModelError / UnresolvedStrategyError propagate to the
     # app-level exception handlers registered in lib.presentation.api.app.

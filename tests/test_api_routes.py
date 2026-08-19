@@ -102,6 +102,40 @@ def test_configure_model_404_when_missing(client):
     assert response.status_code == 404
 
 
+def test_configure_model_sets_context_format_pin_with_ttl(client, model_repo_):
+    _seed_model(model_repo_, id="api-test-provider/pin-model")
+
+    response = client.patch(
+        "/models/api-test-provider/pin-model", json={"context_format_pin": "toon", "context_format_pin_ttl_seconds": 3600}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["context_format_pin"] == "toon"
+    assert body["context_format_pin_expires_at"] is not None
+
+    fetched = client.get("/models/api-test-provider/pin-model")
+    assert fetched.json()["context_format_pin"] == "toon"  # GET and PATCH agree (parity)
+
+
+def test_configure_model_clears_context_format_pin(client, model_repo_):
+    _seed_model(model_repo_, id="api-test-provider/pin-clear-model")
+    client.patch("/models/api-test-provider/pin-clear-model", json={"context_format_pin": "json"})
+
+    response = client.patch("/models/api-test-provider/pin-clear-model", json={"context_format_pin": "none"})
+
+    assert response.status_code == 200
+    assert response.json()["context_format_pin"] is None
+
+
+def test_configure_model_rejects_unknown_context_format(client, model_repo_):
+    _seed_model(model_repo_, id="api-test-provider/bad-format-model")
+
+    response = client.patch("/models/api-test-provider/bad-format-model", json={"context_format_pin": "yaml"})
+
+    assert response.status_code == 422
+
+
 def test_sync_models_returns_a_list(client):
     response = client.post("/models/sync")
     assert response.status_code == 200

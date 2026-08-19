@@ -102,6 +102,26 @@ def test_execute_maps_override_strategy_to_force_strategy(app_and_overrides):
     assert router.last_request.force_strategy == "coding_t3_v1"
 
 
+def test_execute_maps_force_context_format(app_and_overrides):
+    app = app_and_overrides
+    router = _FakeRouter(plan=_plan())
+    executor = _FakeExecutor(result=_result())
+    app.dependency_overrides[get_router] = lambda: router
+    app.dependency_overrides[get_executor] = lambda: executor
+
+    with TestClient(app) as client:
+        client.post("/execute", json={"prompt": "hi", "force_context_format": "json"})
+
+    assert router.last_request.force_context_format == "json"
+
+
+def test_execute_rejects_unknown_context_format(app_and_overrides):
+    with TestClient(app_and_overrides) as client:
+        response = client.post("/execute", json={"prompt": "hi", "force_context_format": "yaml"})
+
+    assert response.status_code == 422
+
+
 def test_execute_returns_409_when_no_eligible_model(app_and_overrides):
     app = app_and_overrides
     app.dependency_overrides[get_router] = lambda: _FakeRouter(error=NoEligibleModelError("nothing eligible"))

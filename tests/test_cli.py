@@ -95,6 +95,34 @@ def test_models_config_updates_tiers_and_enabled(model_repo_):
     assert body["is_enabled"] is False
 
 
+def test_models_config_sets_and_clears_context_format_pin(model_repo_):
+    _seed_model(model_repo_, id="cli-test-provider/cli-pin-model")
+
+    set_result = _invoke(
+        "models", "config", "cli-test-provider/cli-pin-model", "--context-format", "toon", "--context-format-ttl", "3600"
+    )
+    assert set_result.exit_code == 0
+    set_body = json.loads(set_result.output)
+    assert set_body["context_format_pin"] == "toon"
+    assert set_body["context_format_pin_expires_at"] is not None
+
+    get_result = _invoke("models", "get", "cli-test-provider/cli-pin-model")
+    assert json.loads(get_result.output)["context_format_pin"] == "toon"  # parity with the set
+
+    clear_result = _invoke("models", "config", "cli-test-provider/cli-pin-model", "--context-format", "none")
+    assert clear_result.exit_code == 0
+    assert json.loads(clear_result.output)["context_format_pin"] is None
+
+
+def test_models_config_rejects_unknown_context_format(model_repo_):
+    _seed_model(model_repo_, id="cli-test-provider/cli-bad-format-model")
+
+    result = _invoke("models", "config", "cli-test-provider/cli-bad-format-model", "--context-format", "yaml")
+
+    assert result.exit_code != 0
+    assert "unknown context format" in result.output
+
+
 def test_models_sync_returns_a_list():
     result = _invoke("models", "sync")
     assert result.exit_code == 0
@@ -222,8 +250,10 @@ def _result(**overrides) -> ExecutionResult:
 class _FakeRouter:
     def __init__(self, plan=None, error=None):
         self._plan, self._error = plan, error
+        self.last_request = None
 
     def build_execution_plan(self, request):
+        self.last_request = request
         if self._error:
             raise self._error
         return self._plan
@@ -283,6 +313,17 @@ def test_run_reports_unresolved_strategy_cleanly(monkeypatch: pytest.MonkeyPatch
     result = _invoke("run", "hello", "--force-strategy", "coding_t3_custom")
 
     assert result.exit_code == 1
+
+
+def test_run_forwards_context_format_flag_to_the_router(monkeypatch: pytest.MonkeyPatch):
+    router = _FakeRouter(plan=_plan())
+    monkeypatch.setattr(cli_main, "get_router", lambda: router)
+    monkeypatch.setattr(cli_main, "get_executor", lambda: _FakeExecutor(result=_result()))
+
+    result = _invoke("run", "hello", "--context-format", "json")
+
+    assert result.exit_code == 0
+    assert router.last_request.force_context_format == "json"
 
 
 # --- stream --------------------------------------------------------------------------

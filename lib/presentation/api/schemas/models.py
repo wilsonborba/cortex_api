@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from lib.dal.models import ModelCatalogEntry
 
@@ -20,6 +21,9 @@ class ModelOut(BaseModel):
     capabilities: Dict[str, Any]
     cost_per_million_tokens: float
     is_enabled: bool
+    context_format_computed: Optional[str] = None
+    context_format_pin: Optional[str] = None
+    context_format_pin_expires_at: Optional[datetime] = None
 
     @classmethod
     def from_entry(cls, entry: ModelCatalogEntry) -> "ModelOut":
@@ -30,9 +34,19 @@ class ModelOut(BaseModel):
             is_local=entry.is_local, tier_eligibility=list(entry.tier_eligibility or []),
             capabilities=dict(entry.capabilities or {}), cost_per_million_tokens=entry.cost_per_million_tokens,
             is_enabled=entry.is_enabled,
+            context_format_computed=entry.context_format_computed,
+            context_format_pin=entry.context_format_pin,
+            context_format_pin_expires_at=entry.context_format_pin_expires_at,
         )
 
 
 class ModelConfigRequest(BaseModel):
     tier_eligibility: Optional[List[int]] = None
     is_enabled: Optional[bool] = None
+    context_format_pin: Optional[str] = Field(
+        default=None,
+        description="'toon' or 'json' to set/replace the pin, 'none' to clear it, omit to leave untouched",
+    )
+    context_format_pin_ttl_seconds: Optional[int] = Field(
+        default=None, description="Pin expiry, relative to now. Omit for a pin that lasts until explicitly cleared."
+    )
