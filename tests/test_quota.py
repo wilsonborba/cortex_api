@@ -10,8 +10,10 @@ from lib.core.time_utils import ensure_utc
 from lib.dal.models import AccessStatus, ModelCatalogEntry
 from lib.dal.repositories.model_repository import ModelRepository
 from lib.dal.repositories.quota_repository import QuotaRepository
+from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
 from lib.engine.drivers.base import DriverResult
-from lib.engine.quota import QuotaTracker
+from lib.engine.quota import QuotaTracker, refresh_and_resync
+from lib.engine.registry_service import ModelRegistryService
 
 
 @pytest.fixture
@@ -175,3 +177,113 @@ def test_refresh_cooldowns_leaves_active_cooldowns_alone(
     stored = model_repo_.get_by_id("codex/quota-active-o3")
     assert stored.access_status == AccessStatus.COOLING_DOWN.value
     assert ensure_utc(stored.cooldown_until) == future
+
+
+# --- refresh_and_resync (issue #13) -----------------------------------------------
+
+
+class _FakeDiscovery:
+    def __init__(self, provider, models=None, error=None):
+        self.provider = provider
+        self._models = models or []
+        self._error = error
+        self.discover_calls = 0
+
+    def discover(self):
+        self.discover_calls += 1
+        if self._error:
+            raise ProviderDiscoveryError(self.provider, self._error)
+        return self._models
+
+
+def test_refresh_and_resync_confirms_a_real_recovery(quota_repo_: QuotaRepository, model_repo_: ModelRepository):
+    model_repo_.upsert(
+        ModelCatalogEntry(
+            id="codex/resync-recovered-o3", provider="codex", display_name="OpenAI o3",
+            access_status=AccessStatus.COOLING_DOWN.value, context_window=8192, is_local=False,
+            tier_eligibility=[], capabilities={}, cost_per_million_tokens=0.0, is_enabled=True,
+            cooldown_until=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+    )
+    tracker = QuotaTracker(quota_repo=quota_repo_, model_repo=model_repo_, settings=_settings())
+    discovery = _FakeDiscovery(
+        "codex",
+        models=[
+            DiscoveredModel(
+                id="codex/resync-recovered-o3", provider="codex", display_name="OpenAI o3",
+                access_status=AccessStatus.AVAILABLE.value, status_reason="OAuth OK",
+            )
+        ],
+    )
+    registry = ModelRegistryService(discoveries=[discovery], repository=model_repo_)
+
+    cleared = refresh_and_resync(tracker, registry)
+
+    assert cleared == ["codex/resync-recovered-o3"]
+    assert discovery.discover_calls == 1
+    stored = model_repo_.get_by_id("codex/resync-recovered-o3")
+    assert stored.access_status == AccessStatus.AVAILABLE.value  # live-probed, not just guessed
+
+
+def test_refresh_and_resync_leaves_a_still_down_provider_offline(
+    quota_repo_: QuotaRepository, model_repo_: ModelRepository
+):
+    model_repo_.upsert(
+        ModelCatalogEntry(
+            id="codex/resync-still-down-o3", provider="codex", display_name="OpenAI o3",
+            access_status=AccessStatus.COOLING_DOWN.value, context_window=8192, is_local=False,
+            tier_eligibility=[], capabilities={}, cost_per_million_tokens=0.0, is_enabled=True,
+            cooldown_until=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+    )
+    tracker = QuotaTracker(quota_repo=quota_repo_, model_repo=model_repo_, settings=_settings())
+    discovery = _FakeDiscovery("codex", error="still unreachable")
+    registry = ModelRegistryService(discoveries=[discovery], repository=model_repo_)
+
+    refresh_and_resync(tracker, registry)
+
+    stored = model_repo_.get_by_id("codex/resync-still-down-o3")
+    assert stored.access_status == AccessStatus.OFFLINE.value  # not incorrectly forced AVAILABLE
+
+
+def test_refresh_and_resync_does_nothing_when_nothing_cleared(
+    quota_repo_: QuotaRepository, model_repo_: ModelRepository
+):
+    tracker = QuotaTracker(quota_repo=quota_repo_, model_repo=model_repo_, settings=_settings())
+    discovery = _FakeDiscovery("codex", models=[])
+    registry = ModelRegistryService(discoveries=[discovery], repository=model_repo_)
+
+    cleared = refresh_and_resync(tracker, registry)
+
+    assert cleared == []
+    assert discovery.discover_calls == 0  # no wasted live probe
+
+
+def test_refresh_and_resync_does_not_probe_unrelated_providers(
+    quota_repo_: QuotaRepository, model_repo_: ModelRepository
+):
+    model_repo_.upsert(
+        ModelCatalogEntry(
+            id="codex/resync-scope-o3", provider="codex", display_name="OpenAI o3",
+            access_status=AccessStatus.COOLING_DOWN.value, context_window=8192, is_local=False,
+            tier_eligibility=[], capabilities={}, cost_per_million_tokens=0.0, is_enabled=True,
+            cooldown_until=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+    )
+    tracker = QuotaTracker(quota_repo=quota_repo_, model_repo=model_repo_, settings=_settings())
+    codex_discovery = _FakeDiscovery(
+        "codex",
+        models=[
+            DiscoveredModel(
+                id="codex/resync-scope-o3", provider="codex", display_name="OpenAI o3",
+                access_status=AccessStatus.AVAILABLE.value,
+            )
+        ],
+    )
+    claude_discovery = _FakeDiscovery("claude", models=[])
+    registry = ModelRegistryService(discoveries=[codex_discovery, claude_discovery], repository=model_repo_)
+
+    refresh_and_resync(tracker, registry)
+
+    assert codex_discovery.discover_calls == 1
+    assert claude_discovery.discover_calls == 0

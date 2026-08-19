@@ -13,7 +13,7 @@ from lib.core.logs import LogTarget, configure_logging, get_logger
 from lib.core.settings import Settings, get_settings
 from lib.dal.migrations import upgrade_db
 from lib.engine.executor import UnresolvedStrategyError
-from lib.engine.quota import QuotaTracker
+from lib.engine.quota import QuotaTracker, refresh_and_resync
 from lib.engine.registry_service import build_default_registry_service
 from lib.engine.router import NoEligibleModelError
 from lib.engine.tiers import TierService
@@ -24,12 +24,16 @@ logger = get_logger(__name__)
 
 async def _cooldown_refresh_loop(settings: Settings) -> None:
     tracker = QuotaTracker(settings=settings)
+    registry = build_default_registry_service(settings=settings)
     while True:
         await asyncio.sleep(settings.api_cooldown_refresh_interval_seconds)
         try:
-            tracker.refresh_cooldowns()
+            # Not just refresh_cooldowns() alone: that only guesses OFFLINE
+            # from the clock. refresh_and_resync (#13) live-probes whatever
+            # just cleared, so it comes back AVAILABLE only when it's real.
+            refresh_and_resync(tracker, registry)
         except Exception:
-            logger.warning("cooldown refresh failed", exc_info=True)
+            logger.warning("cooldown refresh/resync failed", exc_info=True)
 
 
 def _build_lifespan(settings: Settings):
