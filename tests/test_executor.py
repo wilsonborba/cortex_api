@@ -294,6 +294,50 @@ async def test_critic_step_does_not_override_final_response(quota_tracker_, tele
 
 
 @pytest.mark.asyncio
+async def test_critic_sees_both_the_original_draft_and_the_refined_answer(quota_tracker_, telemetry_):
+    primary = _ScriptedDriver([_success("draft answer")])
+    refiner = _ScriptedDriver([_success("polished answer")])
+    critic = _ScriptedDriver([_success("looks correct")])
+    executor = _executor(
+        {"execB": primary, "execC": refiner, "execD": critic}, quota_tracker_, telemetry_
+    )
+    plan = _plan(
+        [
+            ModelSelection(model_id="execB/model", provider="execB", role="primary"),
+            ModelSelection(model_id="execC/model", provider="execC", role="refiner"),
+            ModelSelection(model_id="execD/model", provider="execD", role="critic"),
+        ]
+    )
+
+    await executor.execute(plan)
+
+    critic_prompt = critic.calls[0][1]
+    assert "Original draft:" in critic_prompt
+    assert "draft answer" in critic_prompt
+    assert "Refined answer:" in critic_prompt
+    assert "polished answer" in critic_prompt
+
+
+@pytest.mark.asyncio
+async def test_critic_without_a_refiner_gets_the_single_answer_prompt(quota_tracker_, telemetry_):
+    primary = _ScriptedDriver([_success("draft answer")])
+    critic = _ScriptedDriver([_success("looks correct")])
+    executor = _executor({"execB": primary, "execD": critic}, quota_tracker_, telemetry_)
+    plan = _plan(
+        [
+            ModelSelection(model_id="execB/model", provider="execB", role="primary"),
+            ModelSelection(model_id="execD/model", provider="execD", role="critic"),
+        ]
+    )
+
+    await executor.execute(plan)
+
+    critic_prompt = critic.calls[0][1]
+    assert "Original draft:" not in critic_prompt
+    assert "Answer:\ndraft answer" in critic_prompt
+
+
+@pytest.mark.asyncio
 async def test_primary_failure_skips_downstream_steps(quota_tracker_, telemetry_):
     primary = _ScriptedDriver([_failure("cli_error")])
     executor = _executor({"execB": primary, "execC": _NeverCalledDriver()}, quota_tracker_, telemetry_, max_retries=0)

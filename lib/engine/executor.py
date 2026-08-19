@@ -247,10 +247,15 @@ class Executor:
         deadline = monotonic() + plan.max_latency_seconds
         steps: List[StepResult] = []
         context = plan.prompt
+        # The primary's original text, kept separate from `context` (which
+        # gets overwritten by the refiner's output): the critic step needs
+        # both, to judge the refined answer against its actual baseline
+        # instead of reviewing a single text with nothing to compare it to.
+        draft_text: Optional[str] = None
 
         for index, selection in enumerate(plan.selections):
             is_primary = index == 0
-            step = await self._run_step(plan, selection, context, deadline)
+            step = await self._run_step(plan, selection, context, deadline, draft=draft_text)
 
             if (
                 is_primary
@@ -267,10 +272,21 @@ class Executor:
 
             steps.append(step)
 
+            if step.success:
+                # Pre-existing bug fixed by #19: `context` used to only get
+                # updated after a *primary* success, so the critic step
+                # always ended up reviewing the primary's original draft --
+                # never the refiner's actual output. Any successful step's
+                # text becomes the new rolling `context` the next step sees;
+                # `draft_text` (issue #19, for the critic's "original draft"
+                # side) is tracked separately and only ever set from primary.
+                if selection.role == "primary":
+                    draft_text = step.response_text or draft_text
+                context = step.response_text or context
+
             if selection.role != "primary":
                 continue
             if step.success:
-                context = step.response_text or context
                 continue
 
             # Primary failed (possibly after the JSON fallback above):
@@ -333,7 +349,12 @@ class Executor:
             return None
 
     async def _run_step(
-        self, plan: ExecutionPlan, selection: ModelSelection, context: str, deadline: float
+        self,
+        plan: ExecutionPlan,
+        selection: ModelSelection,
+        context: str,
+        deadline: float,
+        draft: Optional[str] = None,
     ) -> StepResult:
         driver = self._drivers.get(selection.provider)
         if driver is None:
@@ -344,7 +365,7 @@ class Executor:
                 attempts=0,
             )
 
-        prompt = _build_role_prompt(selection.role, plan.prompt, context)
+        prompt = _build_role_prompt(selection.role, plan.prompt, context, draft=draft)
         bare_model = _bare_model_name(selection.model_id)
         loop = asyncio.get_running_loop()
 
@@ -460,7 +481,7 @@ def _bare_model_name(model_id: str) -> str:
     return model_id.split("/", 1)[1] if "/" in model_id else model_id
 
 
-def _build_role_prompt(role: str, original_prompt: str, context: str) -> str:
+def _build_role_prompt(role: str, original_prompt: str, context: str, draft: Optional[str] = None) -> str:
     if role == "primary":
         return original_prompt
     if role == "refiner":
@@ -470,6 +491,19 @@ def _build_role_prompt(role: str, original_prompt: str, context: str) -> str:
             f"Return only the improved answer.\n\nDraft:\n{context}"
         )
     if role == "critic":
+        # With a distinct draft available (issue #19), the critic gets both
+        # texts and is asked to judge the refinement against its actual
+        # baseline -- not just review one text with nothing to compare it
+        # to. Falls back to the single-answer framing when there's no
+        # refiner in the pipeline (or its output happens to equal the draft).
+        if draft is not None and draft.strip() and draft != context:
+            return (
+                f"{original_prompt}\n\n---\nAn original draft and a refined answer are below. "
+                f"Review the refined answer for correctness and completeness, and check whether "
+                f"refining it actually improved on the original draft. "
+                f"List concrete issues, or state that it's correct.\n\n"
+                f"Original draft:\n{draft}\n\nRefined answer:\n{context}"
+            )
         return (
             f"{original_prompt}\n\n---\nReview the answer below for correctness and completeness. "
             f"List concrete issues, or state that it's correct.\n\nAnswer:\n{context}"
