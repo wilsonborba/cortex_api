@@ -177,6 +177,12 @@ class Settings(BaseSettings):
         default=1,
         validation_alias=AliasChoices("CORTEX_EXECUTOR_MAX_REROUTES", "EXECUTOR_MAX_REROUTES"),
     )
+    executor_max_critic_revisions: int = Field(
+        default=1,
+        validation_alias=AliasChoices(
+            "CORTEX_EXECUTOR_MAX_CRITIC_REVISIONS", "EXECUTOR_MAX_CRITIC_REVISIONS"
+        ),
+    )
 
     # REST API
     cors_allow_origins: list[str] = Field(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -28,6 +29,10 @@ logger = get_logger(__name__)
 
 # Worth one quick retry: plumbing hiccups, not "this will never work".
 _RETRYABLE_ERRORS = {"unreachable", "http_error", "cli_error"}
+
+# Issue #20: the critic's first non-empty line must be exactly this, so a
+# revision decision never depends on inferring "quality" from free text.
+_VERDICT_LINE_RE = re.compile(r"^VERDICT:\s*(OK|NEEDS_REVISION)\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -159,6 +164,7 @@ class Executor:
         registry: Optional[ModelRegistryService] = None,
         max_retries: int = 1,
         max_reroutes: int = 1,
+        max_critic_revisions: int = 1,
     ) -> None:
         self._drivers = drivers
         self._quota_tracker = quota_tracker
@@ -169,6 +175,7 @@ class Executor:
         self._registry = registry
         self._max_retries = max_retries
         self._max_reroutes = max_reroutes
+        self._max_critic_revisions = max_critic_revisions
 
     async def execute(self, plan: ExecutionPlan) -> ExecutionResult:
         if not plan.selections:
@@ -252,6 +259,7 @@ class Executor:
         # both, to judge the refined answer against its actual baseline
         # instead of reviewing a single text with nothing to compare it to.
         draft_text: Optional[str] = None
+        refiner_selection = next((s for s in plan.selections if s.role == "refiner"), None)
 
         for index, selection in enumerate(plan.selections):
             is_primary = index == 0
@@ -272,17 +280,27 @@ class Executor:
 
             steps.append(step)
 
-            if step.success:
+            # `context` tracks the latest *candidate answer* text -- not the
+            # critic's own review, which isn't an answer at all (issue #20:
+            # the reviser needs to see the answer being reviewed, not the
+            # critic's verdict/feedback text sitting where it should be).
+            if step.success and selection.role != "critic":
                 # Pre-existing bug fixed by #19: `context` used to only get
                 # updated after a *primary* success, so the critic step
                 # always ended up reviewing the primary's original draft --
-                # never the refiner's actual output. Any successful step's
-                # text becomes the new rolling `context` the next step sees;
-                # `draft_text` (issue #19, for the critic's "original draft"
-                # side) is tracked separately and only ever set from primary.
+                # never the refiner's actual output. `draft_text` (#19, the
+                # critic's "original draft" side) is tracked separately and
+                # only ever set from primary.
                 if selection.role == "primary":
                     draft_text = step.response_text or draft_text
                 context = step.response_text or context
+
+            if selection.role == "critic":
+                if step.success:
+                    context = await self._run_revision_loop(
+                        plan, selection, refiner_selection, draft_text, step, context, deadline, request_id, steps
+                    )
+                continue
 
             if selection.role != "primary":
                 continue
@@ -303,6 +321,52 @@ class Executor:
             break
 
         return self._build_result(plan, request_id, steps)
+
+    async def _run_revision_loop(
+        self,
+        plan: ExecutionPlan,
+        critic_selection: ModelSelection,
+        refiner_selection: Optional[ModelSelection],
+        draft_text: Optional[str],
+        critic_step: StepResult,
+        current_answer: str,
+        deadline: float,
+        request_id: str,
+        steps: List[StepResult],
+    ) -> str:
+        """Issue #20: closes the "critic found a problem -> do something
+        about it" gap. Bounded by `self._max_critic_revisions`; stops on an
+        OK verdict, a failed revise/re-review call, or the budget running
+        out -- never indefinitely. Returns the latest accepted answer text
+        (the original `current_answer` if no revision ever ran or the first
+        one already checked out)."""
+        verdict, feedback = _parse_critic_verdict(critic_step.response_text)
+        revisions_left = self._max_critic_revisions
+
+        while verdict == "needs_revision" and revisions_left > 0 and refiner_selection is not None:
+            revisions_left -= 1
+            reviser_selection = replace(refiner_selection, role="reviser")
+            revise_step = await self._run_step(
+                plan, reviser_selection, current_answer, deadline, draft=draft_text, feedback=feedback
+            )
+            self._log_step(plan, request_id, reviser_selection, revise_step, None, None)
+            steps.append(revise_step)
+            if not revise_step.success:
+                if revise_step.error_type == "rate_limit":
+                    self._quota_tracker.enter_cooldown(reviser_selection.model_id, reason=revise_step.error_message)
+                break
+            current_answer = revise_step.response_text or current_answer
+
+            critic_step = await self._run_step(plan, critic_selection, current_answer, deadline, draft=draft_text)
+            self._log_step(plan, request_id, critic_selection, critic_step, None, None)
+            steps.append(critic_step)
+            if not critic_step.success:
+                if critic_step.error_type == "rate_limit":
+                    self._quota_tracker.enter_cooldown(critic_selection.model_id, reason=critic_step.error_message)
+                break
+            verdict, feedback = _parse_critic_verdict(critic_step.response_text)
+
+        return current_answer
 
     async def _retry_with_json_context(
         self,
@@ -355,6 +419,7 @@ class Executor:
         context: str,
         deadline: float,
         draft: Optional[str] = None,
+        feedback: Optional[str] = None,
     ) -> StepResult:
         driver = self._drivers.get(selection.provider)
         if driver is None:
@@ -365,7 +430,7 @@ class Executor:
                 attempts=0,
             )
 
-        prompt = _build_role_prompt(selection.role, plan.prompt, context, draft=draft)
+        prompt = _build_role_prompt(selection.role, plan.prompt, context, draft=draft, feedback=feedback)
         bare_model = _bare_model_name(selection.model_id)
         loop = asyncio.get_running_loop()
 
@@ -457,7 +522,8 @@ class Executor:
         primary = steps[0] if steps else None
         success = bool(primary and primary.success)
         final_text = next(
-            (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "refiner")), ""
+            (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "refiner", "reviser")),
+            "",
         )
         return ExecutionResult(
             request_id=request_id,
@@ -481,7 +547,16 @@ def _bare_model_name(model_id: str) -> str:
     return model_id.split("/", 1)[1] if "/" in model_id else model_id
 
 
-def _build_role_prompt(role: str, original_prompt: str, context: str, draft: Optional[str] = None) -> str:
+_VERDICT_INSTRUCTIONS = (
+    "Respond in this exact format: the first line must be exactly 'VERDICT: OK' "
+    "or 'VERDICT: NEEDS_REVISION' (nothing else on that line). If NEEDS_REVISION, "
+    "follow it with a blank line and then concrete feedback: what's wrong and what to fix."
+)
+
+
+def _build_role_prompt(
+    role: str, original_prompt: str, context: str, draft: Optional[str] = None, feedback: Optional[str] = None
+) -> str:
     if role == "primary":
         return original_prompt
     if role == "refiner":
@@ -496,19 +571,54 @@ def _build_role_prompt(role: str, original_prompt: str, context: str, draft: Opt
         # baseline -- not just review one text with nothing to compare it
         # to. Falls back to the single-answer framing when there's no
         # refiner in the pipeline (or its output happens to equal the draft).
+        # The structured verdict line (issue #20) is what the revision loop
+        # parses -- never inferred from free-text sentiment.
         if draft is not None and draft.strip() and draft != context:
             return (
                 f"{original_prompt}\n\n---\nAn original draft and a refined answer are below. "
                 f"Review the refined answer for correctness and completeness, and check whether "
-                f"refining it actually improved on the original draft. "
-                f"List concrete issues, or state that it's correct.\n\n"
+                f"refining it actually improved on the original draft. {_VERDICT_INSTRUCTIONS}\n\n"
                 f"Original draft:\n{draft}\n\nRefined answer:\n{context}"
             )
         return (
             f"{original_prompt}\n\n---\nReview the answer below for correctness and completeness. "
-            f"List concrete issues, or state that it's correct.\n\nAnswer:\n{context}"
+            f"{_VERDICT_INSTRUCTIONS}\n\nAnswer:\n{context}"
+        )
+    if role == "reviser":
+        # Issue #20: a follow-up refiner pass addressing the critic's
+        # specific feedback, run by the same model/provider as the original
+        # refiner step (just relabeled for this call -- see _run_revision_loop).
+        return (
+            f"{original_prompt}\n\n---\nA reviewer found issues with the answer below and requested "
+            f"a revision. Address the feedback precisely. Return only the revised answer.\n\n"
+            f"Original draft:\n{draft or context}\n\nPrevious answer:\n{context}\n\n"
+            f"Reviewer feedback:\n{feedback or '(no specific feedback provided)'}"
         )
     return original_prompt
+
+
+def _parse_critic_verdict(response_text: str) -> tuple[str, str]:
+    """Returns (verdict, feedback): verdict is "ok" or "needs_revision".
+
+    Requires the verdict on the first non-empty line, exactly. Anything
+    else -- an empty response, no verdict line, extra text before it --
+    defaults to "ok" (the loop stops) rather than "needs_revision": a false
+    OK from an uncooperative critic is a lesser problem than an unbounded
+    revision loop burning calls/tokens/cost on a model that won't follow
+    the format. This is a deliberate tradeoff, not an oversight.
+    """
+    lines = response_text.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = _VERDICT_LINE_RE.match(stripped)
+        if match is None:
+            break
+        feedback = "\n".join(lines[i + 1 :]).strip()
+        verdict = "needs_revision" if match.group(1).upper() == "NEEDS_REVISION" else "ok"
+        return verdict, feedback
+    return "ok", ""
 
 
 def build_default_drivers(settings: Optional[Settings] = None) -> Dict[str, ExecutionDriver]:
@@ -532,6 +642,7 @@ def build_default_executor(settings: Optional[Settings] = None) -> Executor:
         web_retrieval=build_default_web_retrieval_service(settings=settings),
         hippocampus=build_default_hippocampus_client(settings=settings),
         registry=build_default_registry_service(settings=settings),
+        max_critic_revisions=settings.executor_max_critic_revisions,
         max_retries=settings.executor_max_retries,
         max_reroutes=settings.executor_max_reroutes,
     )
