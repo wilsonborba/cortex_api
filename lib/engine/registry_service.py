@@ -86,6 +86,19 @@ class ModelRegistryService:
             )
         return self._repository.get_by_id(model_id)
 
+    # -- context-format preference (issues #15/#16) -----------------------------
+
+    def set_context_format_pin(
+        self, model_id: str, format_name: str, expires_at: Optional[datetime] = None
+    ) -> Optional[ModelCatalogEntry]:
+        return self._repository.set_context_format_pin(model_id, format_name, expires_at=expires_at)
+
+    def clear_context_format_pin(self, model_id: str) -> Optional[ModelCatalogEntry]:
+        return self._repository.clear_context_format_pin(model_id)
+
+    def set_context_format_computed(self, model_id: str, format_name: str) -> Optional[ModelCatalogEntry]:
+        return self._repository.set_context_format_computed(model_id, format_name)
+
     # -- live discovery / sync --------------------------------------------------
 
     def sync(self, providers: Optional[Iterable[str]] = None) -> List[ModelCatalogEntry]:

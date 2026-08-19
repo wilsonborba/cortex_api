@@ -99,7 +99,8 @@ class _FakeWebRetrieval:
     def gather_context(self, query: str, max_results=None):
         from lib.engine.retrieval.service import WebContextResult
 
-        return WebContextResult(query=query, markdown=self._markdown, sources=self._sources)
+        items = [{"title": "result", "url": url, "content": self._markdown} for url in self._sources]
+        return WebContextResult(query=query, markdown=self._markdown, sources=self._sources, items=items)
 
 
 class _FakeHippocampus:
