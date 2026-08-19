@@ -39,6 +39,7 @@ from lib.engine.retrieval.hippocampus import HippocampusClient, build_default_hi
 from lib.engine.retrieval.service import WebRetrievalService, build_default_web_retrieval_service
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError, Router, RoutingRequest, build_default_router
 from lib.engine.telemetry import TelemetryLogger
+from lib.core.text_sanitize import sanitize_text
 
 logger = get_logger(__name__)
 
@@ -180,6 +181,7 @@ class Executor:
         max_retries: int = 1,
         max_reroutes: int = 1,
         max_critic_revisions: int = 1,
+        sanitize_enabled: bool = True,
     ) -> None:
         self._drivers = drivers
         self._quota_tracker = quota_tracker
@@ -191,6 +193,7 @@ class Executor:
         self._max_retries = max_retries
         self._max_reroutes = max_reroutes
         self._max_critic_revisions = max_critic_revisions
+        self._sanitize_enabled = sanitize_enabled
 
     async def execute(self, plan: ExecutionPlan) -> ExecutionResult:
         if not plan.selections:
@@ -479,9 +482,19 @@ class Executor:
                 break
 
         assert result is not None
+        response_text = result.response_text
+        if self._sanitize_enabled and result.success and response_text:
+            cleaned, stats = sanitize_text(response_text)
+            if stats.removed_count or stats.replaced_count:
+                logger.info(
+                    "sanitized provider text: provider=%s model=%s removed=%d replaced=%d",
+                    selection.provider, bare_model, stats.removed_count, stats.replaced_count,
+                )
+            response_text = cleaned
+
         return StepResult(
             role=selection.role, provider=selection.provider, model_id=selection.model_id,
-            success=result.success, response_text=result.response_text,
+            success=result.success, response_text=response_text,
             input_tokens=result.input_tokens, output_tokens=result.output_tokens,
             latency_ms=result.latency_ms, cost_usd=result.cost_usd,
             error_type=result.error_type, error_message=result.error_message, attempts=attempts,
@@ -689,4 +702,5 @@ def build_default_executor(settings: Optional[Settings] = None) -> Executor:
         max_critic_revisions=settings.executor_max_critic_revisions,
         max_retries=settings.executor_max_retries,
         max_reroutes=settings.executor_max_reroutes,
+        sanitize_enabled=settings.sanitize_provider_text,
     )

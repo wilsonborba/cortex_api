@@ -187,6 +187,10 @@ class Settings(BaseSettings):
             "CORTEX_EXECUTOR_MAX_CRITIC_REVISIONS", "EXECUTOR_MAX_CRITIC_REVISIONS"
         ),
     )
+    sanitize_provider_text: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CORTEX_SANITIZE_PROVIDER_TEXT", "SANITIZE_PROVIDER_TEXT"),
+    )
 
     # REST API
     cors_allow_origins: list[str] = Field(

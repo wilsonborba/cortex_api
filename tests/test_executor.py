@@ -151,11 +151,12 @@ def _executor(
     max_retries: int = 1,
     max_reroutes: int = 1,
     max_critic_revisions: int = 1,
+    sanitize_enabled: bool = True,
 ) -> Executor:
     return Executor(
         drivers=drivers, quota_tracker=quota_tracker, telemetry=telemetry, router=router,
         web_retrieval=web_retrieval, hippocampus=hippocampus, max_retries=max_retries, max_reroutes=max_reroutes,
-        max_critic_revisions=max_critic_revisions,
+        max_critic_revisions=max_critic_revisions, sanitize_enabled=sanitize_enabled,
     )
 
 
@@ -195,6 +196,31 @@ async def test_unresolved_strategy_plan_raises(quota_tracker_, telemetry_):
 
     with pytest.raises(UnresolvedStrategyError):
         await executor.execute(plan)
+
+
+# --- provider text sanitization ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_response_text_is_sanitized_by_default(quota_tracker_, telemetry_):
+    driver = _ScriptedDriver([_success("Hello​World")])
+    executor = _executor({"execA": driver}, quota_tracker_, telemetry_)
+    plan = _plan([ModelSelection(model_id="execA/model", provider="execA", role="primary")])
+
+    result = await executor.execute(plan)
+
+    assert result.response_text == "HelloWorld"
+
+
+@pytest.mark.asyncio
+async def test_response_text_untouched_when_sanitize_disabled(quota_tracker_, telemetry_):
+    driver = _ScriptedDriver([_success("Hello​World")])
+    executor = _executor({"execA": driver}, quota_tracker_, telemetry_, sanitize_enabled=False)
+    plan = _plan([ModelSelection(model_id="execA/model", provider="execA", role="primary")])
+
+    result = await executor.execute(plan)
+
+    assert result.response_text == "Hello​World"
 
 
 @pytest.mark.asyncio
