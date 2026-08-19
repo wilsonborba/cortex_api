@@ -309,3 +309,47 @@ def test_sync_clears_an_expired_cooldown(registry_repo: ModelRepository):
     stored = registry_repo.get_by_id("codex/reg-cooldown-expired-o3")
     assert stored.access_status == AccessStatus.AVAILABLE.value
     assert stored.cooldown_until is None
+
+
+def test_sync_scoped_to_providers_only_probes_those(registry_repo: ModelRepository):
+    codex_discovery = _FakeDiscovery(
+        "codex",
+        models=[
+            DiscoveredModel(
+                id="codex/reg-scoped-o3", provider="codex", display_name="OpenAI o3",
+                access_status=AccessStatus.AVAILABLE.value,
+            )
+        ],
+    )
+    claude_discovery = _FakeDiscovery(
+        "claude",
+        models=[
+            DiscoveredModel(
+                id="claude/reg-scoped-sonnet", provider="claude", display_name="Claude Sonnet 5",
+                access_status=AccessStatus.AVAILABLE.value,
+            )
+        ],
+    )
+    service = ModelRegistryService(discoveries=[codex_discovery, claude_discovery], repository=registry_repo)
+
+    service.sync(providers={"codex"})
+
+    assert registry_repo.get_by_id("codex/reg-scoped-o3") is not None
+    assert registry_repo.get_by_id("claude/reg-scoped-sonnet") is None  # claude was never probed
+
+
+def test_sync_without_providers_filter_probes_everyone(registry_repo: ModelRepository):
+    discovery = _FakeDiscovery(
+        "codex",
+        models=[
+            DiscoveredModel(
+                id="codex/reg-unscoped-o3", provider="codex", display_name="OpenAI o3",
+                access_status=AccessStatus.AVAILABLE.value,
+            )
+        ],
+    )
+    service = ModelRegistryService(discoveries=[discovery], repository=registry_repo)
+
+    service.sync()  # providers=None: unrestricted, matches pre-#13 behavior
+
+    assert registry_repo.get_by_id("codex/reg-unscoped-o3") is not None

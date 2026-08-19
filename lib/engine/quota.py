@@ -10,6 +10,7 @@ from lib.dal.models import AccessStatus
 from lib.dal.repositories.model_repository import ModelRepository
 from lib.dal.repositories.quota_repository import QuotaRepository
 from lib.engine.drivers.base import DriverResult
+from lib.engine.registry_service import ModelRegistryService
 
 # Local providers run for free with no external window to budget against;
 # their quota factor is always the maximum.
@@ -125,3 +126,19 @@ class QuotaTracker:
                 self._model_repo.clear_cooldown(entry.id)
                 cleared.append(entry.id)
         return cleared
+
+
+def refresh_and_resync(tracker: QuotaTracker, registry: ModelRegistryService) -> List[str]:
+    """Closes the cooldown loop for real (issue #13): `refresh_cooldowns()`
+    alone only moves an expired cooldown to `OFFLINE` -- a guess based on
+    the clock, not a confirmation. This is what actually re-probes the
+    provider live, scoped to just the providers that just cleared, so a
+    recovered model doesn't sit `OFFLINE` indefinitely waiting for someone
+    to run a manual sync. A provider still genuinely down keeps whatever
+    status the live probe finds (including `OFFLINE` again).
+    """
+    cleared = tracker.refresh_cooldowns()
+    if cleared:
+        providers = {model_id.split("/", 1)[0] for model_id in cleared}
+        registry.sync(providers=providers)
+    return cleared

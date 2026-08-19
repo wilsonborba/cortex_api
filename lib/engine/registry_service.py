@@ -88,14 +88,19 @@ class ModelRegistryService:
 
     # -- live discovery / sync --------------------------------------------------
 
-    def sync(self) -> List[ModelCatalogEntry]:
+    def sync(self, providers: Optional[Iterable[str]] = None) -> List[ModelCatalogEntry]:
         """Probes every provider and merges the results into the cache.
 
         Each discovery adapter is isolated: one provider failing to respond
-        doesn't stop the others from updating.
+        doesn't stop the others from updating. Pass `providers` to scope the
+        live probe to just those (e.g. the ones a cooldown just cleared for)
+        instead of hitting every provider on every call.
         """
+        wanted = set(providers) if providers is not None else None
         with session_scope() as session:
             for discovery in self._discoveries:
+                if wanted is not None and discovery.provider not in wanted:
+                    continue
                 try:
                     discovered = discovery.discover()
                 except ProviderDiscoveryError as exc:
