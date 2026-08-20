@@ -14,6 +14,8 @@
 
 - Correct ROOT_DIR path in uninstall.sh after move to scripts/
 
+- Untrack docs/ directory per AI_AGENT_Working_Rules section 9 and consolidate in documentation/
+
 
 ### Chores
 
@@ -29,6 +31,10 @@
 - Comprehensive production README, service help enhancements, and verification
 
 - Add dedicated documentation directory, provider guides, external tools setup, and multilingual scalar switcher
+
+- Generate CHANGELOG.md for v0.1.0 via git-cliff
+
+- Update CHANGELOG.md for v0.1.0
 
 
 ### Features
