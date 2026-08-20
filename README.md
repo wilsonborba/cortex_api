@@ -171,13 +171,27 @@ The Cortex native REST API listens on `0.0.0.0:8003` by default:
 
 ---
 
+---
+
+## Documentation
+
+Comprehensive operational and technical guides are available in the [`documentation/`](documentation/) directory:
+
+* 🚀 **[Installation & Profiles Guide](documentation/installation.md):** Hardware profiling, `Light`/`Medium`/`Complete` profiles, Linux/macOS/WSL setup, and smart port allocation.
+* ⚙️ **[Configuration Reference](documentation/configuration.md):** Environment variables, database connection strings, sliding-window quotas, and scoring weights.
+* 🌐 **[AI Providers Setup Guide](documentation/providers.md):** Setup instructions, API key generation links, and `.env` variables for all 14+ AI providers.
+* 🛠️ **[External AI Tools & CLI Setup](documentation/external-tools.md):** Configuration for Codex CLI, Antigravity CLI, Claude Docker, local Ollama, and local Whisper.
+* 🔍 **[Troubleshooting & Diagnostics](documentation/troubleshooting.md):** Solutions for installation errors, missing libraries, port conflicts, and capability degradation.
+
+---
+
 ## Interactive Documentation & Multilingual Specs
 
 * **Interactive Scalar Documentation:** [`http://localhost:8003/scalar`](http://localhost:8003/scalar)
 * **Interactive Swagger UI:** [`http://localhost:8003/docs`](http://localhost:8003/docs)
 * **OpenAPI 3.1 Specification:** [`http://localhost:8003/openapi.json`](http://localhost:8003/openapi.json)
 
-### Multilingual Technical References:
+### Multilingual API References:
 * 🇬🇧 **[English API Reference](docs/scalar/api_reference_en.md)**
 * 🇧🇷 **[Referência da API em Português](docs/scalar/api_reference_pt.md)**
 * 🇹🇭 **[เอกสารอ้างอิง API ภาษาไทย](docs/scalar/api_reference_th.md)**

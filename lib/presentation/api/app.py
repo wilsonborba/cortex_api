@@ -131,10 +131,42 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      body { margin: 0; }
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+      .cortex-nav {
+        background: #1e1b2e;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 20px;
+        font-size: 14px;
+        border-bottom: 1px solid #332d4a;
+      }
+      .cortex-nav a {
+        color: #bfa5ff;
+        text-decoration: none;
+        margin-left: 15px;
+        font-weight: 500;
+      }
+      .cortex-nav a:hover {
+        text-decoration: underline;
+      }
     </style>
   </head>
   <body>
+    <div class="cortex-nav">
+      <div><strong>Cortex Multi-Model AI Orchestration Engine</strong></div>
+      <div>
+        <span>📚 Specs:</span>
+        <a href="/docs" target="_blank">Swagger UI</a>
+        <a href="/system/capabilities" target="_blank">System Capabilities</a>
+        <span style="margin-left: 15px;">🌐 Languages:</span>
+        <a href="/docs/scalar" style="color: #fff; font-weight: bold;">Interactive</a>
+        <a href="https://github.com/wilsonborba/cortex/blob/release/main/docs/scalar/api_reference_en.md" target="_blank">🇬🇧 EN</a>
+        <a href="https://github.com/wilsonborba/cortex/blob/release/main/docs/scalar/api_reference_pt.md" target="_blank">🇧🇷 PT</a>
+        <a href="https://github.com/wilsonborba/cortex/blob/release/main/docs/scalar/api_reference_th.md" target="_blank">🇹🇭 TH</a>
+      </div>
+    </div>
     <script
       id="api-reference"
       data-url="/openapi.json"

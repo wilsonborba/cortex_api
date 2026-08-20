@@ -78,7 +78,7 @@ def test_audio_attachment_errors_when_no_backend_available(monkeypatch):
     result = ingestor.ingest([_audio_attachment()])
 
     assert not result.ok
-    assert "no transcription backend available" in result.errors[0]
+    assert "audio transcription is unavailable" in result.errors[0]
 
 
 def test_audio_attachment_errors_when_groq_backend_fails():
