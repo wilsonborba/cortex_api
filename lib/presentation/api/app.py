@@ -98,6 +98,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         version="0.1.0",
         description="Unified dynamic orchestration, quota tracking, evidence-based routing, and OpenAI-compatible facade across 14+ AI providers.",
         openapi_tags=OPENAPI_TAGS_METADATA,
+        docs_url=None,
+        redoc_url=None,
         lifespan=_build_lifespan(settings),
     )
     app.state.settings = settings
@@ -123,6 +125,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         logger.error("unhandled error on %s %s", request.method, request.url.path, exc_info=True)
         return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(exc)})
 
+    @app.get("/docs", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/scalar", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/docs/scalar", response_class=HTMLResponse, include_in_schema=False)
     async def scalar_html():
@@ -161,10 +164,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
       <div><strong>Cortex Multi-Model AI Orchestration Engine</strong></div>
       <div>
         <span>📚 Specs:</span>
-        <a href="/docs" target="_blank">Swagger UI</a>
+        <a href="/openapi.json" target="_blank">OpenAPI JSON</a>
         <a href="/system/capabilities" target="_blank">System Capabilities</a>
         <span style="margin-left: 15px;">🌐 Languages:</span>
-        <a href="/docs/scalar" style="color: #fff; font-weight: bold;">Interactive</a>
+        <a href="/docs" style="color: #fff; font-weight: bold;">Interactive</a>
         <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_en.md" target="_blank">🇬🇧 EN</a>
         <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_pt.md" target="_blank">🇧🇷 PT</a>
         <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_th.md" target="_blank">🇹🇭 TH</a>

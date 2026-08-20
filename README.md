@@ -187,8 +187,7 @@ Comprehensive operational and technical guides are available in the [`documentat
 
 ## Interactive Documentation & Multilingual Specs
 
-* **Interactive Scalar Documentation:** [`http://localhost:8003/scalar`](http://localhost:8003/scalar)
-* **Interactive Swagger UI:** [`http://localhost:8003/docs`](http://localhost:8003/docs)
+* **Interactive Scalar Documentation:** [`http://localhost:8003/docs`](http://localhost:8003/docs) (or [`http://localhost:8003/scalar`](http://localhost:8003/scalar))
 * **OpenAPI 3.1 Specification:** [`http://localhost:8003/openapi.json`](http://localhost:8003/openapi.json)
 
 ### Multilingual API References:

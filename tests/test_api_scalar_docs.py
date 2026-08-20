@@ -28,6 +28,14 @@ def test_scalar_docs_endpoint(client: TestClient):
     assert "@scalar/api-reference" in response.text
 
 
+def test_docs_endpoint(client: TestClient):
+    response = client.get("/docs")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Scalar" in response.text
+    assert "@scalar/api-reference" in response.text
+
+
 def test_docs_scalar_alias_endpoint(client: TestClient):
     response = client.get("/docs/scalar")
     assert response.status_code == 200

@@ -27,8 +27,8 @@ This directory contains detailed technical guides to help developers, system adm
 
 ## Interactive API Documentation
 
-* **Interactive Scalar Documentation:** [`http://localhost:8003/scalar`](http://localhost:8003/scalar)
-* **Interactive Swagger UI:** [`http://localhost:8003/docs`](http://localhost:8003/docs)
+* **Interactive Scalar Documentation:** [`http://localhost:8003/docs`](http://localhost:8003/docs) (or [`http://localhost:8003/scalar`](http://localhost:8003/scalar))
+* **OpenAPI 3.1 Specification:** [`http://localhost:8003/openapi.json`](http://localhost:8003/openapi.json)
 * **Multilingual API Reference Specs:**
   * 🇬🇧 **[English API Reference](./scalar/api_reference_en.md)**
   * 🇧🇷 **[Referência da API em Português](./scalar/api_reference_pt.md)**
