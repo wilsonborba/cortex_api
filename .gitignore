@@ -2,9 +2,10 @@
 .env
 .env.*
 !.env.example
+docs/providers_api_keys.txt
 
-# Local docs (never pushed — see AI_AGENT_Working_Rules.md, section 9)
-docs/
+# Local docs (tracked)
+!docs/
 
 # Python
 .venv/

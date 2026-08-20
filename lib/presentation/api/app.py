@@ -72,9 +72,30 @@ def _build_lifespan(settings: Settings):
     return _lifespan
 
 
+from fastapi.responses import HTMLResponse, JSONResponse
+
+OPENAPI_TAGS_METADATA = [
+    {"name": "execute", "description": "Dynamic multi-tier execution engine across providers and pipelines."},
+    {"name": "models", "description": "Model registry, live provider discovery, status inspection, and configuration."},
+    {"name": "openai-facade", "description": "OpenAI-compatible /v1/chat/completions and /v1/models protocol facade."},
+    {"name": "tiers", "description": "Tier envelopes (T0 to T5) policy configuration and latency bounds."},
+    {"name": "pins", "description": "Routing pins for pinning specific models or strategies to tiers/tasks."},
+    {"name": "quota", "description": "Sliding-window token quota usage, budget tracking, and cooldown status."},
+    {"name": "telemetry", "description": "Execution telemetry stats, aggregated metrics, and event audit trail."},
+    {"name": "logs", "description": "Real-time WebSocket streaming of live system logs."},
+    {"name": "video", "description": "Async video ingest, multi-modal frame extraction, and transcription jobs."},
+]
+
+
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or get_settings()
-    app = FastAPI(title="Cortex", version="0.1.0", lifespan=_build_lifespan(settings))
+    app = FastAPI(
+        title="Cortex Multi-Model AI Orchestrator API",
+        version="0.1.0",
+        description="Unified dynamic orchestration, quota tracking, evidence-based routing, and OpenAI-compatible facade across 14+ AI providers.",
+        openapi_tags=OPENAPI_TAGS_METADATA,
+        lifespan=_build_lifespan(settings),
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -96,6 +117,31 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         logger.error("unhandled error on %s %s", request.method, request.url.path, exc_info=True)
         return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(exc)})
+
+    @app.get("/scalar", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/docs/scalar", response_class=HTMLResponse, include_in_schema=False)
+    async def scalar_html():
+        return HTMLResponse(
+            """<!doctype html>
+<html>
+  <head>
+    <title>Cortex API Documentation - Scalar</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body { margin: 0; }
+    </style>
+  </head>
+  <body>
+    <script
+      id="api-reference"
+      data-url="/openapi.json"
+      data-configuration='{"theme": "purple", "layout": "modern", "showSidebar": true}'>
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  </body>
+</html>"""
+        )
 
     app.include_router(execute.router)
     app.include_router(models.router)
