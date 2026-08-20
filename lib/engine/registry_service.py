@@ -202,7 +202,7 @@ class ModelRegistryService:
             parameter_size=discovered.parameter_size,
             context_window=discovered.context_window,
             is_local=discovered.is_local,
-            tier_eligibility=existing.tier_eligibility if existing else discovered.tier_eligibility,
+            tier_eligibility=discovered.tier_eligibility if discovered.tier_eligibility else (existing.tier_eligibility if existing else []),
             capabilities=existing.capabilities if existing else discovered.capabilities,
             cost_per_million_tokens=(
                 existing.cost_per_million_tokens if existing else discovered.cost_per_million_tokens

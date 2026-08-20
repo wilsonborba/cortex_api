@@ -10,7 +10,7 @@ from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
 # Free-tier cloud models aren't local, but they cost nothing within quota, so
 # they start eligible across the same broad tier range Antigravity's cloud
 # models do (see discovery/antigravity.py).
-DEFAULT_TIER_ELIGIBILITY = [0, 1, 2, 3]
+DEFAULT_TIER_ELIGIBILITY = [0, 1, 2, 3, 4, 5]
 DEFAULT_CONTEXT_WINDOW = 8192
 
 

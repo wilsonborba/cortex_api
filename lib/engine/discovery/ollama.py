@@ -9,7 +9,7 @@ from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
 
 # Local models start eligible for the low-effort tiers; promote them via
 # `cortex models config` once telemetry shows they hold up for more.
-DEFAULT_TIER_ELIGIBILITY = [0, 1, 2]
+DEFAULT_TIER_ELIGIBILITY = [0, 1, 2, 3, 4, 5]
 DEFAULT_CONTEXT_WINDOW = 8192
 
 
