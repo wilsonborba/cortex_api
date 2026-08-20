@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 VENV_DIR="$ROOT_DIR/.venv"
 ENV_FILE="$ROOT_DIR/.env"
 ENV_EXAMPLE="$ROOT_DIR/.env.example"
@@ -11,7 +11,7 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 CURRENT_USER=$(id -un)
 CURRENT_GROUP=$(id -gn)
 DEFAULT_HOST="127.0.0.1"
-DEFAULT_PORT="8000"
+DEFAULT_PORT="8003"
 
 log() {
   printf '[cortex-install] %s\n' "$1"
