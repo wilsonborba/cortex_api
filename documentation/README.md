@@ -30,6 +30,6 @@ This directory contains detailed technical guides to help developers, system adm
 * **Interactive Scalar Documentation:** [`http://localhost:8003/scalar`](http://localhost:8003/scalar)
 * **Interactive Swagger UI:** [`http://localhost:8003/docs`](http://localhost:8003/docs)
 * **Multilingual API Reference Specs:**
-  * 🇬🇧 **[English API Reference](../docs/scalar/api_reference_en.md)**
-  * 🇧🇷 **[Referência da API em Português](../docs/scalar/api_reference_pt.md)**
-  * 🇹🇭 **[เอกสารอ้างอิง API ภาษาไทย](../docs/scalar/api_reference_th.md)**
+  * 🇬🇧 **[English API Reference](./scalar/api_reference_en.md)**
+  * 🇧🇷 **[Referência da API em Português](./scalar/api_reference_pt.md)**
+  * 🇹🇭 **[เอกสารอ้างอิง API ภาษาไทย](./scalar/api_reference_th.md)**

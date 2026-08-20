@@ -162,9 +162,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         <a href="/system/capabilities" target="_blank">System Capabilities</a>
         <span style="margin-left: 15px;">🌐 Languages:</span>
         <a href="/docs/scalar" style="color: #fff; font-weight: bold;">Interactive</a>
-        <a href="https://github.com/wilsonborba/cortex/blob/release/main/docs/scalar/api_reference_en.md" target="_blank">🇬🇧 EN</a>
-        <a href="https://github.com/wilsonborba/cortex/blob/release/main/docs/scalar/api_reference_pt.md" target="_blank">🇧🇷 PT</a>
-        <a href="https://github.com/wilsonborba/cortex/blob/release/main/docs/scalar/api_reference_th.md" target="_blank">🇹🇭 TH</a>
+        <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_en.md" target="_blank">🇬🇧 EN</a>
+        <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_pt.md" target="_blank">🇧🇷 PT</a>
+        <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_th.md" target="_blank">🇹🇭 TH</a>
       </div>
     </div>
     <script

@@ -192,9 +192,9 @@ Comprehensive operational and technical guides are available in the [`documentat
 * **OpenAPI 3.1 Specification:** [`http://localhost:8003/openapi.json`](http://localhost:8003/openapi.json)
 
 ### Multilingual API References:
-* 🇬🇧 **[English API Reference](docs/scalar/api_reference_en.md)**
-* 🇧🇷 **[Referência da API em Português](docs/scalar/api_reference_pt.md)**
-* 🇹🇭 **[เอกสารอ้างอิง API ภาษาไทย](docs/scalar/api_reference_th.md)**
+* 🇬🇧 **[English API Reference](documentation/scalar/api_reference_en.md)**
+* 🇧🇷 **[Referência da API em Português](documentation/scalar/api_reference_pt.md)**
+* 🇹🇭 **[เอกสารอ้างอิง API ภาษาไทย](documentation/scalar/api_reference_th.md)**
 
 ---
 
