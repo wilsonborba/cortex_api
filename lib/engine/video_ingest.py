@@ -43,7 +43,12 @@ class VideoIngestResult:
 
 
 def _run_ffmpeg(args: List[str], timeout: float = 300.0) -> None:
-    result = subprocess.run(["ffmpeg", "-y", *args], capture_output=True, text=True, timeout=timeout)
+    try:
+        result = subprocess.run(["ffmpeg", "-y", *args], capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "video processing requires 'ffmpeg' binary in system PATH (install via 'sudo apt install ffmpeg' or 'brew install ffmpeg')"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {result.stderr.strip()[:500]}")
 

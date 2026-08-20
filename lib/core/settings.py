@@ -20,6 +20,10 @@ class Settings(BaseSettings):
         default="development",
         validation_alias=AliasChoices("CORTEX_ENVIRONMENT", "ENVIRONMENT", "ENV"),
     )
+    profile: str = Field(
+        default="complete",
+        validation_alias=AliasChoices("CORTEX_PROFILE", "PROFILE"),
+    )
     database_url: str = Field(
         default="sqlite:///var/cortex.db",
         validation_alias=AliasChoices("CORTEX_DATABASE_URL", "DATABASE_URL"),
