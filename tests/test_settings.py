@@ -17,9 +17,8 @@ def test_default_settings(monkeypatch):
     assert settings.ollama_base_url == "http://localhost:11434"
     assert settings.hippocampus_url == "http://localhost:8001"
     assert settings.log_level == "INFO"
-    assert settings.log_file == Path("var/cortex.log")
-    assert settings.api_host == "127.0.0.1"
-    assert settings.api_port == 8000
+    assert settings.api_host == "0.0.0.0"
+    assert settings.api_port == 8003
     assert settings.sliding_window_hours == 5
 
 

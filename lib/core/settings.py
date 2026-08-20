@@ -47,11 +47,11 @@ class Settings(BaseSettings):
 
     # Server configuration
     api_host: str = Field(
-        default="127.0.0.1",
+        default="0.0.0.0",
         validation_alias=AliasChoices("CORTEX_API_HOST", "API_HOST"),
     )
     api_port: int = Field(
-        default=8000,
+        default=8003,
         validation_alias=AliasChoices("CORTEX_API_PORT", "API_PORT"),
     )
 
