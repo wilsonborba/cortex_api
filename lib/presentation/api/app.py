@@ -17,7 +17,7 @@ from lib.engine.quota import QuotaTracker, refresh_and_resync
 from lib.engine.registry_service import build_default_registry_service
 from lib.engine.router import NoEligibleModelError
 from lib.engine.tiers import TierService
-from lib.presentation.api.routes import execute, logs_stream, models, openai_facade, pins, quota, telemetry, tiers, video
+from lib.presentation.api.routes import execute, logs_stream, models, openai_facade, pins, quota, system, telemetry, tiers, video
 
 logger = get_logger(__name__)
 
@@ -84,6 +84,7 @@ OPENAPI_TAGS_METADATA = [
     {"name": "telemetry", "description": "Execution telemetry stats, aggregated metrics, and event audit trail."},
     {"name": "logs", "description": "Real-time WebSocket streaming of live system logs."},
     {"name": "video", "description": "Async video ingest, multi-modal frame extraction, and transcription jobs."},
+    {"name": "system", "description": "System runtime profile, hardware capabilities introspection, and feature status."},
 ]
 
 
@@ -96,6 +97,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         openapi_tags=OPENAPI_TAGS_METADATA,
         lifespan=_build_lifespan(settings),
     )
+    app.state.settings = settings
 
     app.add_middleware(
         CORSMiddleware,
@@ -152,5 +154,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(logs_stream.router)
     app.include_router(openai_facade.router)
     app.include_router(video.router)
+    app.include_router(system.router)
 
     return app

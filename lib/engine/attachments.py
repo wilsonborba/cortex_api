@@ -105,9 +105,11 @@ class AttachmentIngestor:
             except GroqTranscriptionError as exc:
                 return "", f"attachment {attachment.filename!r}: transcription failed ({exc})"
 
+        profile = getattr(self._settings, "profile", "complete")
         return "", (
-            f"attachment {attachment.filename!r}: no transcription backend available "
-            "(local whisper failed/disabled and no groq_api_key configured)"
+            f"attachment {attachment.filename!r}: audio transcription is unavailable under profile '{profile}' "
+            "(local Whisper is not installed/enabled and no CORTEX_GROQ_API_KEY is configured for cloud transcription. "
+            "To enable: configure CORTEX_GROQ_API_KEY in .env or reinstall with './scripts/install.sh --profile complete')"
         )
 
 
