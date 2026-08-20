@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SERVICE_NAME="cortex-api"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 PURGE_DATA=false
