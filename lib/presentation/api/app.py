@@ -17,6 +17,7 @@ from lib.engine.quota import QuotaTracker, refresh_and_resync
 from lib.engine.registry_service import build_default_registry_service
 from lib.engine.router import NoEligibleModelError
 from lib.engine.tiers import TierService
+from lib.presentation.api.openapi_i18n import get_localized_openapi
 from lib.presentation.api.routes import execute, logs_stream, models, openai_facade, pins, quota, system, telemetry, tiers, video
 
 logger = get_logger(__name__)
@@ -98,6 +99,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         version="0.1.0",
         description="Unified dynamic orchestration, quota tracking, evidence-based routing, and OpenAI-compatible facade across 14+ AI providers.",
         openapi_tags=OPENAPI_TAGS_METADATA,
+        openapi_url=None,
         docs_url=None,
         redoc_url=None,
         lifespan=_build_lifespan(settings),
@@ -125,63 +127,146 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         logger.error("unhandled error on %s %s", request.method, request.url.path, exc_info=True)
         return JSONResponse(status_code=500, content={"error": "internal_error", "detail": str(exc)})
 
+    @app.get("/openapi.json", include_in_schema=False)
+    async def openapi_endpoint(lang: str = "en") -> JSONResponse:
+        return JSONResponse(get_localized_openapi(app, lang=lang))
+
+    @app.get("/openapi-en.json", include_in_schema=False)
+    async def openapi_en() -> JSONResponse:
+        return JSONResponse(get_localized_openapi(app, lang="en"))
+
+    @app.get("/openapi-pt.json", include_in_schema=False)
+    async def openapi_pt() -> JSONResponse:
+        return JSONResponse(get_localized_openapi(app, lang="pt"))
+
+    @app.get("/openapi-th.json", include_in_schema=False)
+    async def openapi_th() -> JSONResponse:
+        return JSONResponse(get_localized_openapi(app, lang="th"))
+
     @app.get("/docs", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/scalar", response_class=HTMLResponse, include_in_schema=False)
     @app.get("/docs/scalar", response_class=HTMLResponse, include_in_schema=False)
-    async def scalar_html():
-        return HTMLResponse(
-            """<!doctype html>
-<html>
+    async def scalar_html(lang: Optional[str] = "en"):
+        cur_lang = (lang or "en").lower()
+        if cur_lang not in ("en", "pt", "th"):
+            cur_lang = "en"
+
+        openapi_url = f"/openapi.json?lang={cur_lang}"
+
+        en_active = "active" if cur_lang == "en" else ""
+        pt_active = "active" if cur_lang == "pt" else ""
+        th_active = "active" if cur_lang == "th" else ""
+
+        html = f"""<!doctype html>
+<html lang="{cur_lang}">
   <head>
     <title>Cortex API Documentation - Scalar</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-      .cortex-nav {
-        background: #1e1b2e;
+      body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }}
+      .cortex-nav {{
+        background: #181528;
         color: #fff;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        padding: 10px 20px;
+        padding: 10px 24px;
         font-size: 14px;
-        border-bottom: 1px solid #332d4a;
-      }
-      .cortex-nav a {
-        color: #bfa5ff;
+        border-bottom: 1px solid #2d264a;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      }}
+      .cortex-brand {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+      }}
+      .cortex-badge {{
+        background: #7c3aed;
+        color: #fff;
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-weight: bold;
+      }}
+      .cortex-links {{
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }}
+      .cortex-links a {{
+        color: #c4b5fd;
         text-decoration: none;
-        margin-left: 15px;
         font-weight: 500;
-      }
-      .cortex-nav a:hover {
+        transition: color 0.15s ease;
+      }}
+      .cortex-links a:hover {{
+        color: #fff;
         text-decoration: underline;
-      }
+      }}
+      .lang-switcher {{
+        display: inline-flex;
+        align-items: center;
+        background: #251f3d;
+        border: 1px solid #433870;
+        border-radius: 8px;
+        padding: 3px;
+        gap: 4px;
+      }}
+      .lang-btn {{
+        background: transparent;
+        color: #bfa5ff;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 4px 10px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.15s ease;
+      }}
+      .lang-btn:hover {{
+        color: #fff;
+        background: rgba(124, 58, 237, 0.2);
+      }}
+      .lang-btn.active {{
+        background: #7c3aed;
+        color: #ffffff;
+        border-color: #9333ea;
+        box-shadow: 0 0 10px rgba(124, 58, 237, 0.4);
+      }}
     </style>
   </head>
   <body>
     <div class="cortex-nav">
-      <div><strong>Cortex Multi-Model AI Orchestration Engine</strong></div>
-      <div>
-        <span>📚 Specs:</span>
-        <a href="/openapi.json" target="_blank">OpenAPI JSON</a>
-        <a href="/system/capabilities" target="_blank">System Capabilities</a>
-        <span style="margin-left: 15px;">🌐 Languages:</span>
-        <a href="/docs" style="color: #fff; font-weight: bold;">Interactive</a>
-        <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_en.md" target="_blank">🇬🇧 EN</a>
-        <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_pt.md" target="_blank">🇧🇷 PT</a>
-        <a href="https://github.com/wilsonborba/cortex/blob/main/documentation/scalar/api_reference_th.md" target="_blank">🇹🇭 TH</a>
+      <div class="cortex-brand">
+        <span>🧠 Cortex Multi-Model AI Orchestrator</span>
+        <span class="cortex-badge">v0.1.0</span>
+      </div>
+      <div class="cortex-links">
+        <a href="/openapi.json?lang={cur_lang}" target="_blank">📋 OpenAPI JSON</a>
+        <a href="/system/capabilities" target="_blank">⚡ Capabilities</a>
+        <div class="lang-switcher">
+          <a href="?lang=en" class="lang-btn {en_active}">🇬🇧 English</a>
+          <a href="?lang=pt" class="lang-btn {pt_active}">🇧🇷 Português</a>
+          <a href="?lang=th" class="lang-btn {th_active}">🇹🇭 ไทย</a>
+        </div>
       </div>
     </div>
     <script
       id="api-reference"
-      data-url="/openapi.json"
-      data-configuration='{"theme": "purple", "layout": "modern", "showSidebar": true}'>
+      data-url="{openapi_url}"
+      data-configuration='{{"theme": "purple", "layout": "modern", "showSidebar": true}}'>
     </script>
     <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
   </body>
 </html>"""
-        )
+        return HTMLResponse(html)
 
     app.include_router(execute.router)
     app.include_router(models.router)

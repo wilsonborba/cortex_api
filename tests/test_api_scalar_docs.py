@@ -58,3 +58,42 @@ def test_openapi_tags_metadata(client: TestClient):
     assert "/routing/pins" in data["paths"]
     assert "/telemetry/stats" in data["paths"]
     assert "/attachments/video" in data["paths"]
+
+
+def test_localized_scalar_docs_switching(client: TestClient):
+    # Portuguese Docs
+    res_pt = client.get("/docs?lang=pt")
+    assert res_pt.status_code == 200
+    assert "data-url=\"/openapi.json?lang=pt\"" in res_pt.text
+    assert "Português" in res_pt.text
+
+    # Thai Docs
+    res_th = client.get("/docs?lang=th")
+    assert res_th.status_code == 200
+    assert "data-url=\"/openapi.json?lang=th\"" in res_th.text
+    assert "ไทย" in res_th.text
+
+
+def test_localized_openapi_specs(client: TestClient):
+    # Portuguese Spec
+    res_pt = client.get("/openapi.json?lang=pt")
+    assert res_pt.status_code == 200
+    data_pt = res_pt.json()
+    assert "API de Orquestração Multi-Modelo Cortex" in data_pt["info"]["title"]
+    assert "Executar Prompt com Roteamento Adaptativo" in data_pt["paths"]["/execute"]["post"]["summary"]
+
+    # Thai Spec
+    res_th = client.get("/openapi.json?lang=th")
+    assert res_th.status_code == 200
+    data_th = res_th.json()
+    assert "Cortex API การจัดการ AI หลายโมเดลแบบรวมศูนย์" in data_th["info"]["title"]
+    assert "ประมวลผล Prompt ด้วยการเลือกเส้นทางแบบปรับตัว" in data_th["paths"]["/execute"]["post"]["summary"]
+
+    # Direct lang alias endpoints
+    res_direct_pt = client.get("/openapi-pt.json")
+    assert res_direct_pt.status_code == 200
+    assert "Orquestração" in res_direct_pt.json()["info"]["title"]
+
+    res_direct_th = client.get("/openapi-th.json")
+    assert res_direct_th.status_code == 200
+    assert "การจัดการ" in res_direct_th.json()["info"]["title"]
