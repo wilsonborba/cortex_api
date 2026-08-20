@@ -21,6 +21,7 @@ LAUNCHD_PLIST="${HOME}/Library/LaunchAgents/com.cortex.api.plist"
 DEFAULT_HOST="0.0.0.0"
 DEFAULT_PORT="8003"
 PROFILE="auto"
+NON_INTERACTIVE="false"
 INSTALL_SERVICE="true"
 CONFIGURE_FIREWALL="true"
 SKIP_HEALTHCHECK="false"
@@ -44,7 +45,8 @@ Usage: ./scripts/install.sh [OPTIONS]
 Options:
   --profile <auto|light|medium|complete>  Installation profile (default: auto)
   --host <ip>                             API Host bind address (default: 0.0.0.0)
-  --port <port>                           API Port (default: 8003)
+  --port <port>                           API Port (default: 8003 or existing .env)
+  --non-interactive, -y                   Accept all recommendations without prompting
   --no-service                            Do not install system/user background service
   --no-ufw                                Skip UFW firewall rules configuration
   --skip-healthcheck                      Skip post-install API connectivity healthcheck
@@ -71,6 +73,10 @@ while [ $# -gt 0 ]; do
     --port)
       DEFAULT_PORT="$2"
       shift 2
+      ;;
+    --non-interactive|-y)
+      NON_INTERACTIVE="true"
+      shift
       ;;
     --no-service)
       INSTALL_SERVICE="false"
@@ -134,31 +140,98 @@ check_python_environment() {
 
 detect_and_select_profile() {
   local detector="$SCRIPTS_DIR/detect_hardware.sh"
-  if [ ! -f "$detector" ]; then
-    log_warn "detect_hardware.sh not found; falling back to profile 'medium'."
-    SELECTED_PROFILE="medium"
-    return
+  local auto_profile="medium"
+  if [ -f "$detector" ]; then
+    chmod +x "$detector"
+    "$detector"
+    auto_profile=$("$detector" --profile-only 2>/dev/null || echo "medium")
   fi
 
-  chmod +x "$detector"
-  local auto_profile
-  auto_profile=$("$detector" --profile-only 2>/dev/null || echo "medium")
-
-  if [ "$PROFILE" = "auto" ]; then
-    SELECTED_PROFILE="$auto_profile"
-    log_info "Auto-detected system capabilities. Selected profile: '${SELECTED_PROFILE}'"
-  else
+  if [ "$PROFILE" != "auto" ]; then
     case "$PROFILE" in
       light|medium|complete)
         SELECTED_PROFILE="$PROFILE"
-        log_info "Explicit profile selected: '${SELECTED_PROFILE}'"
+        log_info "Profile selected via argument: '${SELECTED_PROFILE}'"
         ;;
       *)
         log_err "Invalid profile '$PROFILE'. Allowed values: auto, light, medium, complete."
         exit 1
         ;;
     esac
+    return
   fi
+
+  if [ "$NON_INTERACTIVE" = "true" ] || [ ! -t 0 ]; then
+    SELECTED_PROFILE="$auto_profile"
+    log_info "Using recommended profile '${SELECTED_PROFILE}'."
+    return
+  fi
+
+  printf "\n%s\n" "========================================================"
+  printf " Select Installation Profile:\n"
+  printf "  [1] Light    - Low memory (< 8GB), cloud-first API, no local Whisper/models\n"
+  printf "  [2] Medium   - Balanced setup (8-16GB RAM, crawler + database tools)\n"
+  printf "  [3] Complete - Full local stack (16GB+ RAM / GPU, local audio transcription)\n"
+  printf "%s\n" "--------------------------------------------------------"
+  printf " Recommended Profile: [%s]\n" "$auto_profile"
+  read -r -p " Press ENTER to accept recommendation or type choice [light/medium/complete]: " user_choice || user_choice=""
+
+  case "$user_choice" in
+    1|light|Light) SELECTED_PROFILE="light" ;;
+    2|medium|Medium) SELECTED_PROFILE="medium" ;;
+    3|complete|Complete) SELECTED_PROFILE="complete" ;;
+    "") SELECTED_PROFILE="$auto_profile" ;;
+    *)
+      log_warn "Unrecognized choice '$user_choice'; proceeding with recommendation '${auto_profile}'."
+      SELECTED_PROFILE="$auto_profile"
+      ;;
+  esac
+  log_info "Effective installation profile: '${SELECTED_PROFILE}'"
+}
+
+is_port_in_use() {
+  local port="$1"
+  "$PYTHON_BIN" -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(1); res = s.connect_ex(('127.0.0.1', int('$port'))); s.close(); exit(0 if res == 0 else 1)" 2>/dev/null
+}
+
+is_port_owned_by_cortex() {
+  local port="$1"
+  "$PYTHON_BIN" -c "
+import urllib.request
+try:
+    with urllib.request.urlopen('http://127.0.0.1:$port/models', timeout=2) as r:
+        exit(0 if r.status == 200 else 1)
+except Exception:
+    exit(1)
+" 2>/dev/null
+}
+
+resolve_effective_port() {
+  local desired_port
+  desired_port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
+
+  if ! is_port_in_use "$desired_port"; then
+    EFFECTIVE_PORT="$desired_port"
+    log_info "Port $EFFECTIVE_PORT is available."
+    return
+  fi
+
+  if is_port_owned_by_cortex "$desired_port"; then
+    EFFECTIVE_PORT="$desired_port"
+    log_info "Port $EFFECTIVE_PORT is currently in use by Cortex; preserving existing port configuration."
+    return
+  fi
+
+  log_warn "Port $desired_port is occupied by another service. Searching for open port..."
+  local candidate=$(( desired_port + 1 ))
+  while [ "$candidate" -le 65535 ]; do
+    if ! is_port_in_use "$candidate"; then
+      EFFECTIVE_PORT="$candidate"
+      log_info "Found available port: $EFFECTIVE_PORT."
+      break
+    fi
+    candidate=$(( candidate + 1 ))
+  done
 }
 
 create_virtualenv() {
@@ -220,8 +293,9 @@ configure_environment() {
     else
       cat <<EOF > "$ENV_FILE"
 CORTEX_DATABASE_URL=sqlite:///var/cortex.db
+CORTEX_PROFILE=${SELECTED_PROFILE}
 CORTEX_API_HOST=${DEFAULT_HOST}
-CORTEX_API_PORT=${DEFAULT_PORT}
+CORTEX_API_PORT=${EFFECTIVE_PORT}
 CORTEX_ENVIRONMENT=development
 CORTEX_LOG_LEVEL=INFO
 CORTEX_LOG_FILE=var/cortex.log
@@ -232,12 +306,23 @@ EOF
     log_info "Using existing .env configuration file."
   fi
 
-  # Ensure CORTEX_API_HOST and CORTEX_API_PORT exist in .env
-  if ! grep -q "^CORTEX_API_HOST=" "$ENV_FILE" 2>/dev/null; then
-    printf '\nCORTEX_API_HOST=%s\n' "$DEFAULT_HOST" >> "$ENV_FILE"
+  # Update or append profile, host and port in .env
+  if grep -q "^CORTEX_PROFILE=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s/^CORTEX_PROFILE=.*/CORTEX_PROFILE=${SELECTED_PROFILE}/" "$ENV_FILE" 2>/dev/null || true
+  else
+    printf 'CORTEX_PROFILE=%s\n' "$SELECTED_PROFILE" >> "$ENV_FILE"
   fi
-  if ! grep -q "^CORTEX_API_PORT=" "$ENV_FILE" 2>/dev/null; then
-    printf 'CORTEX_API_PORT=%s\n' "$DEFAULT_PORT" >> "$ENV_FILE"
+
+  if grep -q "^CORTEX_API_HOST=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s/^CORTEX_API_HOST=.*/CORTEX_API_HOST=${DEFAULT_HOST}/" "$ENV_FILE" 2>/dev/null || true
+  else
+    printf 'CORTEX_API_HOST=%s\n' "$DEFAULT_HOST" >> "$ENV_FILE"
+  fi
+
+  if grep -q "^CORTEX_API_PORT=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s/^CORTEX_API_PORT=.*/CORTEX_API_PORT=${EFFECTIVE_PORT}/" "$ENV_FILE" 2>/dev/null || true
+  else
+    printf 'CORTEX_API_PORT=%s\n' "$EFFECTIVE_PORT" >> "$ENV_FILE"
   fi
 }
 
@@ -249,9 +334,6 @@ initialize_database() {
 }
 
 setup_systemd_linux() {
-  local host port
-  host=$(env_value CORTEX_API_HOST "$DEFAULT_HOST")
-  port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
   local current_user current_group
   current_user=$(id -un)
   current_group=$(id -gn)
@@ -269,7 +351,7 @@ User=${current_user}
 Group=${current_group}
 WorkingDirectory=${ROOT_DIR}
 EnvironmentFile=${ENV_FILE}
-ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${host} --port ${port}
+ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${DEFAULT_HOST} --port ${EFFECTIVE_PORT}
 Restart=always
 RestartSec=3
 NoNewPrivileges=yes
@@ -282,7 +364,7 @@ EOF
     sudo systemctl daemon-reload
     sudo systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
     sudo systemctl restart "$SERVICE_NAME"
-    log_info "Systemd system service active and started."
+    log_info "Systemd system service active and started on port ${EFFECTIVE_PORT}."
   elif command -v systemctl >/dev/null 2>&1; then
     log_info "Installing user systemd service (~/.config/systemd/user/${SERVICE_NAME}.service)..."
     mkdir -p "$SYSTEMD_USER_DIR"
@@ -295,7 +377,7 @@ After=network.target
 Type=simple
 WorkingDirectory=${ROOT_DIR}
 EnvironmentFile=${ENV_FILE}
-ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${host} --port ${port}
+ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${DEFAULT_HOST} --port ${EFFECTIVE_PORT}
 Restart=always
 RestartSec=3
 
@@ -305,18 +387,14 @@ EOF
     systemctl --user daemon-reload
     systemctl --user enable "$SERVICE_NAME" >/dev/null 2>&1 || true
     systemctl --user restart "$SERVICE_NAME"
-    log_info "User systemd service active and started."
+    log_info "User systemd service active and started on port ${EFFECTIVE_PORT}."
   else
-    log_warn "systemctl not available in this environment; use ./scripts/service.sh start to run as daemon."
+    log_warn "systemctl not available in this environment; starting standalone daemon."
     "$SCRIPTS_DIR/service.sh" start
   fi
 }
 
 setup_launchd_macos() {
-  local host port
-  host=$(env_value CORTEX_API_HOST "$DEFAULT_HOST")
-  port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
-
   log_info "Installing macOS launchd agent (${LAUNCHD_PLIST})..."
   mkdir -p "$(dirname "$LAUNCHD_PLIST")"
 
@@ -335,9 +413,9 @@ setup_launchd_macos() {
         <string>lib.presentation.api.app:create_app</string>
         <string>--factory</string>
         <string>--host</string>
-        <string>${host}</string>
+        <string>${DEFAULT_HOST}</string>
         <string>--port</string>
-        <string>${port}</string>
+        <string>${EFFECTIVE_PORT}</string>
     </array>
     <key>WorkingDirectory</key>
     <string>${ROOT_DIR}</string>
@@ -355,7 +433,7 @@ EOF
 
   launchctl unload "$LAUNCHD_PLIST" 2>/dev/null || true
   launchctl load -w "$LAUNCHD_PLIST"
-  log_info "macOS launchd agent active and started."
+  log_info "macOS launchd agent active and started on port ${EFFECTIVE_PORT}."
 }
 
 configure_ufw() {
@@ -371,13 +449,11 @@ configure_ufw() {
     return
   fi
 
-  local port
-  port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
-  sudo ufw allow proto tcp from 127.0.0.1 to any port "$port" comment 'cortex-api-local' >/dev/null 2>&1 || true
-  sudo ufw allow proto tcp from 10.0.0.0/8 to any port "$port" comment 'cortex-api-lan-10' >/dev/null 2>&1 || true
-  sudo ufw allow proto tcp from 172.16.0.0/12 to any port "$port" comment 'cortex-api-lan-172' >/dev/null 2>&1 || true
-  sudo ufw allow proto tcp from 192.168.0.0/16 to any port "$port" comment 'cortex-api-lan-192' >/dev/null 2>&1 || true
-  log_info "UFW firewall rules configured for LAN access on port ${port}."
+  sudo ufw allow proto tcp from 127.0.0.1 to any port "$EFFECTIVE_PORT" comment 'cortex-api-local' >/dev/null 2>&1 || true
+  sudo ufw allow proto tcp from 10.0.0.0/8 to any port "$EFFECTIVE_PORT" comment 'cortex-api-lan-10' >/dev/null 2>&1 || true
+  sudo ufw allow proto tcp from 172.16.0.0/12 to any port "$EFFECTIVE_PORT" comment 'cortex-api-lan-172' >/dev/null 2>&1 || true
+  sudo ufw allow proto tcp from 192.168.0.0/16 to any port "$EFFECTIVE_PORT" comment 'cortex-api-lan-192' >/dev/null 2>&1 || true
+  log_info "UFW firewall rules configured for LAN access on port ${EFFECTIVE_PORT}."
 }
 
 run_healthcheck() {
@@ -385,16 +461,14 @@ run_healthcheck() {
     return
   fi
 
-  local port
-  port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
-  log_info "Verifying API server health at http://127.0.0.1:${port}..."
+  log_info "Verifying API server health at http://127.0.0.1:${EFFECTIVE_PORT}..."
 
   "$VENV_DIR/bin/python" - <<PY
 import time
 from urllib.error import URLError
 from urllib.request import urlopen
 
-port = ${port}
+port = ${EFFECTIVE_PORT}
 last_error = None
 for attempt in range(15):
     try:
@@ -418,6 +492,7 @@ main() {
 
   check_python_environment
   detect_and_select_profile
+  resolve_effective_port
   create_virtualenv
   install_project_dependencies
   configure_environment
@@ -438,19 +513,24 @@ main() {
     log_info "To start manually: ./scripts/service.sh start (or 'cortex-api')"
   fi
 
-  local host port
-  host=$(env_value CORTEX_API_HOST "$DEFAULT_HOST")
-  port=$(env_value CORTEX_API_PORT "$DEFAULT_PORT")
-
   printf "\n========================================================\n"
   printf " \033[0;32mCortex is ready to use!\033[0m\n"
   printf "========================================================\n"
   printf " Installed Profile:      %s\n" "$SELECTED_PROFILE"
-  printf " API Address:            http://%s:%s\n" "$host" "$port"
-  printf " Interactive Swagger:    http://localhost:%s/docs\n" "$port"
-  printf " Scalar API Docs:        http://localhost:%s/scalar\n" "$port"
-  printf " OpenAI-Compatible API:  http://localhost:%s/v1/chat/completions\n" "$port"
-  printf "--------------------------------------------------------\n"
+  printf " Effective API Port:     %s\n" "$EFFECTIVE_PORT"
+  printf " API Address:            http://%s:%s\n" "$DEFAULT_HOST" "$EFFECTIVE_PORT"
+  printf " Interactive Swagger:    http://localhost:%s/docs\n" "$EFFECTIVE_PORT"
+  printf " Scalar API Docs:        http://localhost:%s/scalar\n" "$EFFECTIVE_PORT"
+  printf " System Capabilities:    http://localhost:%s/system/capabilities\n" "$EFFECTIVE_PORT"
+  printf " OpenAI-Compatible API:  http://localhost:%s/v1/chat/completions\n" "$EFFECTIVE_PORT"
+  printf "%s\n" "--------------------------------------------------------"
+  if [ "$SELECTED_PROFILE" = "light" ]; then
+    printf " Note (Light Profile):\n"
+    printf "   - Core orchestration & 14+ cloud providers are active.\n"
+    printf "   - Local audio Whisper/media extensions are omitted.\n"
+    printf "   - Cloud audio transcription is available via CORTEX_GROQ_API_KEY.\n"
+    printf "%s\n" "--------------------------------------------------------"
+  fi
   printf " Useful Commands:\n"
   printf "   cortex --help                # CLI command line interface\n"
   printf "   ./scripts/service.sh status  # Check service status\n"
