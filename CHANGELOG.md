@@ -6,7 +6,7 @@
 
 ### Features
 
-- Add interactive multilingual language switcher and localized openapi specs for Scalar
+- Enable full tier 0-5 eligibility across cloud and local providers
 
 
 ## v0.1.0 - 2026-08-20
@@ -47,6 +47,8 @@
 - Update CHANGELOG.md for v0.1.0
 
 - Update changelog for scalar /docs route
+
+- Update changelog for multilingual scalar specs
 
 
 ### Features
@@ -108,6 +110,8 @@
 - Add interactive profile selection, smart port detection with reuse, and runtime capability summary
 
 - Map /docs route directly to Scalar interactive documentation
+
+- Add interactive multilingual language switcher and localized openapi specs for Scalar
 
 
 ### merge
