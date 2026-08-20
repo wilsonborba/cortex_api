@@ -52,10 +52,13 @@ def _build_lifespan(settings: Settings):
             logger.warning("tier policy seeding failed on startup", exc_info=True)
 
         if settings.api_sync_models_on_startup:
-            try:
-                build_default_registry_service(settings=settings).sync()
-            except Exception:
-                logger.warning("initial Model Registry sync failed", exc_info=True)
+            async def _async_sync() -> None:
+                try:
+                    await asyncio.to_thread(build_default_registry_service(settings=settings).sync)
+                except Exception:
+                    logger.warning("initial Model Registry sync failed", exc_info=True)
+
+            asyncio.create_task(_async_sync())
 
         background_task: Optional[asyncio.Task] = None
         if settings.api_background_tasks_enabled:

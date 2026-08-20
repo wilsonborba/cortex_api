@@ -23,8 +23,12 @@ env_value() {
 HOST=$(env_value CORTEX_API_HOST "0.0.0.0")
 PORT=$(env_value CORTEX_API_PORT "8003")
 
+can_sudo() {
+  [ "$(id -u)" -eq 0 ] || (command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null)
+}
+
 is_systemd_system() {
-  command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "$SERVICE_NAME.service" 2>/dev/null | grep -q "$SERVICE_NAME.service"
+  can_sudo && command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "$SERVICE_NAME.service" 2>/dev/null | grep -q "$SERVICE_NAME.service"
 }
 
 is_systemd_user() {
