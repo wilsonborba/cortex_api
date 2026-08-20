@@ -125,8 +125,12 @@ case "${1:-status}" in
   restart) service_restart ;;
   status) service_status ;;
   logs) service_logs ;;
-  *)
+  help|-h|--help)
     printf "Usage: %s {start|stop|restart|status|logs}\n" "$0"
+    exit 0
+    ;;
+  *)
+    printf "Usage: %s {start|stop|restart|status|logs}\n" "$0" >&2
     exit 1
     ;;
 esac
