@@ -6,6 +6,19 @@
 
 ### Bug Fixes
 
+- Make startup model discovery non-blocking and improve service manager fallback
+
+
+### Features
+
+- Map /docs route directly to Scalar interactive documentation
+
+
+## v0.1.0 - 2026-08-20
+
+
+### Bug Fixes
+
 - Give the critic step the original draft, not just the refined answer (wilsonborba/cortex#19)
 
 - Align HippocampusClient with the real hippocampus contract
