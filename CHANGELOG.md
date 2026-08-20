@@ -4,14 +4,9 @@
 ## v0.1.0 - 2026-08-20
 
 
-### Bug Fixes
-
-- Make startup model discovery non-blocking and improve service manager fallback
-
-
 ### Features
 
-- Map /docs route directly to Scalar interactive documentation
+- Add interactive multilingual language switcher and localized openapi specs for Scalar
 
 
 ## v0.1.0 - 2026-08-20
@@ -28,6 +23,8 @@
 - Correct ROOT_DIR path in uninstall.sh after move to scripts/
 
 - Untrack docs/ directory per AI_AGENT_Working_Rules section 9 and consolidate in documentation/
+
+- Make startup model discovery non-blocking and improve service manager fallback
 
 
 ### Chores
@@ -48,6 +45,8 @@
 - Generate CHANGELOG.md for v0.1.0 via git-cliff
 
 - Update CHANGELOG.md for v0.1.0
+
+- Update changelog for scalar /docs route
 
 
 ### Features
@@ -107,6 +106,8 @@
 - Add profile awareness, capability introspection, and graceful degradation for optional features
 
 - Add interactive profile selection, smart port detection with reuse, and runtime capability summary
+
+- Map /docs route directly to Scalar interactive documentation
 
 
 ### merge
