@@ -4,6 +4,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Optional
 
+import json
+
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -97,21 +99,17 @@ class Settings(BaseSettings):
             "CORTEX_CLAUDE_COMMAND", "CORTEX_CLAUDE_BIN", "CLAUDE_COMMAND", "CLAUDE_BIN"
         ),
     )
-    agy_extra_commands: Annotated[list[str], NoDecode] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices("CORTEX_AGY_EXTRA_COMMANDS", "AGY_EXTRA_COMMANDS"),
-    )
-    claude_extra_commands: Annotated[list[str], NoDecode] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices("CORTEX_CLAUDE_EXTRA_COMMANDS", "CLAUDE_EXTRA_COMMANDS"),
-    )
     codex_command: str = Field(
         default="codex",
         validation_alias=AliasChoices("CORTEX_CODEX_COMMAND", "CORTEX_CODEX_BIN", "CODEX_COMMAND", "CODEX_BIN"),
     )
-    codex_extra_commands: Annotated[list[str], NoDecode] = Field(
+    disabled_providers: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
-        validation_alias=AliasChoices("CORTEX_CODEX_EXTRA_COMMANDS", "CODEX_EXTRA_COMMANDS"),
+        validation_alias=AliasChoices("CORTEX_DISABLED_PROVIDERS", "DISABLED_PROVIDERS"),
+    )
+    calibration_judge_commands: Annotated[dict[str, str], NoDecode] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("CORTEX_CALIBRATION_JUDGE_COMMANDS", "CALIBRATION_JUDGE_COMMANDS"),
     )
     calibration_disabled_judge_ids: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
@@ -122,7 +120,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_DRIVER_TIMEOUT_SECONDS", "DRIVER_TIMEOUT_SECONDS"),
     )
     calibration_max_models_per_tier: int = Field(
-        default=6,
+        default=0,
         validation_alias=AliasChoices("CORTEX_CALIBRATION_MAX_MODELS_PER_TIER"),
     )
     calibration_judge_timeout_seconds: float = Field(
@@ -341,6 +339,7 @@ class Settings(BaseSettings):
         if value is None:
             return value
         return str(Path(value).expanduser()) if str(value).startswith("~") else str(value)
+
     aion_labs_api_key: Optional[str] = Field(
         default=None, validation_alias=AliasChoices("CORTEX_AION_LABS_API_KEY")
     )
@@ -354,21 +353,46 @@ class Settings(BaseSettings):
         default=None, validation_alias=AliasChoices("CORTEX_SAMBANOVA_API_KEY")
     )
 
-    @field_validator("agy_extra_commands", "claude_extra_commands", "codex_extra_commands", "calibration_disabled_judge_ids", mode="before")
+    @field_validator("disabled_providers", "calibration_disabled_judge_ids", mode="before")
     @classmethod
     def _parse_string_lists(cls, value):
         if value is None or value == "":
             return []
         if isinstance(value, list):
-            return value
+            return [str(item).strip().lower() for item in value if str(item).strip()]
         text = str(value).strip()
         if not text:
             return []
         if text.startswith("["):
-            import json
             parsed = json.loads(text)
-            return [str(item) for item in parsed]
-        return [item.strip() for item in text.split(",") if item.strip()]
+            return [str(item).strip().lower() for item in parsed if str(item).strip()]
+        return [item.strip().lower() for item in text.split(",") if item.strip()]
+
+    @field_validator("calibration_judge_commands", mode="before")
+    @classmethod
+    def _parse_judge_command_map(cls, value):
+        if value is None or value == "":
+            return {}
+        if isinstance(value, dict):
+            return {
+                str(key).strip().lower(): cls._normalize_command_value(item)
+                for key, item in value.items()
+                if str(item).strip()
+            }
+        text = str(value).strip()
+        if not text:
+            return {}
+        parsed = json.loads(text)
+        return {
+            str(key).strip().lower(): cls._normalize_command_value(item)
+            for key, item in parsed.items()
+            if str(item).strip()
+        }
+
+    @staticmethod
+    def _normalize_command_value(value: object) -> str:
+        text = str(value).strip()
+        return str(Path(text).expanduser()) if text.startswith("~") else text
 
 
 

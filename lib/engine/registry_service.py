@@ -211,7 +211,7 @@ class ModelRegistryService:
             context_window=discovered.context_window,
             is_local=discovered.is_local,
             source_kind=self._resolve_source_kind(discovered),
-            tier_eligibility=discovered.tier_eligibility if discovered.tier_eligibility else (existing.tier_eligibility if existing else []),
+            tier_eligibility=(existing.tier_eligibility if existing and existing.tier_eligibility else discovered.tier_eligibility),
             capabilities=existing.capabilities if existing else discovered.capabilities,
             cost_per_million_tokens=(
                 existing.cost_per_million_tokens if existing else discovered.cost_per_million_tokens
@@ -227,51 +227,56 @@ class ModelRegistryService:
         return ensure_utc(entry.cooldown_until) > datetime.now(timezone.utc)
 
 
-def build_default_registry_service(settings: Optional[Settings] = None) -> ModelRegistryService:
+def build_default_registry_service(
+    settings: Optional[Settings] = None,
+    *,
+    respect_disabled_providers: bool = True,
+) -> ModelRegistryService:
     """Wires the registry service with the real provider discovery adapters.
 
     The presentation layer (CLI/API, issues #10 and #12) should construct the
     service through this, not by hand-assembling discovery adapters itself.
     """
     settings = settings or get_settings()
-    return ModelRegistryService(
-        discoveries=[
-            OllamaDiscovery(
-                base_url=settings.ollama_base_url, timeout=settings.discovery_timeout_seconds
-            ),
-            AntigravityDiscovery(
-                command=settings.agy_command, timeout=settings.discovery_timeout_seconds
-            ),
-            ClaudeDockerDiscovery(credentials_path=Path(settings.claude_credentials_path)),
-            CodexDiscovery(auth_path=Path(settings.codex_auth_path)),
-            GroqDiscovery(api_key=settings.groq_api_key, timeout=settings.discovery_timeout_seconds),
-            GoogleAIStudioDiscovery(
-                api_key=settings.google_ai_studio_api_key, timeout=settings.discovery_timeout_seconds
-            ),
-            OpenRouterDiscovery(api_key=settings.openrouter_api_key, timeout=settings.discovery_timeout_seconds),
-            CloudflareDiscovery(
-                api_key=settings.cloudflare_api_key,
-                account_id=settings.cloudflare_account_id,
-                timeout=settings.discovery_timeout_seconds,
-            ),
-            CohereDiscovery(api_key=settings.cohere_api_key, timeout=settings.discovery_timeout_seconds),
-            MistralDiscovery(api_key=settings.mistral_api_key, timeout=settings.discovery_timeout_seconds),
-            NvidiaDiscovery(api_key=settings.nvidia_api_key, timeout=settings.discovery_timeout_seconds),
-            ZaiDiscovery(api_key=settings.zai_api_key, timeout=settings.discovery_timeout_seconds),
-            RequestyDiscovery(api_key=settings.requesty_api_key, timeout=settings.discovery_timeout_seconds),
-            HuggingFaceDiscovery(
-                api_key=settings.huggingface_api_key, timeout=settings.discovery_timeout_seconds
-            ),
-            OllamaCloudDiscovery(
-                api_key=settings.ollama_cloud_api_key, timeout=settings.discovery_timeout_seconds
-            ),
-            AionLabsDiscovery(api_key=settings.aion_labs_api_key, timeout=settings.discovery_timeout_seconds),
-            SiliconFlowDiscovery(
-                api_key=settings.siliconflow_api_key, timeout=settings.discovery_timeout_seconds
-            ),
-            InferenceNetDiscovery(
-                api_key=settings.inference_net_api_key, timeout=settings.discovery_timeout_seconds
-            ),
-            SambaNovaDiscovery(api_key=settings.sambanova_api_key, timeout=settings.discovery_timeout_seconds),
-        ]
-    )
+    disabled = {provider.strip().lower() for provider in settings.disabled_providers} if respect_disabled_providers else set()
+    discoveries = [OllamaDiscovery(base_url=settings.ollama_base_url, timeout=settings.discovery_timeout_seconds)]
+    if "agy" not in disabled:
+        discoveries.append(
+            AntigravityDiscovery(command=settings.agy_command, timeout=settings.discovery_timeout_seconds)
+        )
+    if "claude" not in disabled:
+        discoveries.append(ClaudeDockerDiscovery(credentials_path=Path(settings.claude_credentials_path)))
+    if "codex" not in disabled:
+        discoveries.append(CodexDiscovery(auth_path=Path(settings.codex_auth_path)))
+    discoveries.extend([
+        GroqDiscovery(api_key=settings.groq_api_key, timeout=settings.discovery_timeout_seconds),
+        GoogleAIStudioDiscovery(
+            api_key=settings.google_ai_studio_api_key, timeout=settings.discovery_timeout_seconds
+        ),
+        OpenRouterDiscovery(api_key=settings.openrouter_api_key, timeout=settings.discovery_timeout_seconds),
+        CloudflareDiscovery(
+            api_key=settings.cloudflare_api_key,
+            account_id=settings.cloudflare_account_id,
+            timeout=settings.discovery_timeout_seconds,
+        ),
+        CohereDiscovery(api_key=settings.cohere_api_key, timeout=settings.discovery_timeout_seconds),
+        MistralDiscovery(api_key=settings.mistral_api_key, timeout=settings.discovery_timeout_seconds),
+        NvidiaDiscovery(api_key=settings.nvidia_api_key, timeout=settings.discovery_timeout_seconds),
+        ZaiDiscovery(api_key=settings.zai_api_key, timeout=settings.discovery_timeout_seconds),
+        RequestyDiscovery(api_key=settings.requesty_api_key, timeout=settings.discovery_timeout_seconds),
+        HuggingFaceDiscovery(
+            api_key=settings.huggingface_api_key, timeout=settings.discovery_timeout_seconds
+        ),
+        OllamaCloudDiscovery(
+            api_key=settings.ollama_cloud_api_key, timeout=settings.discovery_timeout_seconds
+        ),
+        AionLabsDiscovery(api_key=settings.aion_labs_api_key, timeout=settings.discovery_timeout_seconds),
+        SiliconFlowDiscovery(
+            api_key=settings.siliconflow_api_key, timeout=settings.discovery_timeout_seconds
+        ),
+        InferenceNetDiscovery(
+            api_key=settings.inference_net_api_key, timeout=settings.discovery_timeout_seconds
+        ),
+        SambaNovaDiscovery(api_key=settings.sambanova_api_key, timeout=settings.discovery_timeout_seconds),
+    ])
+    return ModelRegistryService(discoveries=discoveries)

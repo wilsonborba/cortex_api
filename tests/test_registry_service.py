@@ -6,11 +6,13 @@ from typing import List, Optional
 import pytest
 from sqlalchemy.orm import Session
 
+from lib.core.settings import Settings
 from lib.core.time_utils import ensure_utc
 from lib.dal.models import AccessStatus, ModelCatalogEntry
 from lib.dal.repositories.model_repository import ModelRepository
 from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
-from lib.engine.registry_service import ModelRegistryService
+from lib.engine.executor import build_default_drivers
+from lib.engine.registry_service import ModelRegistryService, build_default_registry_service
 
 
 class _FakeDiscovery:
@@ -353,3 +355,34 @@ def test_sync_without_providers_filter_probes_everyone(registry_repo: ModelRepos
     service.sync()  # providers=None: unrestricted, matches pre-#13 behavior
 
     assert registry_repo.get_by_id("codex/reg-unscoped-o3") is not None
+
+
+def test_build_default_registry_service_skips_disabled_standard_providers():
+    settings = Settings(disabled_providers=["claude", "codex"])
+
+    service = build_default_registry_service(settings=settings)
+    providers = {discovery.provider for discovery in service._discoveries}
+
+    assert "claude" not in providers
+    assert "codex" not in providers
+    assert "agy" in providers
+
+
+def test_build_default_registry_service_can_ignore_disabled_providers_for_calibration():
+    settings = Settings(disabled_providers=["claude", "codex"])
+
+    service = build_default_registry_service(settings=settings, respect_disabled_providers=False)
+    providers = {discovery.provider for discovery in service._discoveries}
+
+    assert "claude" in providers
+    assert "codex" in providers
+    assert "agy" in providers
+
+
+def test_build_default_drivers_skips_disabled_providers():
+    settings = Settings(disabled_providers=["claude"])
+
+    drivers = build_default_drivers(settings=settings)
+
+    assert "claude" not in drivers
+    assert "codex" in drivers

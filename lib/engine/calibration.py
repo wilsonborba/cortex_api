@@ -55,6 +55,7 @@ class CalibrationSummary:
     evaluations: int
     response_attempts: int
     response_failures: int
+    evaluation_failures: int
     best_models_by_tier: dict[int, str]
     source_path: Optional[str] = None
 
@@ -68,8 +69,14 @@ class CalibrationSource:
     best_models_by_tier: dict[int, str]
     judges: list[str]
     rankings_by_tier: dict[int, list[dict]]
+    run_id: Optional[str] = None
+    status: str = "default"
     evaluation_count: int = 0
     response_count: int = 0
+    response_failures: int = 0
+    evaluation_failures: int = 0
+    response_success_rate: float = 0.0
+    evaluation_success_rate: float = 0.0
 
 
 BENCHMARK_TASKS: tuple[BenchmarkTask, ...] = (
@@ -124,11 +131,83 @@ BENCHMARK_TASKS: tuple[BenchmarkTask, ...] = (
 )
 
 
+def _rank_buckets(buckets: dict[tuple[int, str], dict], top_n: Optional[int] = None) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = {}
+    for tier in CALIBRATION_TIERS:
+        tier_rows: list[dict] = []
+        for (row_tier, _model_id), bucket in buckets.items():
+            if row_tier != tier or not bucket["quality_scores"]:
+                continue
+            quality_score = statistics.fmean(bucket["quality_scores"]) / 100.0
+            avg_latency_ms = statistics.fmean(bucket["latencies"]) if bucket["latencies"] else 0.0
+            avg_cost_usd = statistics.fmean(bucket["costs"]) if bucket["costs"] else 0.0
+            disagreement = statistics.fmean(bucket["judge_spreads"]) if bucket["judge_spreads"] else 0.0
+            latency_budget_ms = float(_latency_budget_ms(tier))
+            latency_component = 1.0 - min(1.0, avg_latency_ms / latency_budget_ms) if latency_budget_ms > 0 else 0.5
+            cost_component = 1.0 - min(1.0, avg_cost_usd / 0.05)
+            aggregate_score = (quality_score * 0.80) + (latency_component * 0.15) + (cost_component * 0.05)
+            tier_rows.append({
+                "tier": tier,
+                "provider": bucket["provider"],
+                "model_id": bucket["model_id"],
+                "quality_score": round(quality_score, 6),
+                "aggregate_score": round(aggregate_score, 6),
+                "avg_latency_ms": round(avg_latency_ms, 3),
+                "avg_cost_usd": round(avg_cost_usd, 6),
+                "disagreement": round(disagreement, 6),
+                "evaluation_count": len(bucket["quality_scores"]),
+                "task_count": len(bucket["tasks"]),
+            })
+        tier_rows.sort(key=lambda row: row["aggregate_score"], reverse=True)
+        if top_n is not None:
+            tier_rows = tier_rows[:top_n]
+        grouped[tier] = []
+        for index, row in enumerate(tier_rows, start=1):
+            grouped[tier].append({
+                "rank": index,
+                "model_id": row["model_id"],
+                "provider": row["provider"],
+                "quality_score": row["quality_score"],
+                "aggregate_score": row["aggregate_score"],
+                "avg_latency_ms": row["avg_latency_ms"],
+                "avg_cost_usd": row["avg_cost_usd"],
+                "disagreement": row["disagreement"],
+                "evaluation_count": row["evaluation_count"],
+                "task_count": row["task_count"],
+            })
+    return {tier: rows for tier, rows in grouped.items() if rows}
+
+
+def _flatten_rankings(rankings_by_tier: dict[int, list[dict]]) -> list[dict]:
+    rows: list[dict] = []
+    for tier, items in rankings_by_tier.items():
+        for item in items:
+            rows.append({
+                "tier": tier,
+                "provider": item["provider"],
+                "model_id": item["model_id"],
+                "quality_score": item["quality_score"],
+                "aggregate_score": item["aggregate_score"],
+                "avg_latency_ms": item["avg_latency_ms"],
+                "avg_cost_usd": item["avg_cost_usd"],
+                "disagreement": item["disagreement"],
+                "evaluation_count": item["evaluation_count"],
+                "task_count": item["task_count"],
+                "rank_position": item["rank"],
+            })
+    return rows
+
+
+def _latency_budget_ms(tier: int) -> int:
+    return {2: 20_000, 3: 30_000, 4: 45_000, 5: 60_000}.get(tier, 30_000)
+
+
 class CalibrationStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, ensure_schema: bool = True) -> None:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        if ensure_schema:
+            self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -143,11 +222,31 @@ class CalibrationStore:
                     run_id TEXT PRIMARY KEY,
                     profile TEXT NOT NULL,
                     source TEXT NOT NULL,
+                    task_set_id TEXT,
                     judges_json TEXT NOT NULL,
                     started_at TEXT NOT NULL,
                     finished_at TEXT,
                     status TEXT NOT NULL,
                     notes TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS benchmark_task_sets (
+                    task_set_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    generator_label TEXT,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS benchmark_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    task_set_id TEXT NOT NULL,
+                    tier INTEGER NOT NULL,
+                    prompt TEXT NOT NULL,
+                    rubric TEXT NOT NULL,
+                    origin_family TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_set_id) REFERENCES benchmark_task_sets(task_set_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS benchmark_responses (
@@ -207,14 +306,55 @@ class CalibrationStore:
                 );
                 """
             )
+            existing_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(calibration_runs)").fetchall()}
+            if "task_set_id" not in existing_columns:
+                conn.execute("ALTER TABLE calibration_runs ADD COLUMN task_set_id TEXT")
 
-    def start_run(self, profile: str, judges: Sequence[str], source: str = "personal") -> str:
+    def ensure_task_set(self, tasks: Sequence[BenchmarkTask], *, name: str = "builtin-core-v1", source: str = "builtin", generator_label: Optional[str] = None) -> str:
+        task_set_id = f"{source}:{name}"
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT task_set_id FROM benchmark_task_sets WHERE task_set_id=? LIMIT 1",
+                (task_set_id,),
+            ).fetchone()
+            if exists is None:
+                conn.execute(
+                    "INSERT INTO benchmark_task_sets(task_set_id, name, source, generator_label, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (task_set_id, name, source, generator_label, _utcnow()),
+                )
+            for task in tasks:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO benchmark_tasks(task_id, task_set_id, tier, prompt, rubric, origin_family, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (task.task_id, task_set_id, task.tier, task.prompt, task.rubric, generator_label, _utcnow()),
+                )
+        return task_set_id
+
+    def load_task_set(self, task_set_id: str) -> list[BenchmarkTask]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT tier, task_id, prompt, rubric FROM benchmark_tasks WHERE task_set_id=? ORDER BY tier ASC, task_id ASC",
+                (task_set_id,),
+            ).fetchall()
+        return [
+            BenchmarkTask(
+                tier=int(row["tier"]),
+                task_id=str(row["task_id"]),
+                prompt=str(row["prompt"]),
+                rubric=str(row["rubric"]),
+            )
+            for row in rows
+        ]
+
+    def start_run(self, profile: str, judges: Sequence[str], source: str = "personal", task_set_id: Optional[str] = None) -> str:
         run_id = str(uuid.uuid4())
         now = _utcnow()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO calibration_runs(run_id, profile, source, judges_json, started_at, status) VALUES (?, ?, ?, ?, ?, ?)",
-                (run_id, profile, source, json.dumps(list(judges)), now, "running"),
+                "INSERT INTO calibration_runs(run_id, profile, source, task_set_id, judges_json, started_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (run_id, profile, source, task_set_id, json.dumps(list(judges)), now, "running"),
             )
         return run_id
 
@@ -334,9 +474,15 @@ class CalibrationStore:
                 )
 
     def latest_run_id(self) -> Optional[str]:
+        return self._latest_run_id(include_running=False)
+
+    def _latest_run_id(self, include_running: bool) -> Optional[str]:
+        statuses = ("running", "completed", "partial") if include_running else ("completed", "partial")
+        placeholders = ",".join("?" for _ in statuses)
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT run_id FROM calibration_runs WHERE status IN ('completed', 'partial') ORDER BY COALESCE(finished_at, started_at) DESC LIMIT 1"
+                f"SELECT run_id FROM calibration_runs WHERE status IN ({placeholders}) ORDER BY COALESCE(finished_at, started_at) DESC LIMIT 1",
+                statuses,
             ).fetchone()
         return None if row is None else str(row["run_id"])
 
@@ -362,8 +508,8 @@ class CalibrationStore:
             ).fetchone()
         return None if row is None else float(row["quality_score"])
 
-    def metadata(self) -> Optional[dict]:
-        run_id = self.latest_run_id()
+    def metadata(self, include_running: bool = False) -> Optional[dict]:
+        run_id = self._latest_run_id(include_running=include_running)
         if run_id is None:
             return None
         with self._connect() as conn:
@@ -379,6 +525,20 @@ class CalibrationStore:
                 "SELECT COUNT(*) AS count FROM benchmark_responses WHERE run_id=?",
                 (run_id,),
             ).fetchone()["count"]
+            response_failures = conn.execute(
+                "SELECT COUNT(*) AS count FROM benchmark_responses WHERE run_id=? AND success=0",
+                (run_id,),
+            ).fetchone()["count"]
+            evaluation_failures = conn.execute(
+                "SELECT COUNT(*) AS count FROM judge_evaluations WHERE run_id=? AND success=0",
+                (run_id,),
+            ).fetchone()["count"]
+        rankings_by_tier = self.rankings(top_n=10_000, run_id=run_id, include_running=include_running)
+        best_models_by_tier = {
+            tier: rows[0]["model_id"]
+            for tier, rows in rankings_by_tier.items()
+            if rows
+        }
         return {
             "run_id": str(run_row["run_id"]),
             "source": str(run_row["source"]),
@@ -389,11 +549,15 @@ class CalibrationStore:
             "finished_at": run_row["finished_at"],
             "evaluation_count": int(eval_count),
             "response_count": int(response_count),
-            "best_models_by_tier": self.best_models_by_tier(run_id),
+            "response_failures": int(response_failures),
+            "evaluation_failures": int(evaluation_failures),
+            "response_success_rate": 0.0 if int(response_count) == 0 else round((int(response_count) - int(response_failures)) / int(response_count), 6),
+            "evaluation_success_rate": 0.0 if int(eval_count) == 0 else round((int(eval_count) - int(evaluation_failures)) / int(eval_count), 6),
+            "best_models_by_tier": best_models_by_tier,
         }
 
-    def rankings(self, top_n: int = 3, run_id: Optional[str] = None) -> dict[int, list[dict]]:
-        run_id = run_id or self.latest_run_id()
+    def rankings(self, top_n: int = 3, run_id: Optional[str] = None, include_running: bool = False) -> dict[int, list[dict]]:
+        run_id = run_id or self._latest_run_id(include_running=include_running)
         if run_id is None:
             return {}
         with self._connect() as conn:
@@ -417,7 +581,6 @@ class CalibrationStore:
             })
         return grouped
 
-
 class CalibrationResolver:
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or get_settings()
@@ -433,8 +596,8 @@ class CalibrationResolver:
     def resolve(self) -> tuple[str, Optional[CalibrationStore]]:
         for source, path in (("personal", self.personal_path), ("canonical", self.canonical_path)):
             if path.exists():
-                store = CalibrationStore(path)
-                if store.latest_run_id() is not None:
+                store = CalibrationStore(path, ensure_schema=False)
+                if store._latest_run_id(include_running=True) is not None:
                     return source, store
         return "default", None
 
@@ -442,18 +605,24 @@ class CalibrationResolver:
         source, store = self.resolve()
         if store is None:
             return CalibrationSource(source="default", path=None, exists=False, updated_at=None, best_models_by_tier={}, judges=[], rankings_by_tier={})
-        meta = store.metadata() or {}
+        meta = store.metadata(include_running=True) or {}
         active_path = self.personal_path if source == "personal" else self.canonical_path
         return CalibrationSource(
             source=source,
             path=active_path,
             exists=active_path.exists(),
+            run_id=meta.get("run_id"),
+            status=str(meta.get("status", source)),
             updated_at=meta.get("finished_at") or meta.get("started_at"),
             best_models_by_tier=meta.get("best_models_by_tier", {}),
             judges=list(meta.get("judges", [])),
-            rankings_by_tier=store.rankings(top_n=top_n),
+            rankings_by_tier=store.rankings(top_n=top_n, include_running=True),
             evaluation_count=int(meta.get("evaluation_count", 0)),
             response_count=int(meta.get("response_count", 0)),
+            response_failures=int(meta.get("response_failures", 0)),
+            evaluation_failures=int(meta.get("evaluation_failures", 0)),
+            response_success_rate=float(meta.get("response_success_rate", 0.0)),
+            evaluation_success_rate=float(meta.get("evaluation_success_rate", 0.0)),
         )
 
     def get_quality(self, model_id: str, tier: int) -> Optional[float]:
@@ -473,9 +642,9 @@ class JudgeDetector:
             self._detect_standard("claude", self.settings.claude_command, "claude", self._claude_available, "claude-opus-5"),
             self._detect_standard("codex", self.settings.codex_command, "codex", self._codex_available, "o3"),
         ]
-        judges.extend(self._detect_custom_variants("agy", self.settings.agy_extra_commands, self._agy_available, "gemini-2.5-pro"))
-        judges.extend(self._detect_custom_variants("claude", self.settings.claude_extra_commands, self._claude_available, "claude-opus-5"))
-        judges.extend(self._detect_custom_variants("codex", self.settings.codex_extra_commands, self._codex_available, "o3"))
+        judges.extend(self._detect_custom_judges("agy", self._agy_available, "gemini-2.5-pro"))
+        judges.extend(self._detect_custom_judges("claude", self._claude_available, "claude-opus-5"))
+        judges.extend(self._detect_custom_judges("codex", self._codex_available, "o3"))
         disabled = {item.strip().lower() for item in self.settings.calibration_disabled_judge_ids}
         result: list[JudgeInfo] = []
         for judge in judges:
@@ -495,24 +664,17 @@ class JudgeDetector:
         reason = f"command and credentials present" if available else f"requires {judge_id} plus credentials/config"
         return JudgeInfo(judge_id, family_label, provider, command, available, reason, default_model, judge_id)
 
-    def _detect_custom_variants(self, family: str, raw_items: Sequence[str], available_check: Callable[[], bool], default_model: str) -> list[JudgeInfo]:
+    def _detect_custom_judges(self, family: str, available_check: Callable[[], bool], default_model: str) -> list[JudgeInfo]:
         judges: list[JudgeInfo] = []
-        for index, raw_item in enumerate(raw_items, start=1):
-            label, command = self._parse_variant_entry(raw_item, family, index)
+        for judge_id, command in self.settings.calibration_judge_commands.items():
+            normalized_judge_id = judge_id.strip().lower()
+            if not normalized_judge_id.startswith(f"{family}:"):
+                continue
             binary = shutil.which(command)
             available = bool(binary and available_check())
-            reason = "custom variant command and credentials present" if available else "custom variant configured but not ready"
-            judges.append(JudgeInfo(label, family, family, command, available, reason, default_model, label))
+            reason = "custom judge command and credentials present" if available else "custom judge configured but not ready"
+            judges.append(JudgeInfo(normalized_judge_id, family, family, command, available, reason, default_model, normalized_judge_id))
         return judges
-
-    @staticmethod
-    def _parse_variant_entry(raw_item: str, family: str, index: int) -> tuple[str, str]:
-        item = raw_item.strip()
-        if "=" in item:
-            label, command = item.split("=", 1)
-            normalized_label = f"{family}:{label.strip()}"
-            return normalized_label, command.strip()
-        return f"{family}:custom-{index}", item
 
     def _agy_available(self) -> bool:
         return bool(self.settings.google_api_key or self.settings.google_ai_studio_api_key)
@@ -534,7 +696,10 @@ class CalibrationEngine:
         console: Optional[Console] = None,
     ) -> None:
         self.settings = settings or get_settings()
-        self.registry = registry or build_default_registry_service(settings=self.settings)
+        self.registry = registry or build_default_registry_service(
+            settings=self.settings,
+            respect_disabled_providers=False,
+        )
         self.drivers = drivers or build_default_drivers_for_calibration(self.settings)
         self.detector = detector or JudgeDetector(settings=self.settings)
         self.console = console or Console()
@@ -561,137 +726,136 @@ class CalibrationEngine:
                 evaluations=0,
                 response_attempts=0,
                 response_failures=0,
+                evaluation_failures=0,
                 best_models_by_tier=self.personal_store.best_models_by_tier(),
                 source_path=None,
             )
 
+        task_set_id = self.personal_store.ensure_task_set(BENCHMARK_TASKS)
+        tasks = self.personal_store.load_task_set(task_set_id)
+        tasks_by_tier = {tier: [task for task in tasks if task.tier == tier] for tier in CALIBRATION_TIERS}
         candidates = self._eligible_candidates()
         work_items = [
             (tier, task, model)
             for tier in CALIBRATION_TIERS
-            for task in self._tasks_for_tier(tier)
+            for task in tasks_by_tier.get(tier, [])
             for model in candidates.get(tier, [])
         ]
-        run_id = self.personal_store.start_run(profile=normalized_profile, judges=[j.id for j in judges])
+        run_id = self.personal_store.start_run(
+            profile=normalized_profile,
+            judges=[j.id for j in judges],
+            task_set_id=task_set_id,
+        )
         response_attempts = 0
         response_failures = 0
         evaluation_count = 0
-        rankings: list[dict] = []
+        evaluation_failures = 0
         all_scores: dict[tuple[int, str], dict] = {}
 
         progress = self._make_progress(show_progress)
         total_steps = sum(1 + len(judges) for _ in work_items)
-        with progress:
-            progress_task = progress.add_task("[cyan]Calibrating models", total=total_steps)
-            for tier, task, model in work_items:
-                progress.update(
-                    progress_task,
-                    description=f"[cyan]T{tier} {model.id} · generating response for {task.task_id}",
-                )
-                result = self._run_candidate(model, task.prompt)
-                response_attempts += 1
-                if not result.success:
-                    response_failures += 1
-                response_id = self.personal_store.record_response(
-                    run_id=run_id,
-                    tier=tier,
-                    task_id=task.task_id,
-                    model=model,
-                    prompt=task.prompt,
-                    result=result,
-                )
-                progress.advance(progress_task)
 
-                bucket = all_scores.setdefault((tier, model.id), {
-                    "tier": tier,
-                    "provider": model.provider,
-                    "model_id": model.id,
-                    "quality_scores": [],
-                    "latencies": [],
-                    "costs": [],
-                    "tasks": set(),
-                    "judge_spreads": [],
-                })
-                bucket["tasks"].add(task.task_id)
-                if result.success:
-                    bucket["latencies"].append(float(result.latency_ms))
-                    bucket["costs"].append(float(result.cost_usd))
+        def persist_progress() -> None:
+            rankings_by_tier = _rank_buckets(all_scores, top_n=None)
+            self.personal_store.replace_rankings(run_id, _flatten_rankings(rankings_by_tier))
 
-                per_response_scores: list[float] = []
-                for judge in judges:
+        try:
+            with progress:
+                progress_task = progress.add_task("[cyan]Calibrating models", total=total_steps)
+                for tier, task, model in work_items:
                     progress.update(
                         progress_task,
-                        description=f"[magenta]T{tier} {model.id} · judge={judge.family} · task={task.task_id}",
+                        description=f"[cyan]T{tier} {model.id} · generating response for {task.task_id}",
                     )
+                    result = self._run_candidate(model, task.prompt)
+                    response_attempts += 1
                     if not result.success:
+                        response_failures += 1
+                    response_id = self.personal_store.record_response(
+                        run_id=run_id,
+                        tier=tier,
+                        task_id=task.task_id,
+                        model=model,
+                        prompt=task.prompt,
+                        result=result,
+                    )
+                    progress.advance(progress_task)
+
+                    bucket = all_scores.setdefault((tier, model.id), {
+                        "tier": tier,
+                        "provider": model.provider,
+                        "model_id": model.id,
+                        "quality_scores": [],
+                        "latencies": [],
+                        "costs": [],
+                        "tasks": set(),
+                        "judge_spreads": [],
+                    })
+                    bucket["tasks"].add(task.task_id)
+                    if result.success:
+                        bucket["latencies"].append(float(result.latency_ms))
+                        bucket["costs"].append(float(result.cost_usd))
+
+                    per_response_scores: list[float] = []
+                    for judge in judges:
+                        progress.update(
+                            progress_task,
+                            description=f"[magenta]T{tier} {model.id} · judge={judge.family} · task={task.task_id}",
+                        )
+                        if not result.success:
+                            self.personal_store.record_evaluation(
+                                run_id=run_id,
+                                response_id=response_id,
+                                judge=judge,
+                                judge_model=judge.default_model,
+                                score=None,
+                                reasoning=None,
+                                success=False,
+                                error_type=result.error_type,
+                                error_message=result.error_message,
+                            )
+                            evaluation_failures += 1
+                            progress.advance(progress_task)
+                            continue
+                        score, reasoning, raw_json, error = self._evaluate_with_judge(
+                            judge, task, model, result.response_text, judges
+                        )
+                        ok = score is not None and error is None
                         self.personal_store.record_evaluation(
                             run_id=run_id,
                             response_id=response_id,
                             judge=judge,
                             judge_model=judge.default_model,
-                            score=None,
-                            reasoning=None,
-                            success=False,
-                            error_type=result.error_type,
-                            error_message=result.error_message,
+                            score=score,
+                            reasoning=reasoning,
+                            success=ok,
+                            error_type=None if ok else "judge_error",
+                            error_message=error,
+                            raw_json=raw_json,
                         )
+                        if ok:
+                            bucket["quality_scores"].append(float(score))
+                            per_response_scores.append(float(score))
+                            evaluation_count += 1
+                        else:
+                            evaluation_failures += 1
                         progress.advance(progress_task)
-                        continue
-                    score, reasoning, raw_json, error = self._evaluate_with_judge(judge, task, model, result.response_text, judges)
-                    ok = score is not None and error is None
-                    self.personal_store.record_evaluation(
-                        run_id=run_id,
-                        response_id=response_id,
-                        judge=judge,
-                        judge_model=judge.default_model,
-                        score=score,
-                        reasoning=reasoning,
-                        success=ok,
-                        error_type=None if ok else "judge_error",
-                        error_message=error,
-                        raw_json=raw_json,
-                    )
-                    if ok:
-                        bucket["quality_scores"].append(float(score))
-                        per_response_scores.append(float(score))
-                        evaluation_count += 1
-                    progress.advance(progress_task)
-                if len(per_response_scores) > 1:
-                    bucket["judge_spreads"].append(statistics.pstdev(per_response_scores))
+                    if len(per_response_scores) > 1:
+                        bucket["judge_spreads"].append(statistics.pstdev(per_response_scores))
+                    persist_progress()
+        except KeyboardInterrupt:
+            persist_progress()
+            self.personal_store.finish_run(run_id, status="partial", notes="interrupted")
+            raise
+        except Exception as exc:
+            persist_progress()
+            self.personal_store.finish_run(run_id, status="partial", notes=str(exc))
+            raise
 
-        for tier in CALIBRATION_TIERS:
-            tier_rows = []
-            for (row_tier, _model_id), bucket in all_scores.items():
-                if row_tier != tier or not bucket["quality_scores"]:
-                    continue
-                quality_score = statistics.fmean(bucket["quality_scores"]) / 100.0
-                avg_latency_ms = statistics.fmean(bucket["latencies"]) if bucket["latencies"] else 0.0
-                avg_cost_usd = statistics.fmean(bucket["costs"]) if bucket["costs"] else 0.0
-                disagreement = statistics.fmean(bucket["judge_spreads"]) if bucket["judge_spreads"] else 0.0
-                latency_budget_ms = float(self._latency_budget_ms(tier))
-                latency_component = 1.0 - min(1.0, avg_latency_ms / latency_budget_ms) if latency_budget_ms > 0 else 0.5
-                cost_component = 1.0 - min(1.0, avg_cost_usd / 0.05)
-                aggregate_score = (quality_score * 0.80) + (latency_component * 0.15) + (cost_component * 0.05)
-                tier_rows.append({
-                    "tier": tier,
-                    "provider": bucket["provider"],
-                    "model_id": bucket["model_id"],
-                    "quality_score": round(quality_score, 6),
-                    "aggregate_score": round(aggregate_score, 6),
-                    "avg_latency_ms": round(avg_latency_ms, 3),
-                    "avg_cost_usd": round(avg_cost_usd, 6),
-                    "disagreement": round(disagreement, 6),
-                    "evaluation_count": len(bucket["quality_scores"]),
-                    "task_count": len(bucket["tasks"]),
-                })
-            tier_rows.sort(key=lambda row: row["aggregate_score"], reverse=True)
-            for index, row in enumerate(tier_rows, start=1):
-                row["rank_position"] = index
-                rankings.append(row)
-
-        status = "completed" if response_failures == 0 else "partial"
-        self.personal_store.replace_rankings(run_id, rankings)
-        self.personal_store.finish_run(run_id, status=status, notes=None if rankings else "no successful evaluations")
+        rankings_by_tier = _rank_buckets(all_scores, top_n=None)
+        self.personal_store.replace_rankings(run_id, _flatten_rankings(rankings_by_tier))
+        status = "completed" if response_failures == 0 and evaluation_failures == 0 else "partial"
+        self.personal_store.finish_run(run_id, status=status, notes=None if rankings_by_tier else "no successful evaluations")
         return CalibrationSummary(
             run_id=run_id,
             source="personal",
@@ -700,6 +864,7 @@ class CalibrationEngine:
             evaluations=evaluation_count,
             response_attempts=response_attempts,
             response_failures=response_failures,
+            evaluation_failures=evaluation_failures,
             best_models_by_tier=self.personal_store.best_models_by_tier(run_id),
             source_path=str(self.settings.calibration_personal_db_path),
         )
@@ -731,16 +896,17 @@ class CalibrationEngine:
         return selected
 
     def _eligible_candidates(self) -> dict[int, list[ModelCatalogEntry]]:
+        sync = getattr(self.registry, "sync", None)
+        if callable(sync):
+            sync()
         candidates: dict[int, list[ModelCatalogEntry]] = {}
+        limit = self.settings.calibration_max_models_per_tier
         for tier in CALIBRATION_TIERS:
             models = self.registry.list_available_for_router(tier=tier)
             models = [model for model in models if tier in (model.tier_eligibility or [])]
             models = sorted(models, key=lambda model: (not model.is_local, model.cost_per_million_tokens, model.id))
-            candidates[tier] = models[: self.settings.calibration_max_models_per_tier]
+            candidates[tier] = models if limit <= 0 else models[:limit]
         return candidates
-
-    def _tasks_for_tier(self, tier: int) -> list[BenchmarkTask]:
-        return [task for task in BENCHMARK_TASKS if task.tier == tier]
 
     def _run_candidate(self, model: ModelCatalogEntry, prompt: str) -> DriverResult:
         driver = self.drivers.get(model.provider)

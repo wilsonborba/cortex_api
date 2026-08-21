@@ -694,7 +694,7 @@ def _parse_critic_verdict(response_text: str) -> tuple[str, str]:
 
 def build_default_drivers(settings: Optional[Settings] = None) -> Dict[str, ExecutionDriver]:
     settings = settings or get_settings()
-    return {
+    drivers = {
         "ollama": OllamaDriver(base_url=settings.ollama_base_url, timeout=settings.driver_timeout_seconds),
         "claude": ClaudeDockerDriver(command=settings.claude_command, timeout=settings.driver_timeout_seconds),
         "agy": AgyDockerDriver(command=settings.agy_command, timeout=settings.driver_timeout_seconds),
@@ -729,6 +729,9 @@ def build_default_drivers(settings: Optional[Settings] = None) -> Dict[str, Exec
         ),
         "sambanova": SambaNovaDriver(api_key=settings.sambanova_api_key, timeout=settings.driver_timeout_seconds),
     }
+    for provider in settings.disabled_providers:
+        drivers.pop(provider.strip().lower(), None)
+    return drivers
 
 
 def build_default_executor(settings: Optional[Settings] = None) -> Executor:

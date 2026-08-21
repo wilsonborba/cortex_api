@@ -14,13 +14,19 @@ def status(ctx: typer.Context, top: int = typer.Option(3, "--top", help="Top N r
     resolver = CalibrationResolver(settings=get_settings())
     source = resolver.status(top_n=top)
     payload = {
+        "run_id": source.run_id,
         "source": source.source,
+        "status": source.status,
         "path": str(source.path) if source.path else None,
         "exists": source.exists,
         "updated_at": source.updated_at,
         "judges": source.judges,
         "evaluation_count": source.evaluation_count,
         "response_count": source.response_count,
+        "response_failures": source.response_failures,
+        "evaluation_failures": source.evaluation_failures,
+        "response_success_rate": source.response_success_rate,
+        "evaluation_success_rate": source.evaluation_success_rate,
         "best_models_by_tier": source.best_models_by_tier,
         "rankings_by_tier": source.rankings_by_tier,
     }
@@ -28,8 +34,8 @@ def status(ctx: typer.Context, top: int = typer.Option(3, "--top", help="Top N r
     def _table() -> None:
         print_table(
             "Calibration",
-            ["SOURCE", "PATH", "UPDATED", "JUDGES", "EVALS", "RESPONSES"],
-            [[source.source, source.path or "-", source.updated_at or "-", source.judges or "-", source.evaluation_count, source.response_count]],
+            ["SOURCE", "STATUS", "PATH", "UPDATED", "JUDGES", "EVALS", "RESPONSES", "EVAL OK", "RESP OK"],
+            [[source.source, source.status, source.path or "-", source.updated_at or "-", source.judges or "-", source.evaluation_count, source.response_count, round(source.evaluation_success_rate, 3), round(source.response_success_rate, 3)]],
         )
         ranking_rows = []
         for tier, rows in sorted(source.rankings_by_tier.items()):
@@ -103,6 +109,7 @@ def run(
         "evaluations": summary.evaluations,
         "response_attempts": summary.response_attempts,
         "response_failures": summary.response_failures,
+        "evaluation_failures": summary.evaluation_failures,
         "best_models_by_tier": summary.best_models_by_tier,
     }
     emit(
@@ -110,7 +117,7 @@ def run(
         json_data=payload,
         table=lambda: print_table(
             "Calibration Run",
-            ["RUN", "JUDGES", "MODELS", "EVALS", "RESPONSES", "FAILURES", "BEST"],
-            [[summary.run_id or "skipped", summary.judges or "-", summary.models_tested, summary.evaluations, summary.response_attempts, summary.response_failures, summary.best_models_by_tier or "-"]],
+            ["RUN", "JUDGES", "MODELS", "EVALS", "RESPONSES", "RESP FAIL", "EVAL FAIL", "BEST"],
+            [[summary.run_id or "skipped", summary.judges or "-", summary.models_tested, summary.evaluations, summary.response_attempts, summary.response_failures, summary.evaluation_failures, summary.best_models_by_tier or "-"]],
         ),
     )
