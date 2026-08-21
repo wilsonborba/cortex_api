@@ -637,14 +637,18 @@ class JudgeDetector:
         self.settings = settings or get_settings()
 
     def detect(self) -> list[JudgeInfo]:
+        # Default judge models aligned with supported CLI runner flags (issue #33):
+        # - agy requires a valid model flag like 'gemini-3.6-flash-high' (gemini-2.5-pro is unrecognized)
+        # - claude uses 'claude-opus-5'
+        # - codex requires 'gpt-5.4' (o3 is rejected under ChatGPT plan login)
         judges = [
-            self._detect_standard("agy", self.settings.agy_command, "agy", self._agy_available, "gemini-2.5-pro"),
+            self._detect_standard("agy", self.settings.agy_command, "agy", self._agy_available, "gemini-3.6-flash-high"),
             self._detect_standard("claude", self.settings.claude_command, "claude", self._claude_available, "claude-opus-5"),
-            self._detect_standard("codex", self.settings.codex_command, "codex", self._codex_available, "o3"),
+            self._detect_standard("codex", self.settings.codex_command, "codex", self._codex_available, "gpt-5.4"),
         ]
-        judges.extend(self._detect_custom_judges("agy", self._agy_available, "gemini-2.5-pro"))
+        judges.extend(self._detect_custom_judges("agy", self._agy_available, "gemini-3.6-flash-high"))
         judges.extend(self._detect_custom_judges("claude", self._claude_available, "claude-opus-5"))
-        judges.extend(self._detect_custom_judges("codex", self._codex_available, "o3"))
+        judges.extend(self._detect_custom_judges("codex", self._codex_available, "gpt-5.4"))
         disabled = {item.strip().lower() for item in self.settings.calibration_disabled_judge_ids}
         result: list[JudgeInfo] = []
         for judge in judges:

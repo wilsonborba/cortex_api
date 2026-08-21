@@ -7,9 +7,12 @@ from typing import Optional, Tuple
 from lib.dal.models import AccessStatus
 from lib.engine.discovery.base import DiscoveredModel
 
-# Codex CLI has no "list my models" command either, so this is a curated seed.
+# Codex CLI seed catalog (issue #33): 'gpt-5.4' is supported by Codex CLI logins.
 # Extend/reorder via `cortex models config`, not here.
-_CATALOG: Tuple[dict, ...] = ({"id": "o3", "display_name": "OpenAI o3", "tier_eligibility": [4, 5]},)
+_CATALOG: Tuple[dict, ...] = (
+    {"id": "gpt-5.4", "display_name": "OpenAI Codex 5.4", "tier_eligibility": [4, 5]},
+    {"id": "o3", "display_name": "OpenAI o3", "tier_eligibility": [4, 5]},
+)
 
 
 class CodexDiscovery:

@@ -150,7 +150,7 @@ def test_calibration_engine_writes_personal_only_and_keeps_canonical_unchanged(t
     registry = _FakeRegistry(model)
     candidate_driver = _FakeDriver("useful answer")
     judge_driver = _FakeDriver('{"score": 92, "reasoning": "strong answer"}')
-    detector = type("_Detector", (), {"available": lambda self: [JudgeInfo("codex", "codex", "codex", "codex", True, "ok", "o3", "codex")]})()
+    detector = type("_Detector", (), {"available": lambda self: [JudgeInfo("codex", "codex", "codex", "codex", True, "ok", "gpt-5.4", "codex")]})()
     engine = CalibrationEngine(
         settings=settings,
         registry=registry,
@@ -255,7 +255,7 @@ def test_calibration_engine_persists_task_bank_and_uses_all_models_when_limit_is
     registry = _FakeRegistry(models)
     candidate_driver = _FakeDriver("candidate answer")
     judge_driver = _FakeDriver('{"score": 80, "reasoning": "ok"}')
-    detector = type("_Detector", (), {"available": lambda self: [JudgeInfo("codex", "codex", "codex", "codex", True, "ok", "o3", "codex")]})()
+    detector = type("_Detector", (), {"available": lambda self: [JudgeInfo("codex", "codex", "codex", "codex", True, "ok", "gpt-5.4", "codex")]})()
     engine = CalibrationEngine(
         settings=settings,
         registry=registry,
