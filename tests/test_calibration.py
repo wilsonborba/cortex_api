@@ -33,13 +33,19 @@ class _FakeDriver:
 
 
 class _FakeRegistry:
-    def __init__(self, model: ModelCatalogEntry) -> None:
-        self.model = model
+    def __init__(self, model: ModelCatalogEntry | list[ModelCatalogEntry]) -> None:
+        self.models = model if isinstance(model, list) else [model]
+        self.sync_calls = 0
+
+    def sync(self):
+        self.sync_calls += 1
+        return self.models
 
     def list_available_for_router(self, tier: int | None = None):
-        if tier is None or tier in (self.model.tier_eligibility or []):
-            return [self.model]
-        return []
+        return [
+            model for model in self.models
+            if tier is None or tier in (model.tier_eligibility or [])
+        ]
 
 
 def _seed_store(path: Path, *, model_id: str, provider: str, tier: int, quality_score: float) -> None:
@@ -99,10 +105,12 @@ def test_judge_detector_reports_available_tools(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("PATH", f"{bin_dir}:{Path().cwd()}")
     settings = Settings(
         agy_command=str(bin_dir / "agy"),
-        agy_extra_commands=["docker=" + str(bin_dir / "agy-docker")],
         claude_command=str(bin_dir / "claude"),
-        claude_extra_commands=["docker=" + str(bin_dir / "claude-docker")],
         codex_command=str(bin_dir / "codex"),
+        calibration_judge_commands={
+            "agy:docker": str(bin_dir / "agy-docker"),
+            "claude:docker": str(bin_dir / "claude-docker"),
+        },
         claude_credentials_path=claude_creds,
         codex_auth_path=codex_auth,
         google_api_key="test-key",
@@ -203,7 +211,7 @@ def test_judge_detector_can_disable_default_and_keep_custom_variant(monkeypatch,
     monkeypatch.setenv("PATH", f"{bin_dir}:{Path().cwd()}")
     settings = Settings(
         claude_command=str(bin_dir / "claude"),
-        claude_extra_commands=["docker=" + str(bin_dir / "claude-docker")],
+        calibration_judge_commands={"claude:docker": str(bin_dir / "claude-docker")},
         claude_credentials_path=claude_creds,
         calibration_disabled_judge_ids=["claude"],
     )
@@ -211,3 +219,58 @@ def test_judge_detector_can_disable_default_and_keep_custom_variant(monkeypatch,
 
     assert judges["claude"].available is False
     assert judges["claude:docker"].available is True
+
+
+def test_calibration_engine_persists_task_bank_and_uses_all_models_when_limit_is_zero(tmp_path: Path):
+    personal = tmp_path / "personal_calibration.db"
+    settings = Settings(
+        calibration_personal_db_path=personal,
+        calibration_canonical_db_path=tmp_path / "canonical_calibration.db",
+        calibration_max_models_per_tier=0,
+    )
+    models = [
+        ModelCatalogEntry(
+            id="ollama/model-a",
+            provider="ollama",
+            display_name="Model A",
+            access_status=AccessStatus.AVAILABLE.value,
+            tier_eligibility=[2],
+            capabilities={"general": 0.1},
+            is_enabled=True,
+            is_local=True,
+            cost_per_million_tokens=0.0,
+        ),
+        ModelCatalogEntry(
+            id="ollama/model-b",
+            provider="ollama",
+            display_name="Model B",
+            access_status=AccessStatus.AVAILABLE.value,
+            tier_eligibility=[2],
+            capabilities={"general": 0.1},
+            is_enabled=True,
+            is_local=True,
+            cost_per_million_tokens=0.0,
+        ),
+    ]
+    registry = _FakeRegistry(models)
+    candidate_driver = _FakeDriver("candidate answer")
+    judge_driver = _FakeDriver('{"score": 80, "reasoning": "ok"}')
+    detector = type("_Detector", (), {"available": lambda self: [JudgeInfo("codex", "codex", "codex", "codex", True, "ok", "o3", "codex")]})()
+    engine = CalibrationEngine(
+        settings=settings,
+        registry=registry,
+        drivers={"ollama": candidate_driver, "codex": judge_driver},
+        detector=detector,
+    )
+
+    summary = engine.run(profile="medium", judge_ids=["codex"], show_progress=False)
+    store = CalibrationStore(personal)
+    meta = store.metadata(include_running=False)
+
+    assert summary.models_tested == 2
+    assert registry.sync_calls == 1
+    assert meta is not None
+    assert meta["status"] == "completed"
+    with store._connect() as conn:
+        task_count = conn.execute("SELECT COUNT(*) AS count FROM benchmark_tasks").fetchone()["count"]
+    assert task_count >= 2

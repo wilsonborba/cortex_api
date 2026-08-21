@@ -52,6 +52,19 @@ Cortex currently auto-detects these judge families:
 - `claude` via `claude` plus Claude credentials;
 - `codex` via `codex` plus `~/.codex/auth.json`.
 
+You can also register calibration-only custom judges with `CORTEX_CALIBRATION_JUDGE_COMMANDS` using a JSON map where each key is `family:alias` and each value is the executable path. Example:
+
+```env
+CORTEX_DISABLED_PROVIDERS=claude
+CORTEX_CALIBRATION_JUDGE_COMMANDS={"claude:service":"/home/your-user/.local/bin/claude-service"}
+```
+
+This keeps `claude` out of normal provider discovery/execution while still allowing `claude:service` to participate as a judge.
+
+Calibration persists its benchmark task bank inside `var/personal_calibration.db`, so prompts/rubrics are reused across runs and travel with the DB if you later promote it to canonical.
+
+By default Cortex now tests every eligible model in each tier. `CORTEX_CALIBRATION_MAX_MODELS_PER_TIER=0` means no cap; set a positive value only when you intentionally want a cheaper partial benchmark.
+
 Use:
 
 ```bash

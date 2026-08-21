@@ -54,7 +54,7 @@ Codex CLI allows routing reasoning and coding tasks through local Codex authenti
 
 ## 3. Google Antigravity CLI / AGY
 
-Antigravity CLI provides access to Google Gemini models (Gemini 2.0 Flash, Gemini 1.5 Pro). The default auto-detected command is `agy`; optional custom variants can be configured manually through a list of commands.
+Antigravity CLI provides access to Google Gemini models (Gemini 2.0 Flash, Gemini 1.5 Pro). The default auto-detected command is `agy`; optional calibration-only custom judges can be configured separately.
 
 * **Authentication:**
   ```bash
@@ -64,15 +64,14 @@ Antigravity CLI provides access to Google Gemini models (Gemini 2.0 Flash, Gemin
   Add these only when PATH resolution is not enough on your machine.
   ```env
   CORTEX_AGY_COMMAND=/home/your-user/.local/bin/agy
-  # Optional custom variants
-  CORTEX_AGY_EXTRA_COMMANDS=docker=/home/your-user/.local/bin/agy-docker,work=/opt/tools/agy-work
+  CORTEX_CALIBRATION_JUDGE_COMMANDS={"agy:work":"/opt/tools/agy-work"}
   ```
 
 ---
 
 ## 4. Claude CLI
 
-Claude CLI is auto-detected via the standard `claude` command. Optional custom variants such as `claude-docker` can be configured manually when you want a different local runner.
+Claude CLI is auto-detected via the standard `claude` command. Optional calibration-only custom judges can be configured manually when you want a different local runner.
 
 * **Credentials Path:** `~/.claude/.credentials.json` (or configured via `CORTEX_CLAUDE_CREDENTIALS_PATH`).
 * **Optional `.env` overrides:**
@@ -80,8 +79,8 @@ Claude CLI is auto-detected via the standard `claude` command. Optional custom v
   ```env
   CORTEX_CLAUDE_CREDENTIALS_PATH=/home/your-user/.claude/.credentials.json
   CORTEX_CLAUDE_COMMAND=/home/your-user/.local/bin/claude
-  # Optional custom variants
-  CORTEX_CLAUDE_EXTRA_COMMANDS=docker=/home/your-user/.local/bin/claude-docker,team=/opt/tools/claude-team
+  CORTEX_DISABLED_PROVIDERS=claude
+  CORTEX_CALIBRATION_JUDGE_COMMANDS={"claude:service":"/home/your-user/.local/bin/claude-service","claude:team":"/opt/tools/claude-team"}
   ```
 
 ---
