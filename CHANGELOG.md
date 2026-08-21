@@ -4,9 +4,16 @@
 ## Unreleased
 
 
+### Bug Fixes
+
+- Make external CLI binaries explicit and portable
+
+
 ### Documentation
 
 - Update release notes for routing quality improvements
+
+- Update release notes for routing follow-ups
 
 
 ### Features
@@ -19,6 +26,8 @@
 ### merge
 
 - Issue #24 routing quality improvements into release/main
+
+- Issues #25 #26 #27 routing follow-ups into release/main
 
 
 ## v0.1.0 - 2026-08-20
