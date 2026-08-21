@@ -328,7 +328,7 @@ def test_force_model_raises_when_it_does_not_match_any_candidate(
 # --- multi-model roles and auto-retrieval -----------------------------------------
 
 
-def test_tier_five_assigns_primary_refiner_and_critic_roles(
+def test_tier_five_assigns_primary_refiner_and_critic_roles_when_thinking_enabled(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
     _dynamic(pin_repo_, 5, "general")
@@ -342,7 +342,7 @@ def test_tier_five_assigns_primary_refiner_and_critic_roles(
         ids.append(model_id)
     _restrict(tier_service_, 5, ids)
 
-    plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=5, task_type="general"))
+    plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=5, task_type="general", thinking=True))
 
     roles = [s.role for s in plan.selections]
     assert roles == ["primary", "refiner", "critic"]
@@ -362,7 +362,7 @@ def test_tier_zero_never_assigns_extra_roles(
     assert [s.role for s in plan.selections] == ["primary"]
 
 
-def test_high_tiers_auto_enable_web_and_memory_by_default(
+def test_high_tiers_do_not_auto_enable_web_and_memory_without_flag(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
     _dynamic(pin_repo_, 4, "general")
@@ -371,8 +371,42 @@ def test_high_tiers_auto_enable_web_and_memory_by_default(
 
     plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=4, task_type="general"))
 
+    assert plan.needs_web is False
+    assert plan.use_memory is False
+
+
+def test_auto_retrieval_flag_enables_web_and_memory(
+    router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
+):
+    _dynamic(pin_repo_, 4, "general")
+    _seed_model(model_repo_, id="claude/router-t4-auto", provider="claude", is_local=False, tier_eligibility=[4])
+    _restrict(tier_service_, 4, ["claude/router-t4-auto"])
+
+    plan = router_.build_execution_plan(
+        RoutingRequest(prompt="hi", tier=4, task_type="general", auto_retrieval=True)
+    )
+
     assert plan.needs_web is True
     assert plan.use_memory is True
+
+
+def test_high_tier_without_thinking_stays_single_step(
+    router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
+):
+    _dynamic(pin_repo_, 5, "general")
+    ids = []
+    for i in range(3):
+        model_id = f"claude/router-t5-single-{i}"
+        _seed_model(
+            model_repo_, id=model_id, provider="claude", is_local=False,
+            tier_eligibility=[5], capabilities={"general": 0.9 - i * 0.1},
+        )
+        ids.append(model_id)
+    _restrict(tier_service_, 5, ids)
+
+    plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=5, task_type="general"))
+
+    assert [s.role for s in plan.selections] == ["primary"]
 
 
 def test_low_tiers_respect_explicit_web_request(

@@ -5,6 +5,7 @@ from functools import lru_cache
 from lib.dal.repositories.pin_repository import RoutingPinRepository
 from lib.dal.repositories.telemetry_repository import TelemetryRepository
 from lib.engine.executor import Executor, build_default_executor
+from lib.engine.prompt_normalizer import PromptNormalizer
 from lib.engine.quota import QuotaTracker
 from lib.engine.registry_service import ModelRegistryService, build_default_registry_service
 from lib.engine.router import Router, build_default_router
@@ -49,6 +50,12 @@ def get_router() -> Router:
 @lru_cache(maxsize=1)
 def get_executor() -> Executor:
     return build_default_executor()
+
+
+@lru_cache(maxsize=1)
+def get_prompt_normalizer() -> PromptNormalizer:
+    executor = get_executor()
+    return PromptNormalizer(registry=get_registry(), drivers=executor.drivers)
 
 
 @lru_cache(maxsize=1)

@@ -17,6 +17,7 @@ from lib.presentation.api.schemas.openai_facade import ChatMessage
 def _plan() -> ExecutionPlan:
     return ExecutionPlan(
         tier=3, task_type="general", strategy_id="general_t3_dynamic", prompt="hi",
+        original_prompt="hi",
         selections=[ModelSelection(model_id="claude/facade-model", provider="claude", role="primary")],
         allow_multi_model=False, retrieval_mode="none", needs_web=False, use_memory=False, memory_topic=None,
         require_verification=False, max_latency_seconds=45, max_model_calls=1, source="dynamic", reason="test",

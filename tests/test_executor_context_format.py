@@ -87,6 +87,7 @@ def _failure(error_type: str) -> DriverResult:
 def _plan(**overrides) -> ExecutionPlan:
     defaults = dict(
         tier=1, task_type="general", strategy_id="general_t1_dynamic", prompt="what is sqlite",
+        original_prompt="what is sqlite",
         selections=[ModelSelection(model_id="ctxexec/model", provider="ctxexec", role="primary")],
         allow_multi_model=False, retrieval_mode="none", needs_web=True, use_memory=False, memory_topic=None,
         require_verification=False, max_latency_seconds=30, max_model_calls=1, source="dynamic", reason="test",

@@ -137,6 +137,7 @@ def _plan(
 ) -> ExecutionPlan:
     return ExecutionPlan(
         tier=tier, task_type="general", strategy_id="general_t1_dynamic", prompt="explain sqlite",
+        original_prompt="explain sqlite",
         selections=selections, allow_multi_model=len(selections) > 1, retrieval_mode="none",
         needs_web=needs_web, use_memory=use_memory, memory_topic=memory_topic, require_verification=False,
         max_latency_seconds=max_latency_seconds, max_model_calls=max(1, len(selections)),

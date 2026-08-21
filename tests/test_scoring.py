@@ -137,3 +137,17 @@ def test_score_rewards_quota_availability(
     fresh = scorer.score(_model(id="claude/scoring-fresh", provider="claude"), "coding", 45)
 
     assert fresh.score > starved.score
+
+
+def test_score_rewards_models_whose_tier_profile_matches_requested_tier(
+    telemetry_repo_: TelemetryRepository, quota_tracker_: QuotaTracker
+):
+    scorer = ModelScorer(
+        quota_tracker=quota_tracker_, telemetry_repo=telemetry_repo_,
+        weights=ScoringWeights(capability=0.0, quota=0.0, latency=0.0, cost=0.0, tier_fit=1.0),
+    )
+
+    low_band = scorer.score(_model(id="ollama/tier-low", tier_eligibility=[0, 1, 2, 3]), "coding", 45, requested_tier=5)
+    high_band = scorer.score(_model(id="claude/tier-high", tier_eligibility=[4, 5]), "coding", 45, requested_tier=5)
+
+    assert high_band.score > low_band.score

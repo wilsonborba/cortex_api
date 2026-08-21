@@ -8,7 +8,7 @@ from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
 
 # Gemini/partner models via Antigravity aren't local; start them in the
 # mid tiers and let telemetry (or manual curation) move them from there.
-DEFAULT_TIER_ELIGIBILITY = [0, 1, 2, 3, 4, 5]
+DEFAULT_TIER_ELIGIBILITY = [2, 3, 4, 5]
 
 _SIGN_IN_MARKERS = ("sign in", "not logged in", "unauthorized", "unauthenticated")
 _NOISE_PREFIXES = ("fetching", "available models", "model", "usage", "---")

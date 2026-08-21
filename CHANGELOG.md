@@ -1,12 +1,12 @@
 # Changelog
 
 
-## v0.1.0 - 2026-08-20
+## Unreleased
 
 
 ### Features
 
-- Enable full tier 0-5 eligibility across cloud and local providers
+- Improve tier quality controls and prompt normalization
 
 
 ## v0.1.0 - 2026-08-20
@@ -49,6 +49,8 @@
 - Update changelog for scalar /docs route
 
 - Update changelog for multilingual scalar specs
+
+- Update changelog for tier 0-5 eligibility expansion
 
 
 ### Features
@@ -112,6 +114,8 @@
 - Map /docs route directly to Scalar interactive documentation
 
 - Add interactive multilingual language switcher and localized openapi specs for Scalar
+
+- Enable full tier 0-5 eligibility across cloud and local providers
 
 
 ### merge

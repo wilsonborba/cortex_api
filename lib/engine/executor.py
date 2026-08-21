@@ -199,6 +199,10 @@ class Executor:
         self._sanitize_enabled = sanitize_enabled
         self._attachment_ingestor = attachment_ingestor or build_default_attachment_ingestor()
 
+    @property
+    def drivers(self) -> Dict[str, ExecutionDriver]:
+        return self._drivers
+
     async def execute(self, plan: ExecutionPlan) -> ExecutionResult:
         if not plan.selections:
             raise UnresolvedStrategyError(plan.strategy_id)

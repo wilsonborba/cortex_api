@@ -169,6 +169,10 @@ class Settings(BaseSettings):
         default=0.10,
         validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_COST", "ROUTING_WEIGHT_COST"),
     )
+    routing_weight_tier_fit: float = Field(
+        default=0.20,
+        validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_TIER_FIT", "ROUTING_WEIGHT_TIER_FIT"),
+    )
     routing_cost_ceiling_usd_per_million: float = Field(
         default=20.0,
         validation_alias=AliasChoices(
