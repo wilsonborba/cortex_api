@@ -4,9 +4,21 @@
 ## Unreleased
 
 
+### Documentation
+
+- Update release notes for routing quality improvements
+
+
 ### Features
 
 - Improve tier quality controls and prompt normalization
+
+- Expose quality controls and improve retrieval heuristics
+
+
+### merge
+
+- Issue #24 routing quality improvements into release/main
 
 
 ## v0.1.0 - 2026-08-20
