@@ -65,8 +65,8 @@ These may belong in `.env` because they depend on the local machine or user acco
 | `CORTEX_CLAUDE_CREDENTIALS_PATH` | `~/.claude/.credentials.json` |
 | `CORTEX_CODEX_AUTH_PATH` | `~/.codex/auth.json` |
 | `CORTEX_AGY_COMMAND` | `agy` |
-| `CORTEX_AGY_DOCKER_COMMAND` | `agy-docker` |
-| `CORTEX_CLAUDE_DOCKER_COMMAND` | `claude-docker` |
+| `CORTEX_AGY_DOCKER_COMMAND` | unset |
+| `CORTEX_CLAUDE_DOCKER_COMMAND` | unset |
 | `CORTEX_CODEX_COMMAND` | `codex` |
 
 Only override them when your installation differs from the standard defaults or PATH lookup.

@@ -97,14 +97,14 @@ class Settings(BaseSettings):
             "CORTEX_CLAUDE_COMMAND", "CORTEX_CLAUDE_BIN", "CLAUDE_COMMAND", "CLAUDE_BIN"
         ),
     )
-    claude_docker_command: str = Field(
-        default="claude-docker",
+    claude_docker_command: Optional[str] = Field(
+        default=None,
         validation_alias=AliasChoices(
             "CORTEX_CLAUDE_DOCKER_COMMAND", "CLAUDE_DOCKER_COMMAND"
         ),
     )
-    agy_docker_command: str = Field(
-        default="agy-docker",
+    agy_docker_command: Optional[str] = Field(
+        default=None,
         validation_alias=AliasChoices(
             "CORTEX_AGY_DOCKER_COMMAND", "CORTEX_AGY_EXEC_BIN", "AGY_DOCKER_COMMAND", "AGY_EXEC_BIN"
         ),
