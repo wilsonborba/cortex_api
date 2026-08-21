@@ -10,7 +10,15 @@ from lib.core.logs import LogTarget, configure_logging, get_logger
 from lib.core.settings import get_settings
 from lib.engine.executor import UnresolvedStrategyError
 from lib.engine.router import NoEligibleModelError, RoutingRequest
-from lib.presentation.api.deps import get_executor, get_pin_repo, get_quota_tracker, get_registry, get_router, get_tier_service
+from lib.presentation.api.deps import (
+    get_executor,
+    get_pin_repo,
+    get_prompt_normalizer,
+    get_quota_tracker,
+    get_registry,
+    get_router,
+    get_tier_service,
+)
 from lib.presentation.api.schemas.execute import ExecuteResponse
 from lib.presentation.api.schemas.quota import QuotaOut
 from lib.presentation.cli import models_cmd, pins_cmd, telemetry_cmd, tiers_cmd
@@ -65,8 +73,11 @@ def run(
     prompt: str = typer.Argument(..., help="The prompt to execute (supports leading /t3 or [T4] directives)"),
     tier: Optional[str] = typer.Option(None, "--tier", help="0-5 or 'auto' (default: auto)"),
     task: str = typer.Option("general", "--task"),
+    normalize_prompt: bool = typer.Option(True, "--normalize-prompt/--no-normalize-prompt"),
+    thinking: bool = typer.Option(False, "--thinking", help="Enable refiner/critic style multi-step reasoning"),
     web: bool = typer.Option(False, "--web", help="Enable live web search context"),
     memory: bool = typer.Option(False, "--memory", help="Enable hippocampus memory context"),
+    auto_retrieval: bool = typer.Option(False, "--auto-retrieval", help="Allow router to enable retrieval for this call"),
     memory_topic: Optional[str] = typer.Option(None, "--memory-topic"),
     force_model: Optional[str] = typer.Option(None, "--force-model"),
     force_provider: Optional[str] = typer.Option(None, "--force-provider"),
@@ -75,8 +86,12 @@ def run(
         None, "--context-format", help="'toon' or 'json' -- overrides the model's auto/pinned preference for this call"
     ),
 ) -> None:
+    if normalize_prompt:
+        prompt = get_prompt_normalizer().normalize(prompt).prompt
+
     routing_request = RoutingRequest(
-        prompt=prompt, tier=tier, task_type=task, needs_web=web, use_memory=memory, memory_topic=memory_topic,
+        prompt=prompt, tier=tier, task_type=task, thinking=thinking,
+        needs_web=web, use_memory=memory, auto_retrieval=auto_retrieval, memory_topic=memory_topic,
         force_model=force_model, force_provider=force_provider, force_strategy=force_strategy,
         force_context_format=context_format,
     )

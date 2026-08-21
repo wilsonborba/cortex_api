@@ -10,6 +10,7 @@ from lib.dal.models import AccessStatus, ModelCatalogEntry
 from lib.dal.repositories.model_repository import ModelRepository
 from lib.dal.repositories.pin_repository import RoutingPinRepository
 from lib.engine.executor import ExecutionResult, StepResult, UnresolvedStrategyError
+from lib.engine.prompt_normalizer import PromptNormalizationResult
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError
 
 runner = CliRunner()
@@ -270,9 +271,20 @@ class _FakeExecutor:
         return self._result
 
 
+class _FakePromptNormalizer:
+    def __init__(self, prompt: str = "hello") -> None:
+        self._prompt = prompt
+        self.calls: list[str] = []
+
+    def normalize(self, prompt: str) -> PromptNormalizationResult:
+        self.calls.append(prompt)
+        return PromptNormalizationResult(prompt=self._prompt, changed=self._prompt != prompt)
+
+
 def test_run_prints_the_response_and_exits_zero(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(cli_main, "get_router", lambda: _FakeRouter(plan=_plan()))
     monkeypatch.setattr(cli_main, "get_executor", lambda: _FakeExecutor(result=_result()))
+    monkeypatch.setattr(cli_main, "get_prompt_normalizer", lambda: _FakePromptNormalizer(prompt="hello"))
 
     result = _invoke("run", "hello", "--tier", "1")
 
@@ -289,6 +301,7 @@ def test_run_exits_nonzero_when_execution_fails(monkeypatch: pytest.MonkeyPatch)
         cli_main, "get_executor",
         lambda: _FakeExecutor(result=_result(success=False, response_text="", error_type="rate_limit")),
     )
+    monkeypatch.setattr(cli_main, "get_prompt_normalizer", lambda: _FakePromptNormalizer(prompt="hello"))
 
     result = _invoke("run", "hello")
 
@@ -298,6 +311,7 @@ def test_run_exits_nonzero_when_execution_fails(monkeypatch: pytest.MonkeyPatch)
 def test_run_reports_no_eligible_model_cleanly(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(cli_main, "get_router", lambda: _FakeRouter(error=NoEligibleModelError("nothing eligible")))
     monkeypatch.setattr(cli_main, "get_executor", lambda: _FakeExecutor())
+    monkeypatch.setattr(cli_main, "get_prompt_normalizer", lambda: _FakePromptNormalizer(prompt="hello"))
 
     result = _invoke("run", "hello", "--tier", "5")
 
@@ -310,6 +324,7 @@ def test_run_reports_unresolved_strategy_cleanly(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         cli_main, "get_executor", lambda: _FakeExecutor(error=UnresolvedStrategyError("coding_t3_custom"))
     )
+    monkeypatch.setattr(cli_main, "get_prompt_normalizer", lambda: _FakePromptNormalizer(prompt="hello"))
 
     result = _invoke("run", "hello", "--force-strategy", "coding_t3_custom")
 
@@ -320,11 +335,42 @@ def test_run_forwards_context_format_flag_to_the_router(monkeypatch: pytest.Monk
     router = _FakeRouter(plan=_plan())
     monkeypatch.setattr(cli_main, "get_router", lambda: router)
     monkeypatch.setattr(cli_main, "get_executor", lambda: _FakeExecutor(result=_result()))
+    monkeypatch.setattr(cli_main, "get_prompt_normalizer", lambda: _FakePromptNormalizer(prompt="hello"))
 
     result = _invoke("run", "hello", "--context-format", "json")
 
     assert result.exit_code == 0
     assert router.last_request.force_context_format == "json"
+
+
+def test_run_forwards_thinking_auto_retrieval_and_normalizes_prompt(monkeypatch: pytest.MonkeyPatch):
+    router = _FakeRouter(plan=_plan())
+    normalizer = _FakePromptNormalizer(prompt="structured hello")
+    monkeypatch.setattr(cli_main, "get_router", lambda: router)
+    monkeypatch.setattr(cli_main, "get_executor", lambda: _FakeExecutor(result=_result()))
+    monkeypatch.setattr(cli_main, "get_prompt_normalizer", lambda: normalizer)
+
+    result = _invoke("run", "hello", "--thinking", "--auto-retrieval")
+
+    assert result.exit_code == 0
+    assert normalizer.calls == ["hello"]
+    assert router.last_request.prompt == "structured hello"
+    assert router.last_request.thinking is True
+    assert router.last_request.auto_retrieval is True
+
+
+def test_run_can_skip_prompt_normalization(monkeypatch: pytest.MonkeyPatch):
+    router = _FakeRouter(plan=_plan())
+    normalizer = _FakePromptNormalizer(prompt="structured hello")
+    monkeypatch.setattr(cli_main, "get_router", lambda: router)
+    monkeypatch.setattr(cli_main, "get_executor", lambda: _FakeExecutor(result=_result()))
+    monkeypatch.setattr(cli_main, "get_prompt_normalizer", lambda: normalizer)
+
+    result = _invoke("run", "hello", "--no-normalize-prompt")
+
+    assert result.exit_code == 0
+    assert normalizer.calls == []
+    assert router.last_request.prompt == "hello"
 
 
 # --- stream --------------------------------------------------------------------------

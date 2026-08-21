@@ -71,6 +71,9 @@ def test_openai_compatible_discovery_parses_models_list():
 
     assert [m.id for m in models] == ["groq/llama-3.1-8b-instant", "groq/llama-3.3-70b-versatile"]
     assert all(m.access_status == AccessStatus.AVAILABLE.value for m in models)
+    assert models[0].tier_eligibility == [1, 2, 3]
+    assert models[1].tier_eligibility == [3, 4, 5]
+    assert models[1].capabilities["reasoning"] > models[0].capabilities["reasoning"]
     assert client.last_headers["Authorization"] == "Bearer fake-key"
 
 
@@ -189,6 +192,7 @@ def test_huggingface_discovery_checks_auth_then_lists_models():
     models = discovery.discover()
 
     assert models[0].id == "huggingface/meta-llama/Llama-3.1-8B-Instruct"
+    assert models[0].tier_eligibility == [1, 2, 3]
 
 
 def test_huggingface_discovery_raises_without_api_key():

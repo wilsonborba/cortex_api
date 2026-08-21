@@ -273,3 +273,34 @@ def test_gather_context_returns_empty_when_no_provider_has_results():
 
     assert context.markdown == ""
     assert context.sources == []
+
+
+def test_gather_context_discards_irrelevant_results():
+    provider = _StaticSearchProvider(
+        results=[
+            SearchResult(title="Python sqlite", url="https://good.example", snippet="python sqlite usage"),
+            SearchResult(title="Football scores", url="https://bad.example", snippet="latest football match"),
+        ]
+    )
+    scraper = _StaticScraper(page=ScrapedPage(url="", title="", markdown="python sqlite tutorial", success=True))
+    service = WebRetrievalService(search_providers=[provider], scrapers=[scraper])
+
+    context = service.gather_context("python sqlite")
+
+    assert context.sources == ["https://good.example"]
+    assert "bad.example" not in context.markdown
+
+
+def test_gather_context_deduplicates_near_identical_pages():
+    provider = _StaticSearchProvider(
+        results=[
+            SearchResult(title="Python", url="https://a.example", snippet="python sqlite basics"),
+            SearchResult(title="Python duplicate", url="https://b.example", snippet="python sqlite basics"),
+        ]
+    )
+    scraper = _StaticScraper(page=ScrapedPage(url="", title="", markdown="python sqlite basics", success=True))
+    service = WebRetrievalService(search_providers=[provider], scrapers=[scraper])
+
+    context = service.gather_context("python sqlite")
+
+    assert len(context.sources) == 1

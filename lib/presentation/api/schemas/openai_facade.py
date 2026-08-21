@@ -16,6 +16,12 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     stream: bool = False
+    normalize_prompt: bool = True
+    thinking: bool = False
+    needs_web: bool = False
+    use_memory: bool = False
+    auto_retrieval: bool = False
+    memory_topic: Optional[str] = None
 
 
 class ChatCompletionChoice(BaseModel):
