@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     )
     agy_command: str = Field(
         default="agy",
-        validation_alias=AliasChoices("CORTEX_AGY_COMMAND", "AGY_COMMAND"),
+        validation_alias=AliasChoices("CORTEX_AGY_COMMAND", "CORTEX_AGY_BIN", "AGY_COMMAND", "AGY_BIN"),
     )
     claude_credentials_path: Path = Field(
         default_factory=lambda: Path.home() / ".claude" / ".credentials.json",
@@ -84,15 +84,19 @@ class Settings(BaseSettings):
     )
     claude_docker_command: str = Field(
         default="claude-docker",
-        validation_alias=AliasChoices("CORTEX_CLAUDE_DOCKER_COMMAND", "CLAUDE_DOCKER_COMMAND"),
+        validation_alias=AliasChoices(
+            "CORTEX_CLAUDE_DOCKER_COMMAND", "CORTEX_CLAUDE_BIN", "CLAUDE_DOCKER_COMMAND", "CLAUDE_BIN"
+        ),
     )
     agy_docker_command: str = Field(
         default="agy-docker",
-        validation_alias=AliasChoices("CORTEX_AGY_DOCKER_COMMAND", "AGY_DOCKER_COMMAND"),
+        validation_alias=AliasChoices(
+            "CORTEX_AGY_DOCKER_COMMAND", "CORTEX_AGY_EXEC_BIN", "AGY_DOCKER_COMMAND", "AGY_EXEC_BIN"
+        ),
     )
     codex_command: str = Field(
         default="codex",
-        validation_alias=AliasChoices("CORTEX_CODEX_COMMAND", "CODEX_COMMAND"),
+        validation_alias=AliasChoices("CORTEX_CODEX_COMMAND", "CORTEX_CODEX_BIN", "CODEX_COMMAND", "CODEX_BIN"),
     )
     driver_timeout_seconds: float = Field(
         default=180.0,
@@ -296,6 +300,20 @@ class Settings(BaseSettings):
     ollama_cloud_api_key: Optional[str] = Field(
         default=None, validation_alias=AliasChoices("CORTEX_OLLAMA_CLOUD_API_KEY")
     )
+
+    @field_validator("claude_credentials_path", "codex_auth_path", mode="before")
+    @classmethod
+    def _expand_user_paths(cls, value):
+        if value is None:
+            return value
+        return Path(value).expanduser()
+
+    @field_validator("agy_command", "claude_docker_command", "agy_docker_command", "codex_command", mode="before")
+    @classmethod
+    def _expand_user_commands(cls, value: str) -> str:
+        if value is None:
+            return value
+        return str(Path(value).expanduser()) if str(value).startswith("~") else str(value)
     aion_labs_api_key: Optional[str] = Field(
         default=None, validation_alias=AliasChoices("CORTEX_AION_LABS_API_KEY")
     )

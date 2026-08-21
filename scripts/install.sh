@@ -109,6 +109,36 @@ env_value() {
   printf '%s' "${value:-$default}"
 }
 
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE" 2>/dev/null || true
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
+}
+
+service_account_user() {
+  if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+    printf '%s' "$SUDO_USER"
+    return
+  fi
+  id -un
+}
+
+service_account_group() {
+  local user
+  user=$(service_account_user)
+  id -gn "$user" 2>/dev/null || id -gn
+}
+
+service_account_home() {
+  local user
+  user=$(service_account_user)
+  getent passwd "$user" 2>/dev/null | cut -d: -f6
+}
+
 check_python_environment() {
   log_info "Validating Python runtime environment..."
 
@@ -324,6 +354,45 @@ EOF
   else
     printf 'CORTEX_API_PORT=%s\n' "$EFFECTIVE_PORT" >> "$ENV_FILE"
   fi
+
+  configure_external_cli_paths
+}
+
+
+configure_external_cli_paths() {
+  local current_user current_home detected
+  current_user=$(service_account_user)
+  current_home=$(service_account_home)
+  if [ -z "$current_home" ]; then
+    current_home=$HOME
+  fi
+
+  detected=$(command -v agy 2>/dev/null || true)
+  if [ -n "$detected" ] && [ "$(env_value CORTEX_AGY_COMMAND agy)" = "agy" ]; then
+    upsert_env_value CORTEX_AGY_COMMAND "$detected"
+  fi
+
+  detected=$(command -v agy-docker 2>/dev/null || true)
+  if [ -n "$detected" ] && [ "$(env_value CORTEX_AGY_DOCKER_COMMAND agy-docker)" = "agy-docker" ]; then
+    upsert_env_value CORTEX_AGY_DOCKER_COMMAND "$detected"
+  fi
+
+  detected=$(command -v claude-docker 2>/dev/null || true)
+  if [ -n "$detected" ] && [ "$(env_value CORTEX_CLAUDE_DOCKER_COMMAND claude-docker)" = "claude-docker" ]; then
+    upsert_env_value CORTEX_CLAUDE_DOCKER_COMMAND "$detected"
+  fi
+
+  detected=$(command -v codex 2>/dev/null || true)
+  if [ -n "$detected" ] && [ "$(env_value CORTEX_CODEX_COMMAND codex)" = "codex" ]; then
+    upsert_env_value CORTEX_CODEX_COMMAND "$detected"
+  fi
+
+  if [ "$(env_value CORTEX_CLAUDE_CREDENTIALS_PATH '~/.claude/.credentials.json')" = '~/.claude/.credentials.json' ]; then
+    upsert_env_value CORTEX_CLAUDE_CREDENTIALS_PATH "$current_home/.claude/.credentials.json"
+  fi
+  if [ "$(env_value CORTEX_CODEX_AUTH_PATH '~/.codex/auth.json')" = '~/.codex/auth.json' ]; then
+    upsert_env_value CORTEX_CODEX_AUTH_PATH "$current_home/.codex/auth.json"
+  fi
 }
 
 initialize_database() {
@@ -334,9 +403,14 @@ initialize_database() {
 }
 
 setup_systemd_linux() {
-  local current_user current_group
-  current_user=$(id -un)
-  current_group=$(id -gn)
+  local current_user current_group current_home service_path
+  current_user=$(service_account_user)
+  current_group=$(service_account_group)
+  current_home=$(service_account_home)
+  if [ -z "$current_home" ]; then
+    current_home=$HOME
+  fi
+  service_path="$current_home/.local/bin:$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null || [ "$(id -u)" -eq 0 ]; then
     log_info "Installing systemd system service (${SERVICE_NAME})..."
@@ -351,6 +425,9 @@ User=${current_user}
 Group=${current_group}
 WorkingDirectory=${ROOT_DIR}
 EnvironmentFile=${ENV_FILE}
+Environment=HOME=${current_home}
+Environment=PATH=${service_path}
+Environment=XDG_CONFIG_HOME=${current_home}/.config
 ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${DEFAULT_HOST} --port ${EFFECTIVE_PORT}
 Restart=always
 RestartSec=3
@@ -377,6 +454,9 @@ After=network.target
 Type=simple
 WorkingDirectory=${ROOT_DIR}
 EnvironmentFile=${ENV_FILE}
+Environment=HOME=${current_home}
+Environment=PATH=${service_path}
+Environment=XDG_CONFIG_HOME=${current_home}/.config
 ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${DEFAULT_HOST} --port ${EFFECTIVE_PORT}
 Restart=always
 RestartSec=3

@@ -200,3 +200,28 @@ def test_huggingface_discovery_raises_without_api_key():
 
     with pytest.raises(ProviderDiscoveryError):
         discovery.discover()
+
+
+def test_codex_driver_uses_configured_binary_path():
+    client = _FakeClient(post_payload=None)
+    seen = {}
+
+    def runner(args, **kwargs):
+        seen["argv0"] = args[0]
+        class _Proc:
+            returncode = 0
+            stdout = '{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}\n{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n'
+            stderr = ""
+        return _Proc()
+
+    driver = OpenAICompatibleDriver(
+        provider="groq", base_url="https://api.groq.com/openai/v1", api_key="fake-key",
+        client_factory=lambda: client,
+    )
+    assert driver.provider == "groq"
+
+    from lib.engine.drivers.codex import CodexDriver
+    result = CodexDriver(command="/opt/tools/codex", runner=runner).run("o3", "hello")
+
+    assert result.success is True
+    assert seen["argv0"] == "/opt/tools/codex"
