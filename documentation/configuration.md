@@ -65,8 +65,8 @@ These may belong in `.env` because they depend on the local machine or user acco
 | `CORTEX_CLAUDE_CREDENTIALS_PATH` | `~/.claude/.credentials.json` |
 | `CORTEX_CODEX_AUTH_PATH` | `~/.codex/auth.json` |
 | `CORTEX_AGY_COMMAND` | `agy` |
-| `CORTEX_AGY_DOCKER_COMMAND` | unset |
-| `CORTEX_CLAUDE_DOCKER_COMMAND` | unset |
+| `CORTEX_AGY_EXTRA_COMMANDS` | `[]` |
+| `CORTEX_CLAUDE_EXTRA_COMMANDS` | `[]` |
 | `CORTEX_CODEX_COMMAND` | `codex` |
 
 Only override them when your installation differs from the standard defaults or PATH lookup.
@@ -128,5 +128,7 @@ These are optional and usually do not need to be set:
 | `CORTEX_CALIBRATION_PERSONAL_DB_PATH` | `var/personal_calibration.db` | Local writable override produced by calibration runs. |
 | `CORTEX_CALIBRATION_MAX_MODELS_PER_TIER` | `6` | Cap candidate count per tier during calibration. |
 | `CORTEX_CALIBRATION_JUDGE_TIMEOUT_SECONDS` | `180` | Timeout for judge CLI evaluation calls. |
+| `CORTEX_CODEX_EXTRA_COMMANDS` | `[]` | Optional Codex command variants. |
+| `CORTEX_CALIBRATION_DISABLED_JUDGE_IDS` | `[]` | Disable default or custom judge ids, e.g. `claude` or `claude:docker`. |
 
 Routing weights now default to a quality-dominant balance so slower but materially better models are less likely to be dominated by merely fast ones.

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 from pydantic import AliasChoices, Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -97,25 +97,25 @@ class Settings(BaseSettings):
             "CORTEX_CLAUDE_COMMAND", "CORTEX_CLAUDE_BIN", "CLAUDE_COMMAND", "CLAUDE_BIN"
         ),
     )
-    claude_docker_command: Optional[str] = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "CORTEX_CLAUDE_DOCKER_COMMAND", "CLAUDE_DOCKER_COMMAND"
-        ),
+    agy_extra_commands: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("CORTEX_AGY_EXTRA_COMMANDS", "AGY_EXTRA_COMMANDS"),
     )
-    agy_docker_command: Optional[str] = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "CORTEX_AGY_DOCKER_COMMAND", "CORTEX_AGY_EXEC_BIN", "AGY_DOCKER_COMMAND", "AGY_EXEC_BIN"
-        ),
+    claude_extra_commands: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("CORTEX_CLAUDE_EXTRA_COMMANDS", "CLAUDE_EXTRA_COMMANDS"),
     )
     codex_command: str = Field(
         default="codex",
         validation_alias=AliasChoices("CORTEX_CODEX_COMMAND", "CORTEX_CODEX_BIN", "CODEX_COMMAND", "CODEX_BIN"),
     )
-    codex_docker_command: Optional[str] = Field(
-        default=None,
-        validation_alias=AliasChoices("CORTEX_CODEX_DOCKER_COMMAND", "CODEX_DOCKER_COMMAND"),
+    codex_extra_commands: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("CORTEX_CODEX_EXTRA_COMMANDS", "CODEX_EXTRA_COMMANDS"),
+    )
+    calibration_disabled_judge_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("CORTEX_CALIBRATION_DISABLED_JUDGE_IDS", "CALIBRATION_DISABLED_JUDGE_IDS"),
     )
     driver_timeout_seconds: float = Field(
         default=180.0,
@@ -335,7 +335,7 @@ class Settings(BaseSettings):
             return value
         return Path(value).expanduser()
 
-    @field_validator("agy_command", "claude_command", "claude_docker_command", "agy_docker_command", "codex_command", "codex_docker_command", mode="before")
+    @field_validator("agy_command", "claude_command", "codex_command", mode="before")
     @classmethod
     def _expand_user_commands(cls, value: str) -> str:
         if value is None:
@@ -353,6 +353,23 @@ class Settings(BaseSettings):
     sambanova_api_key: Optional[str] = Field(
         default=None, validation_alias=AliasChoices("CORTEX_SAMBANOVA_API_KEY")
     )
+
+    @field_validator("agy_extra_commands", "claude_extra_commands", "codex_extra_commands", "calibration_disabled_judge_ids", mode="before")
+    @classmethod
+    def _parse_string_lists(cls, value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return value
+        text = str(value).strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            import json
+            parsed = json.loads(text)
+            return [str(item) for item in parsed]
+        return [item.strip() for item in text.split(",") if item.strip()]
+
 
 
 @lru_cache(maxsize=1)
