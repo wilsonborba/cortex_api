@@ -25,10 +25,11 @@ Ollama runs open-weight models (Llama 3, Qwen 2.5, DeepSeek) locally on CPU, NVI
   ollama pull dolphin3:8b
   ollama pull qwen2.5vl:7b   # Local vision model
   ```
-* **Configure in `.env`:**
+* **Defaults and optional overrides:**
+  `CORTEX_OLLAMA_BASE_URL` already defaults to `http://localhost:11434`. Add it to `.env` only when your Ollama endpoint differs.
   ```env
-  CORTEX_OLLAMA_BASE_URL=http://localhost:11434
-  CORTEX_VISION_MODEL=qwen2.5vl:7b
+  # Optional override
+  CORTEX_OLLAMA_BASE_URL=http://remote-host:11434
   ```
 
 ---
@@ -42,39 +43,45 @@ Codex CLI allows routing reasoning and coding tasks through local Codex authenti
   ```bash
   codex login
   ```
-* **Configure in `.env`:**
+* **Optional `.env` overrides:**
+  `CORTEX_CODEX_AUTH_PATH` and `CORTEX_CODEX_COMMAND` only belong in `.env` when your local setup differs from the built-in defaults.
   ```env
-  CORTEX_CODEX_AUTH_PATH=~/.codex/auth.json
-  CORTEX_CODEX_COMMAND=codex
+  CORTEX_CODEX_AUTH_PATH=/home/your-user/.codex/auth.json
+  CORTEX_CODEX_COMMAND=/home/your-user/.local/bin/codex
   ```
 
 ---
 
-## 3. Google Antigravity CLI / AGY Docker
+## 3. Google Antigravity CLI / AGY
 
-Antigravity CLI provides access to Google Gemini models (Gemini 2.0 Flash, Gemini 1.5 Pro).
+Antigravity CLI provides access to Google Gemini models (Gemini 2.0 Flash, Gemini 1.5 Pro). The default auto-detected command is `agy`; optional custom variants such as `agy-docker` can be configured manually.
 
 * **Authentication:**
   ```bash
   agy auth login
   ```
-* **Configure in `.env`:**
+* **Optional `.env` overrides:**
+  Add these only when PATH resolution is not enough on your machine.
   ```env
-  CORTEX_AGY_COMMAND=agy
-  CORTEX_AGY_DOCKER_COMMAND=agy-docker
+  CORTEX_AGY_COMMAND=/home/your-user/.local/bin/agy
+  # Optional custom variant
+  CORTEX_AGY_DOCKER_COMMAND=/home/your-user/.local/bin/agy-docker
   ```
 
 ---
 
-## 4. Claude Docker
+## 4. Claude CLI
 
-Claude Docker runs Anthropic models inside an isolated container runner.
+Claude CLI is auto-detected via the standard `claude` command. Optional custom variants such as `claude-docker` can be configured manually when you want a different local runner.
 
 * **Credentials Path:** `~/.claude/.credentials.json` (or configured via `CORTEX_CLAUDE_CREDENTIALS_PATH`).
-* **Configure in `.env`:**
+* **Optional `.env` overrides:**
+  Use these only when your credentials path or binary path differs from the built-in defaults.
   ```env
-  CORTEX_CLAUDE_CREDENTIALS_PATH=~/.claude/.credentials.json
-  CORTEX_CLAUDE_DOCKER_COMMAND=claude-docker
+  CORTEX_CLAUDE_CREDENTIALS_PATH=/home/your-user/.claude/.credentials.json
+  CORTEX_CLAUDE_COMMAND=/home/your-user/.local/bin/claude
+  # Optional custom variant
+  CORTEX_CLAUDE_DOCKER_COMMAND=/home/your-user/.local/bin/claude-docker
   ```
 
 ---
@@ -89,9 +96,11 @@ High-performance offline audio transcription using quantized Whisper models.
   ```
 * **Model Download:**
   Cortex automatically downloads the model weights (`large-v3-turbo-q5_0`) into `var/whisper-models/` on first use.
-* **Configure in `.env`:**
+* **Defaults and optional overrides:**
+  Local Whisper already defaults to enabled with model `large-v3-turbo-q5_0` in `var/whisper-models`. Only add overrides when you intentionally want different behavior.
   ```env
-  CORTEX_WHISPER_LOCAL_ENABLED=true
+  # Optional overrides
+  CORTEX_WHISPER_LOCAL_ENABLED=false
   CORTEX_WHISPER_LOCAL_MODEL=large-v3-turbo-q5_0
   CORTEX_WHISPER_MODELS_DIR=var/whisper-models
   ```

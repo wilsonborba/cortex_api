@@ -14,7 +14,13 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-var/
+var/*.pid
+var/*.log
+var/*.log.*
+var/*.db
+!var/canonical_calibration.db
+var/personal_calibration.db
+var/whisper-models/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

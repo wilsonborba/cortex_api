@@ -13,6 +13,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     # Core environment & databases
@@ -27,6 +28,14 @@ class Settings(BaseSettings):
     database_url: str = Field(
         default="sqlite:///var/cortex.db",
         validation_alias=AliasChoices("CORTEX_DATABASE_URL", "DATABASE_URL"),
+    )
+    calibration_canonical_db_path: Path = Field(
+        default=Path("var/canonical_calibration.db"),
+        validation_alias=AliasChoices("CORTEX_CALIBRATION_CANONICAL_DB_PATH"),
+    )
+    calibration_personal_db_path: Path = Field(
+        default=Path("var/personal_calibration.db"),
+        validation_alias=AliasChoices("CORTEX_CALIBRATION_PERSONAL_DB_PATH"),
     )
 
     # Service endpoints
@@ -82,10 +91,16 @@ class Settings(BaseSettings):
         default_factory=lambda: Path.home() / ".codex" / "auth.json",
         validation_alias=AliasChoices("CORTEX_CODEX_AUTH_PATH", "CODEX_AUTH_PATH"),
     )
+    claude_command: str = Field(
+        default="claude",
+        validation_alias=AliasChoices(
+            "CORTEX_CLAUDE_COMMAND", "CORTEX_CLAUDE_BIN", "CLAUDE_COMMAND", "CLAUDE_BIN"
+        ),
+    )
     claude_docker_command: str = Field(
         default="claude-docker",
         validation_alias=AliasChoices(
-            "CORTEX_CLAUDE_DOCKER_COMMAND", "CORTEX_CLAUDE_BIN", "CLAUDE_DOCKER_COMMAND", "CLAUDE_BIN"
+            "CORTEX_CLAUDE_DOCKER_COMMAND", "CLAUDE_DOCKER_COMMAND"
         ),
     )
     agy_docker_command: str = Field(
@@ -98,9 +113,21 @@ class Settings(BaseSettings):
         default="codex",
         validation_alias=AliasChoices("CORTEX_CODEX_COMMAND", "CORTEX_CODEX_BIN", "CODEX_COMMAND", "CODEX_BIN"),
     )
+    codex_docker_command: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("CORTEX_CODEX_DOCKER_COMMAND", "CODEX_DOCKER_COMMAND"),
+    )
     driver_timeout_seconds: float = Field(
         default=180.0,
         validation_alias=AliasChoices("CORTEX_DRIVER_TIMEOUT_SECONDS", "DRIVER_TIMEOUT_SECONDS"),
+    )
+    calibration_max_models_per_tier: int = Field(
+        default=6,
+        validation_alias=AliasChoices("CORTEX_CALIBRATION_MAX_MODELS_PER_TIER"),
+    )
+    calibration_judge_timeout_seconds: float = Field(
+        default=180.0,
+        validation_alias=AliasChoices("CORTEX_CALIBRATION_JUDGE_TIMEOUT_SECONDS"),
     )
 
     # Quota Tracker: sliding window token budget
@@ -158,23 +185,23 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_QUOTA_CRITICAL_THRESHOLD", "QUOTA_CRITICAL_THRESHOLD"),
     )
     routing_weight_capability: float = Field(
-        default=0.5,
+        default=0.70,
         validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_CAPABILITY", "ROUTING_WEIGHT_CAPABILITY"),
     )
     routing_weight_quota: float = Field(
-        default=0.25,
+        default=0.12,
         validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_QUOTA", "ROUTING_WEIGHT_QUOTA"),
     )
     routing_weight_latency: float = Field(
-        default=0.15,
+        default=0.06,
         validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_LATENCY", "ROUTING_WEIGHT_LATENCY"),
     )
     routing_weight_cost: float = Field(
-        default=0.10,
+        default=0.05,
         validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_COST", "ROUTING_WEIGHT_COST"),
     )
     routing_weight_tier_fit: float = Field(
-        default=0.20,
+        default=0.12,
         validation_alias=AliasChoices("CORTEX_ROUTING_WEIGHT_TIER_FIT", "ROUTING_WEIGHT_TIER_FIT"),
     )
     routing_cost_ceiling_usd_per_million: float = Field(
@@ -301,14 +328,14 @@ class Settings(BaseSettings):
         default=None, validation_alias=AliasChoices("CORTEX_OLLAMA_CLOUD_API_KEY")
     )
 
-    @field_validator("claude_credentials_path", "codex_auth_path", mode="before")
+    @field_validator("claude_credentials_path", "codex_auth_path", "calibration_canonical_db_path", "calibration_personal_db_path", mode="before")
     @classmethod
     def _expand_user_paths(cls, value):
         if value is None:
             return value
         return Path(value).expanduser()
 
-    @field_validator("agy_command", "claude_docker_command", "agy_docker_command", "codex_command", mode="before")
+    @field_validator("agy_command", "claude_command", "claude_docker_command", "agy_docker_command", "codex_command", "codex_docker_command", mode="before")
     @classmethod
     def _expand_user_commands(cls, value: str) -> str:
         if value is None:

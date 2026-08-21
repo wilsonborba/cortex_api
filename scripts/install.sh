@@ -21,6 +21,8 @@ LAUNCHD_PLIST="${HOME}/Library/LaunchAgents/com.cortex.api.plist"
 DEFAULT_HOST="0.0.0.0"
 DEFAULT_PORT="8003"
 PROFILE="auto"
+HOST_WAS_EXPLICIT="false"
+PORT_WAS_EXPLICIT="false"
 NON_INTERACTIVE="false"
 INSTALL_SERVICE="true"
 CONFIGURE_FIREWALL="true"
@@ -68,10 +70,12 @@ while [ $# -gt 0 ]; do
       ;;
     --host)
       DEFAULT_HOST="$2"
+      HOST_WAS_EXPLICIT="true"
       shift 2
       ;;
     --port)
       DEFAULT_PORT="$2"
+      PORT_WAS_EXPLICIT="true"
       shift 2
       ;;
     --non-interactive|-y)
@@ -117,6 +121,11 @@ upsert_env_value() {
   else
     printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
   fi
+}
+
+env_has_key() {
+  local key="$1"
+  grep -q "^${key}=" "$ENV_FILE" 2>/dev/null
 }
 
 service_account_user() {
@@ -175,6 +184,11 @@ detect_and_select_profile() {
     chmod +x "$detector"
     "$detector"
     auto_profile=$("$detector" --profile-only 2>/dev/null || echo "medium")
+  fi
+
+  if [ "$PROFILE" = "auto" ] && env_has_key CORTEX_PROFILE; then
+    PROFILE=$(env_value CORTEX_PROFILE "$auto_profile")
+    log_info "Using existing profile override from .env: '${PROFILE}'."
   fi
 
   if [ "$PROFILE" != "auto" ]; then
@@ -316,19 +330,25 @@ install_project_dependencies() {
 configure_environment() {
   mkdir -p "$ROOT_DIR/var"
 
+  if [ "$HOST_WAS_EXPLICIT" != "true" ] && env_has_key CORTEX_API_HOST; then
+    DEFAULT_HOST=$(env_value CORTEX_API_HOST "$DEFAULT_HOST")
+  fi
+
   if [ ! -f "$ENV_FILE" ]; then
     if [ -f "$ENV_EXAMPLE" ]; then
       cp "$ENV_EXAMPLE" "$ENV_FILE"
       log_info "Created .env from .env.example"
     else
       cat <<EOF > "$ENV_FILE"
-CORTEX_DATABASE_URL=sqlite:///var/cortex.db
-CORTEX_PROFILE=${SELECTED_PROFILE}
-CORTEX_API_HOST=${DEFAULT_HOST}
-CORTEX_API_PORT=${EFFECTIVE_PORT}
-CORTEX_ENVIRONMENT=development
-CORTEX_LOG_LEVEL=INFO
-CORTEX_LOG_FILE=var/cortex.log
+# Optional provider credentials
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+GOOGLE_API_KEY=
+
+# Optional Cortex provider credentials
+CORTEX_GROQ_API_KEY=
+CORTEX_GOOGLE_AI_STUDIO_API_KEY=
+CORTEX_OPENROUTER_API_KEY=
 EOF
       log_info "Created minimal .env file"
     fi
@@ -336,23 +356,16 @@ EOF
     log_info "Using existing .env configuration file."
   fi
 
-  # Update or append profile, host and port in .env
-  if grep -q "^CORTEX_PROFILE=" "$ENV_FILE" 2>/dev/null; then
-    sed -i "s/^CORTEX_PROFILE=.*/CORTEX_PROFILE=${SELECTED_PROFILE}/" "$ENV_FILE" 2>/dev/null || true
-  else
-    printf 'CORTEX_PROFILE=%s\n' "$SELECTED_PROFILE" >> "$ENV_FILE"
+  if env_has_key CORTEX_PROFILE || [ "$SELECTED_PROFILE" != "complete" ]; then
+    upsert_env_value CORTEX_PROFILE "$SELECTED_PROFILE"
   fi
 
-  if grep -q "^CORTEX_API_HOST=" "$ENV_FILE" 2>/dev/null; then
-    sed -i "s/^CORTEX_API_HOST=.*/CORTEX_API_HOST=${DEFAULT_HOST}/" "$ENV_FILE" 2>/dev/null || true
-  else
-    printf 'CORTEX_API_HOST=%s\n' "$DEFAULT_HOST" >> "$ENV_FILE"
+  if env_has_key CORTEX_API_HOST || [ "$HOST_WAS_EXPLICIT" = "true" ] || [ "$DEFAULT_HOST" != "0.0.0.0" ]; then
+    upsert_env_value CORTEX_API_HOST "$DEFAULT_HOST"
   fi
 
-  if grep -q "^CORTEX_API_PORT=" "$ENV_FILE" 2>/dev/null; then
-    sed -i "s/^CORTEX_API_PORT=.*/CORTEX_API_PORT=${EFFECTIVE_PORT}/" "$ENV_FILE" 2>/dev/null || true
-  else
-    printf 'CORTEX_API_PORT=%s\n' "$EFFECTIVE_PORT" >> "$ENV_FILE"
+  if env_has_key CORTEX_API_PORT || [ "$PORT_WAS_EXPLICIT" = "true" ] || [ "$EFFECTIVE_PORT" != "8003" ]; then
+    upsert_env_value CORTEX_API_PORT "$EFFECTIVE_PORT"
   fi
 
   configure_external_cli_paths
@@ -372,14 +385,9 @@ configure_external_cli_paths() {
     upsert_env_value CORTEX_AGY_COMMAND "$detected"
   fi
 
-  detected=$(command -v agy-docker 2>/dev/null || true)
-  if [ -n "$detected" ] && [ "$(env_value CORTEX_AGY_DOCKER_COMMAND agy-docker)" = "agy-docker" ]; then
-    upsert_env_value CORTEX_AGY_DOCKER_COMMAND "$detected"
-  fi
-
-  detected=$(command -v claude-docker 2>/dev/null || true)
-  if [ -n "$detected" ] && [ "$(env_value CORTEX_CLAUDE_DOCKER_COMMAND claude-docker)" = "claude-docker" ]; then
-    upsert_env_value CORTEX_CLAUDE_DOCKER_COMMAND "$detected"
+  detected=$(command -v claude 2>/dev/null || true)
+  if [ -n "$detected" ] && [ "$(env_value CORTEX_CLAUDE_COMMAND claude)" = "claude" ]; then
+    upsert_env_value CORTEX_CLAUDE_COMMAND "$detected"
   fi
 
   detected=$(command -v codex 2>/dev/null || true)
@@ -428,7 +436,7 @@ EnvironmentFile=${ENV_FILE}
 Environment=HOME=${current_home}
 Environment=PATH=${service_path}
 Environment=XDG_CONFIG_HOME=${current_home}/.config
-ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${DEFAULT_HOST} --port ${EFFECTIVE_PORT}
+ExecStart=${VENV_DIR}/bin/python -c 'from lib.entrypoints import api_entrypoint; api_entrypoint()'
 Restart=always
 RestartSec=3
 NoNewPrivileges=yes
@@ -457,7 +465,7 @@ EnvironmentFile=${ENV_FILE}
 Environment=HOME=${current_home}
 Environment=PATH=${service_path}
 Environment=XDG_CONFIG_HOME=${current_home}/.config
-ExecStart=${VENV_DIR}/bin/python -m uvicorn lib.presentation.api.app:create_app --factory --host ${DEFAULT_HOST} --port ${EFFECTIVE_PORT}
+ExecStart=${VENV_DIR}/bin/python -c 'from lib.entrypoints import api_entrypoint; api_entrypoint()'
 Restart=always
 RestartSec=3
 
@@ -488,14 +496,8 @@ setup_launchd_macos() {
     <key>ProgramArguments</key>
     <array>
         <string>${VENV_DIR}/bin/python</string>
-        <string>-m</string>
-        <string>uvicorn</string>
-        <string>lib.presentation.api.app:create_app</string>
-        <string>--factory</string>
-        <string>--host</string>
-        <string>${DEFAULT_HOST}</string>
-        <string>--port</string>
-        <string>${EFFECTIVE_PORT}</string>
+        <string>-c</string>
+        <string>from lib.entrypoints import api_entrypoint; api_entrypoint()</string>
     </array>
     <key>WorkingDirectory</key>
     <string>${ROOT_DIR}</string>
@@ -534,6 +536,145 @@ configure_ufw() {
   sudo ufw allow proto tcp from 172.16.0.0/12 to any port "$EFFECTIVE_PORT" comment 'cortex-api-lan-172' >/dev/null 2>&1 || true
   sudo ufw allow proto tcp from 192.168.0.0/16 to any port "$EFFECTIVE_PORT" comment 'cortex-api-lan-192' >/dev/null 2>&1 || true
   log_info "UFW firewall rules configured for LAN access on port ${EFFECTIVE_PORT}."
+}
+
+
+json_field() {
+  local field_path="$1"
+  local json_input
+  json_input=$(cat)
+  JSON_INPUT="$json_input" python3 - "$field_path" <<'JSONPY'
+import json, os, sys
+field = sys.argv[1]
+raw = os.environ.get("JSON_INPUT", "")
+if not raw.strip():
+    print("")
+    raise SystemExit(0)
+data = json.loads(raw)
+value = data
+for part in field.split('.'):
+    if part.isdigit():
+        value = value[int(part)]
+    elif isinstance(value, dict):
+        value = value.get(part)
+    else:
+        value = None
+        break
+if isinstance(value, (dict, list)):
+    print(json.dumps(value))
+elif value is None:
+    print("")
+else:
+    print(value)
+JSONPY
+}
+
+show_calibration_status() {
+  if [ ! -x "$VENV_DIR/bin/cortex" ]; then
+    return
+  fi
+  local status_json
+  status_json=$($VENV_DIR/bin/cortex --json calibration status 2>/dev/null || true)
+  if [ -z "$status_json" ]; then
+    return
+  fi
+  local source path updated best
+  source=$(printf '%s' "$status_json" | json_field source)
+  path=$(printf '%s' "$status_json" | json_field path)
+  updated=$(printf '%s' "$status_json" | json_field updated_at)
+  best=$(printf '%s' "$status_json" | json_field best_models_by_tier)
+  log_info "Calibration source: ${source:-default}"
+  [ -n "$path" ] && log_info "Calibration DB: $path"
+  [ -n "$updated" ] && log_info "Calibration updated at: $updated"
+  [ -n "$best" ] && log_info "Best models by tier: $best"
+}
+
+maybe_run_calibration() {
+  show_calibration_status
+
+  if [ "$SELECTED_PROFILE" = "light" ]; then
+    log_info "Light profile never runs calibration; using Personal > Canonical > Default resolution only."
+    return
+  fi
+
+  if [ ! -x "$VENV_DIR/bin/cortex" ]; then
+    log_warn "Calibration CLI is unavailable; skipping optional calibration."
+    return
+  fi
+
+  local judges_json available_count available_names ranking_depth
+  judges_json=$($VENV_DIR/bin/cortex --json calibration judges 2>/dev/null || true)
+  if [ -z "$judges_json" ]; then
+    log_info "No calibration judges detected; continuing with existing baseline or default selection."
+    return
+  fi
+
+  if [ "$NON_INTERACTIVE" != "true" ]; then
+    read -r -p " Show current calibration ranking depth [3/5/10, default 3]: " ranking_depth || ranking_depth=""
+    case "$ranking_depth" in
+      5|10) ranking_depth=${ranking_depth:-3} ;;
+      3|"") ranking_depth=${ranking_depth:-3} ;;
+      *) ranking_depth=3 ;;
+    esac
+    "$VENV_DIR/bin/cortex" calibration status --top "$ranking_depth" || true
+  fi
+
+  available_count=$(JUDGES_JSON="$judges_json" python3 - <<'COUNTJSON'
+import json, os
+items = json.loads(os.environ.get('JUDGES_JSON', '[]') or '[]')
+print(sum(1 for item in items if item.get('available')))
+COUNTJSON
+)
+  available_names=$(JUDGES_JSON="$judges_json" python3 - <<'NAMESJSON'
+import json, os
+items = json.loads(os.environ.get('JUDGES_JSON', '[]') or '[]')
+print(','.join(item['id'] for item in items if item.get('available')))
+NAMESJSON
+)
+
+  if [ "${available_count:-0}" -eq 0 ]; then
+    log_info "No calibration judges detected; continuing with existing baseline or default selection."
+    "$VENV_DIR/bin/cortex" calibration judges || true
+    return
+  fi
+
+  log_info "Optional personal calibration is available with judges: ${available_names}."
+  printf " Calibration notes:
+"
+  printf "   - Uses real model calls plus judge evaluation; token/quota usage may apply.
+"
+  printf "   - Writes only personal_calibration.db; canonical_calibration.db stays unchanged.
+"
+  printf "   - progress bar shows model/task/judge stage, completed steps, and elapsed time.
+"
+
+  if [ "$NON_INTERACTIVE" = "true" ]; then
+    log_info "Non-interactive install skips optional calibration by default."
+    return
+  fi
+
+  local run_choice judge_choice
+  read -r -p " Run optional model calibration now? [y/N]: " run_choice || run_choice=""
+  case "$run_choice" in
+    y|Y|yes|YES)
+      ;;
+    *)
+      log_info "Skipping optional calibration."
+      return
+      ;;
+  esac
+
+  if [ "$available_count" -gt 1 ]; then
+    read -r -p " Judges to use [all or comma-separated from ${available_names}]: " judge_choice || judge_choice=""
+  else
+    judge_choice="$available_names"
+  fi
+  judge_choice=${judge_choice:-all}
+
+  log_info "Starting calibration with progress reporting..."
+  log_info "Installer command: cortex calibration run --profile <profile> --judges <selection>"
+  "$VENV_DIR/bin/cortex" calibration run --profile "$SELECTED_PROFILE" --judges "$judge_choice"
+  show_calibration_status
 }
 
 run_healthcheck() {
@@ -577,6 +718,7 @@ main() {
   install_project_dependencies
   configure_environment
   initialize_database
+  maybe_run_calibration
 
   if [ "$INSTALL_SERVICE" = "true" ]; then
     local kernel

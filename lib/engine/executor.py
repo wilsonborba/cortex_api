@@ -696,8 +696,8 @@ def build_default_drivers(settings: Optional[Settings] = None) -> Dict[str, Exec
     settings = settings or get_settings()
     return {
         "ollama": OllamaDriver(base_url=settings.ollama_base_url, timeout=settings.driver_timeout_seconds),
-        "claude": ClaudeDockerDriver(command=settings.claude_docker_command, timeout=settings.driver_timeout_seconds),
-        "agy": AgyDockerDriver(command=settings.agy_docker_command, timeout=settings.driver_timeout_seconds),
+        "claude": ClaudeDockerDriver(command=settings.claude_command, timeout=settings.driver_timeout_seconds),
+        "agy": AgyDockerDriver(command=settings.agy_command, timeout=settings.driver_timeout_seconds),
         "codex": CodexDriver(command=settings.codex_command, timeout=settings.driver_timeout_seconds),
         "groq": GroqDriver(api_key=settings.groq_api_key, timeout=settings.driver_timeout_seconds),
         "google_ai_studio": GoogleAIStudioDriver(

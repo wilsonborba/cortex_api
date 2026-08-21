@@ -186,6 +186,14 @@ class ModelRegistryService:
                 existing.id, AccessStatus.OFFLINE, reason=reason, session=session
             )
 
+    @staticmethod
+    def _resolve_source_kind(discovered: DiscoveredModel) -> str:
+        if discovered.is_local:
+            return "local"
+        if discovered.provider in {"agy", "claude", "codex"}:
+            return "cli"
+        return discovered.source_kind or "api"
+
     def _merge(self, discovered: DiscoveredModel, session: Session) -> ModelCatalogEntry:
         existing = self._repository.get_by_id(discovered.id, session=session)
         if existing is not None and existing.access_status == AccessStatus.DISABLED_MANUALLY.value:
@@ -202,6 +210,7 @@ class ModelRegistryService:
             parameter_size=discovered.parameter_size,
             context_window=discovered.context_window,
             is_local=discovered.is_local,
+            source_kind=self._resolve_source_kind(discovered),
             tier_eligibility=discovered.tier_eligibility if discovered.tier_eligibility else (existing.tier_eligibility if existing else []),
             capabilities=existing.capabilities if existing else discovered.capabilities,
             cost_per_million_tokens=(

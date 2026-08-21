@@ -53,7 +53,7 @@ def test_get_settings_singleton():
 
 def test_settings_support_binary_alias_envs_and_expand_user_paths(monkeypatch):
     monkeypatch.setenv("CORTEX_AGY_BIN", "~/bin/agy")
-    monkeypatch.setenv("CORTEX_CLAUDE_BIN", "~/bin/claude-docker")
+    monkeypatch.setenv("CORTEX_CLAUDE_BIN", "~/bin/claude")
     monkeypatch.setenv("CORTEX_CODEX_BIN", "~/bin/codex")
     monkeypatch.setenv("CORTEX_CLAUDE_CREDENTIALS_PATH", "~/.claude/.credentials.json")
     monkeypatch.setenv("CORTEX_CODEX_AUTH_PATH", "~/.codex/auth.json")
@@ -61,7 +61,7 @@ def test_settings_support_binary_alias_envs_and_expand_user_paths(monkeypatch):
     settings = Settings()
 
     assert settings.agy_command == str(Path("~/bin/agy").expanduser())
-    assert settings.claude_docker_command == str(Path("~/bin/claude-docker").expanduser())
+    assert settings.claude_command == str(Path("~/bin/claude").expanduser())
     assert settings.codex_command == str(Path("~/bin/codex").expanduser())
     assert settings.claude_credentials_path == Path("~/.claude/.credentials.json").expanduser()
     assert settings.codex_auth_path == Path("~/.codex/auth.json").expanduser()
