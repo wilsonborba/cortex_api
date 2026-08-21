@@ -13,12 +13,6 @@ from lib.engine.registry_service import ModelRegistryService, build_default_regi
 from lib.engine.scoring import ModelScorer, build_default_scorer
 from lib.engine.tiers import MAX_TIER, MIN_TIER, TierService
 
-# T4/T5 carry a standing "research if it helps" permission per
-# docs/rag-and-memory-architecture.md 4.3, applied only when the caller
-# didn't already decide one way or the other.
-AUTO_RETRIEVAL_MIN_TIER = 4
-
-
 @dataclass(frozen=True)
 class ModelSelection:
     model_id: str
@@ -42,6 +36,7 @@ class ExecutionPlan:
     task_type: str
     strategy_id: str
     prompt: str
+    original_prompt: str
     selections: List[ModelSelection]
     allow_multi_model: bool
     retrieval_mode: str
@@ -64,6 +59,8 @@ class RoutingRequest:
     task_type: str = "general"
     needs_web: bool = False
     use_memory: bool = False
+    auto_retrieval: bool = False
+    thinking: bool = False
     memory_topic: Optional[str] = None
     force_model: Optional[str] = None
     force_provider: Optional[str] = None
@@ -189,7 +186,7 @@ class Router:
             raise NoEligibleModelError(f"No AVAILABLE model eligible for tier {tier}")
 
         scored = [
-            self._scorer.score(model, request.task_type, envelope.max_latency_seconds)
+            self._scorer.score(model, request.task_type, envelope.max_latency_seconds, requested_tier=tier)
             for model in candidates
         ]
         threshold = self._settings.quota_critical_threshold
@@ -199,9 +196,14 @@ class Router:
         degraded = not preferred
 
         roles = ["primary"]
-        if envelope.allow_multi_model and envelope.max_model_calls > 1 and len(pool) > 1:
+        if request.thinking and envelope.allow_multi_model and envelope.max_model_calls > 1 and len(pool) > 1:
             roles.append("refiner")
-        if envelope.require_verification and envelope.max_model_calls > len(roles) and len(pool) > len(roles):
+        if (
+            request.thinking
+            and envelope.require_verification
+            and envelope.max_model_calls > len(roles)
+            and len(pool) > len(roles)
+        ):
             roles.append("critic")
 
         selections = [
@@ -249,19 +251,22 @@ class Router:
         source: str,
         reason: str,
     ) -> ExecutionPlan:
-        auto_retrieval = tier >= AUTO_RETRIEVAL_MIN_TIER
+        auto_retrieval = request.auto_retrieval
+        allow_multi_model = request.thinking and envelope.allow_multi_model
+        require_verification = request.thinking and envelope.require_verification
         return ExecutionPlan(
             tier=tier,
             task_type=request.task_type,
             strategy_id=strategy_id,
             prompt=prompt,
+            original_prompt=request.prompt,
             selections=selections,
-            allow_multi_model=envelope.allow_multi_model,
+            allow_multi_model=allow_multi_model,
             retrieval_mode=envelope.retrieval_mode,
             needs_web=request.needs_web or auto_retrieval,
             use_memory=request.use_memory or auto_retrieval,
             memory_topic=request.memory_topic,
-            require_verification=envelope.require_verification,
+            require_verification=require_verification,
             max_latency_seconds=envelope.max_latency_seconds,
             max_model_calls=envelope.max_model_calls,
             source=source,

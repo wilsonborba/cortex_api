@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from lib.engine.attachments import Attachment
 from lib.engine.executor import Executor
 from lib.engine.format import ENCODERS
+from lib.engine.prompt_normalizer import PromptNormalizer
 from lib.engine.router import Router, RoutingRequest
-from lib.presentation.api.deps import get_executor, get_router, get_video_job_store
+from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router, get_video_job_store
 from lib.presentation.api.schemas.execute import ExecuteRequest, ExecuteResponse
 from lib.engine.video_jobs import VideoJobStore
 
@@ -18,6 +21,7 @@ async def execute(
     payload: ExecuteRequest,
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
+    prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
     video_jobs: VideoJobStore = Depends(get_video_job_store),
 ) -> ExecuteResponse:
     if payload.force_context_format is not None and payload.force_context_format not in ENCODERS:
@@ -38,12 +42,18 @@ async def execute(
             raise HTTPException(status_code=422, detail=f"video job did not produce a usable summary: {detail}")
         prompt = f"## Video context\n\n{job.result.summary}\n\n{prompt}"
 
+    if payload.normalize_prompt:
+        normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
+        prompt = normalization.prompt
+
     routing_request = RoutingRequest(
         prompt=prompt,
         tier=payload.tier,
         task_type=payload.task_type,
+        thinking=payload.thinking,
         needs_web=payload.needs_web,
         use_memory=payload.use_memory,
+        auto_retrieval=payload.auto_retrieval,
         memory_topic=payload.memory_topic,
         force_model=payload.force_model,
         force_provider=payload.force_provider,

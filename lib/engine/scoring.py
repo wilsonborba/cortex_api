@@ -20,6 +20,7 @@ class ScoringWeights:
     quota: float = 0.25
     latency: float = 0.15
     cost: float = 0.10
+    tier_fit: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class ModelScore:
     quota_factor: float
     latency_norm: float
     cost_norm: float
+    tier_fit: float
 
 
 class ModelScorer:
@@ -48,14 +50,22 @@ class ModelScorer:
         self._weights = weights or ScoringWeights()
         self._cost_ceiling = cost_ceiling
 
-    def score(self, model: ModelCatalogEntry, task_type: str, max_latency_seconds: int) -> ModelScore:
+    def score(
+        self,
+        model: ModelCatalogEntry,
+        task_type: str,
+        max_latency_seconds: int,
+        requested_tier: Optional[int] = None,
+    ) -> ModelScore:
         capability = self._capability(model, task_type)
         quota_factor = self._quota_tracker.get_quota(model.provider).quota_factor
         latency_norm = self._latency_norm(model, max_latency_seconds)
         cost_norm = self._cost_norm(model)
+        tier_fit = self._tier_fit(model, requested_tier)
         w = self._weights
         raw_score = (
             w.capability * capability
+            + w.tier_fit * tier_fit
             + w.quota * quota_factor
             - w.latency * latency_norm
             - w.cost * cost_norm
@@ -68,6 +78,7 @@ class ModelScorer:
             quota_factor=quota_factor,
             latency_norm=latency_norm,
             cost_norm=cost_norm,
+            tier_fit=tier_fit,
         )
 
     @staticmethod
@@ -92,6 +103,16 @@ class ModelScorer:
             return 0.0
         return min(1.0, max(0.0, model.cost_per_million_tokens / self._cost_ceiling))
 
+    @staticmethod
+    def _tier_fit(model: ModelCatalogEntry, requested_tier: Optional[int]) -> float:
+        if requested_tier is None:
+            return 0.5
+        tiers = sorted(set(model.tier_eligibility or []))
+        if not tiers:
+            return 0.5
+        center = (tiers[0] + tiers[-1]) / 2
+        return max(0.0, 1.0 - abs(requested_tier - center) / 5.0)
+
 
 def build_default_scorer(
     settings: Optional[Settings] = None, quota_tracker: Optional[QuotaTracker] = None
@@ -102,6 +123,7 @@ def build_default_scorer(
         quota=settings.routing_weight_quota,
         latency=settings.routing_weight_latency,
         cost=settings.routing_weight_cost,
+        tier_fit=settings.routing_weight_tier_fit,
     )
     return ModelScorer(
         quota_tracker=quota_tracker or QuotaTracker(settings=settings),

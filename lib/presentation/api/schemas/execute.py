@@ -12,8 +12,11 @@ class ExecuteRequest(BaseModel):
     prompt: str
     tier: Optional[Union[int, str]] = Field(default=None, description="0-5, 'auto', or omitted for auto")
     task_type: str = "general"
+    normalize_prompt: bool = True
+    thinking: bool = False
     needs_web: bool = False
     use_memory: bool = False
+    auto_retrieval: bool = False
     memory_topic: Optional[str] = None
     force_model: Optional[str] = None
     force_provider: Optional[str] = None
