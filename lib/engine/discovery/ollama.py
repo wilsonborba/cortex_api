@@ -6,6 +6,7 @@ import httpx
 
 from lib.dal.models import AccessStatus
 from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
+from lib.engine.discovery.heuristics import infer_capabilities, infer_tier_eligibility
 
 # Local models start eligible for the low-effort tiers; promote them via
 # `cortex models config` once telemetry shows they hold up for more.
@@ -44,17 +45,19 @@ class OllamaDiscovery:
     def _parse_entry(self, raw: dict[str, Any], client: httpx.Client) -> DiscoveredModel:
         name = raw.get("name") or raw.get("model") or "unknown"
         details = raw.get("details") or {}
+        parameter_size = details.get("parameter_size")
         return DiscoveredModel(
             id=f"{self.provider}/{name}",
             provider=self.provider,
             display_name=name,
             access_status=AccessStatus.AVAILABLE.value,
             status_reason="Local (0 cost)",
-            parameter_size=details.get("parameter_size"),
+            parameter_size=parameter_size,
             context_window=self._probe_context_window(client, name),
             is_local=True,
-            tier_eligibility=list(DEFAULT_TIER_ELIGIBILITY),
-            capabilities={},
+            tier_eligibility=infer_tier_eligibility(name, parameter_size=parameter_size, is_local=True)
+            or list(DEFAULT_TIER_ELIGIBILITY),
+            capabilities=infer_capabilities(name, parameter_size=parameter_size),
             cost_per_million_tokens=0.0,
         )
 

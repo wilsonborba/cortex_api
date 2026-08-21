@@ -70,6 +70,19 @@ def test_ollama_discovery_parses_tags_and_context_window():
     assert models[1].context_window == 8192  # no /api/show data -> conservative default
     assert all(m.access_status == AccessStatus.AVAILABLE.value for m in models)
     assert all(m.is_local for m in models)
+    assert models[0].tier_eligibility == [0, 1, 2, 3]
+    assert models[0].capabilities["general"] >= 0.6
+
+
+def test_ollama_large_model_can_reach_higher_tiers():
+    tags_payload = {"models": [{"name": "deepseek-r1:32b", "details": {"parameter_size": "32B"}}]}
+    client = _FakeOllamaClient(tags_payload)
+    discovery = OllamaDiscovery(base_url="http://localhost:11434", client_factory=lambda: client)
+
+    models = discovery.discover()
+
+    assert models[0].tier_eligibility == [2, 3, 4, 5]
+    assert models[0].capabilities["reasoning"] >= 0.8
 
 
 def test_ollama_discovery_raises_when_unreachable():

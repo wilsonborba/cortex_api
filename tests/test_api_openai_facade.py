@@ -7,9 +7,10 @@ from fastapi.testclient import TestClient
 
 from lib.core.settings import get_settings
 from lib.engine.executor import ExecutionResult, StepResult, UnresolvedStrategyError
+from lib.engine.prompt_normalizer import PromptNormalizationResult
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError, RoutingRequest
 from lib.presentation.api.app import create_app
-from lib.presentation.api.deps import get_executor, get_router
+from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router
 from lib.presentation.api.routes.openai_facade import _messages_to_prompt, _translate_model
 from lib.presentation.api.schemas.openai_facade import ChatMessage
 
@@ -46,6 +47,16 @@ class _FakeExecutor:
         if self._error:
             raise self._error
         return self._result
+
+
+class _FakePromptNormalizer:
+    def __init__(self, prompt: str = "hi") -> None:
+        self._prompt = prompt
+        self.calls: list[str] = []
+
+    def normalize(self, prompt: str) -> PromptNormalizationResult:
+        self.calls.append(prompt)
+        return PromptNormalizationResult(prompt=self._prompt, changed=self._prompt != prompt)
 
 
 def _result(**overrides) -> ExecutionResult:
@@ -124,6 +135,7 @@ def test_chat_completions_returns_openai_shaped_response(app_):
     executor = _FakeExecutor(result=_result())
     app_.dependency_overrides[get_router] = lambda: router
     app_.dependency_overrides[get_executor] = lambda: executor
+    app_.dependency_overrides[get_prompt_normalizer] = lambda: _FakePromptNormalizer(prompt="User: hi")
 
     with TestClient(app_) as client:
         response = client.post(
@@ -149,6 +161,7 @@ def test_chat_completions_translates_pin_model_to_force_strategy(app_):
     executor = _FakeExecutor(result=_result())
     app_.dependency_overrides[get_router] = lambda: router
     app_.dependency_overrides[get_executor] = lambda: executor
+    app_.dependency_overrides[get_prompt_normalizer] = lambda: _FakePromptNormalizer(prompt="User: hi")
 
     with TestClient(app_) as client:
         client.post(
@@ -162,6 +175,7 @@ def test_chat_completions_translates_pin_model_to_force_strategy(app_):
 def test_chat_completions_returns_openai_style_409_error(app_):
     app_.dependency_overrides[get_router] = lambda: _FakeRouter(error=NoEligibleModelError("nothing eligible"))
     app_.dependency_overrides[get_executor] = lambda: _FakeExecutor()
+    app_.dependency_overrides[get_prompt_normalizer] = lambda: _FakePromptNormalizer(prompt="User: hi")
 
     with TestClient(app_) as client:
         response = client.post(
@@ -177,6 +191,7 @@ def test_chat_completions_returns_openai_style_501_error(app_):
     app_.dependency_overrides[get_executor] = lambda: _FakeExecutor(
         error=UnresolvedStrategyError("coding_t3_custom")
     )
+    app_.dependency_overrides[get_prompt_normalizer] = lambda: _FakePromptNormalizer(prompt="User: hi")
 
     with TestClient(app_) as client:
         response = client.post(
@@ -190,11 +205,44 @@ def test_chat_completions_returns_openai_style_501_error(app_):
 # --- POST /v1/chat/completions (streaming) --------------------------------------------
 
 
+def test_chat_completions_forwards_quality_controls(app_):
+    router = _FakeRouter(plan=_plan())
+    executor = _FakeExecutor(result=_result())
+    normalizer = _FakePromptNormalizer(prompt="structured prompt")
+    app_.dependency_overrides[get_router] = lambda: router
+    app_.dependency_overrides[get_executor] = lambda: executor
+    app_.dependency_overrides[get_prompt_normalizer] = lambda: normalizer
+
+    with TestClient(app_) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "cortex-t4",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": True,
+                "auto_retrieval": True,
+                "needs_web": True,
+                "use_memory": True,
+                "memory_topic": "ops",
+            },
+        )
+
+    assert response.status_code == 200
+    assert normalizer.calls == ["User: hi"]
+    assert router.last_request.prompt == "structured prompt"
+    assert router.last_request.thinking is True
+    assert router.last_request.auto_retrieval is True
+    assert router.last_request.needs_web is True
+    assert router.last_request.use_memory is True
+    assert router.last_request.memory_topic == "ops"
+
+
 def test_chat_completions_streaming_emits_valid_sse_frames_ending_in_done(app_):
     router = _FakeRouter(plan=_plan())
     executor = _FakeExecutor(result=_result(response_text="one two three four five six seven"))
     app_.dependency_overrides[get_router] = lambda: router
     app_.dependency_overrides[get_executor] = lambda: executor
+    app_.dependency_overrides[get_prompt_normalizer] = lambda: _FakePromptNormalizer(prompt="User: hi")
 
     with TestClient(app_) as client:
         with client.stream(
@@ -224,6 +272,7 @@ def test_chat_completions_streaming_marks_failed_execution_as_error_finish_reaso
     executor = _FakeExecutor(result=_result(success=False, response_text="", error_type="rate_limit"))
     app_.dependency_overrides[get_router] = lambda: router
     app_.dependency_overrides[get_executor] = lambda: executor
+    app_.dependency_overrides[get_prompt_normalizer] = lambda: _FakePromptNormalizer(prompt="User: hi")
 
     with TestClient(app_) as client:
         with client.stream(

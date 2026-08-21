@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from lib.core.settings import Settings, get_settings
@@ -55,13 +56,20 @@ class WebRetrievalService:
         sections: List[str] = []
         sources: List[str] = []
         items: List[Dict[str, Any]] = []
+        collected: List[tuple[SearchResult, str, str]] = []
         for result in results:
             page = self._scrape(result.url)
             heading = result.title or (page.title if page else "") or result.url
             body = (page.markdown if page and page.success and page.markdown.strip() else result.snippet).strip()
+            collected.append((result, heading, body))
+
+        for result, heading, body in self._filter_context_items(query, collected):
             sections.append(f"### {heading}\nSource: {result.url}\n\n{body}")
             sources.append(result.url)
             items.append({"title": heading, "url": result.url, "content": body})
+
+        if not sections:
+            return WebContextResult(query=query, markdown="", sources=[], items=[])
 
         markdown = "\n\n---\n\n".join(sections)
         return WebContextResult(query=query, markdown=markdown, sources=sources, items=items)
@@ -83,6 +91,33 @@ class WebRetrievalService:
                 return page
         return None
 
+    def _filter_context_items(
+        self,
+        query: str,
+        items: List[tuple[SearchResult, str, str]],
+    ) -> List[tuple[SearchResult, str, str]]:
+        query_terms = _tokenize(query)
+        ranked: List[tuple[float, tuple[SearchResult, str, str]]] = []
+        seen_urls: set[str] = set()
+        seen_bodies: set[str] = set()
+
+        for item in items:
+            result, heading, body = item
+            if result.url in seen_urls:
+                continue
+            signature = _content_signature(body)
+            if signature in seen_bodies:
+                continue
+            score = _overlap_score(query_terms, _tokenize(f"{heading} {body}"))
+            if score <= 0.0:
+                continue
+            ranked.append((score, item))
+            seen_urls.add(result.url)
+            seen_bodies.add(signature)
+
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in ranked[: self._max_results]]
+
 
 def build_default_web_retrieval_service(settings: Optional[Settings] = None) -> WebRetrievalService:
     """Wires the real search providers/scrapers. SearXNG only joins the chain
@@ -103,3 +138,19 @@ def build_default_web_retrieval_service(settings: Optional[Settings] = None) -> 
         scrapers=[TrafilaturaScraper(), Crawl4AIScraper()],
         max_results=settings.web_search_max_results,
     )
+
+
+def _tokenize(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(token) >= 3}
+
+
+def _overlap_score(query_terms: set[str], item_terms: set[str]) -> float:
+    if not query_terms or not item_terms:
+        return 0.0
+    overlap = query_terms & item_terms
+    return len(overlap) / len(query_terms)
+
+
+def _content_signature(text: str) -> str:
+    terms = sorted(_tokenize(text))
+    return " ".join(terms[:24])

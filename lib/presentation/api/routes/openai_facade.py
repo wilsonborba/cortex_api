@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -9,8 +10,9 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from lib.engine.executor import Executor, ExecutionResult, UnresolvedStrategyError
+from lib.engine.prompt_normalizer import PromptNormalizer
 from lib.engine.router import NoEligibleModelError, Router, RoutingRequest
-from lib.presentation.api.deps import get_executor, get_router
+from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router
 from lib.presentation.api.schemas.openai_facade import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -40,10 +42,22 @@ async def chat_completions(
     payload: ChatCompletionRequest,
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
+    prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
 ):
     tier, force_strategy = _translate_model(payload.model)
+    prompt = _messages_to_prompt(payload.messages)
+    if payload.normalize_prompt:
+        normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
+        prompt = normalization.prompt
     routing_request = RoutingRequest(
-        prompt=_messages_to_prompt(payload.messages), tier=tier, force_strategy=force_strategy
+        prompt=prompt,
+        tier=tier,
+        force_strategy=force_strategy,
+        thinking=payload.thinking,
+        needs_web=payload.needs_web,
+        use_memory=payload.use_memory,
+        auto_retrieval=payload.auto_retrieval,
+        memory_topic=payload.memory_topic,
     )
 
     try:

@@ -7,6 +7,7 @@ import httpx
 from lib.dal.models import AccessStatus
 from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
 from lib.engine.discovery.openai_compatible import DEFAULT_CONTEXT_WINDOW, DEFAULT_TIER_ELIGIBILITY
+from lib.engine.discovery.heuristics import infer_capabilities, infer_tier_eligibility
 
 WHOAMI_URL = "https://huggingface.co/api/whoami-v2"
 MODELS_URL = "https://router.huggingface.co/v1/models"
@@ -61,8 +62,8 @@ class HuggingFaceDiscovery:
                 status_reason="Free-tier key OK",
                 context_window=DEFAULT_CONTEXT_WINDOW,
                 is_local=False,
-                tier_eligibility=list(DEFAULT_TIER_ELIGIBILITY),
-                capabilities={},
+                tier_eligibility=infer_tier_eligibility(raw["id"]) or list(DEFAULT_TIER_ELIGIBILITY),
+                capabilities=infer_capabilities(raw["id"]),
                 cost_per_million_tokens=0.0,
             )
             for raw in entries

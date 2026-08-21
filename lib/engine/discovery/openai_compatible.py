@@ -6,10 +6,8 @@ import httpx
 
 from lib.dal.models import AccessStatus
 from lib.engine.discovery.base import DiscoveredModel, ProviderDiscoveryError
+from lib.engine.discovery.heuristics import infer_capabilities, infer_tier_eligibility
 
-# Free-tier cloud models aren't local, but they cost nothing within quota, so
-# they start eligible across the same broad tier range Antigravity's cloud
-# models do (see discovery/antigravity.py).
 DEFAULT_TIER_ELIGIBILITY = [1, 2, 3, 4, 5]
 DEFAULT_CONTEXT_WINDOW = 8192
 
@@ -63,6 +61,8 @@ class OpenAICompatibleDiscovery:
 
     def _parse_entry(self, raw: dict[str, Any]) -> DiscoveredModel:
         model_id = raw["id"]
+        tier_eligibility = infer_tier_eligibility(model_id)
+        capabilities = infer_capabilities(model_id)
         return DiscoveredModel(
             id=f"{self.provider}/{model_id}",
             provider=self.provider,
@@ -71,7 +71,7 @@ class OpenAICompatibleDiscovery:
             status_reason="Free-tier key OK",
             context_window=DEFAULT_CONTEXT_WINDOW,
             is_local=False,
-            tier_eligibility=list(DEFAULT_TIER_ELIGIBILITY),
-            capabilities={},
+            tier_eligibility=tier_eligibility or list(DEFAULT_TIER_ELIGIBILITY),
+            capabilities=capabilities,
             cost_per_million_tokens=0.0,
         )
