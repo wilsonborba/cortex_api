@@ -20,6 +20,7 @@ class DiscoveredModel:
     parameter_size: Optional[str] = None
     context_window: int = 8192
     is_local: bool = False
+    source_kind: str = "api"
     tier_eligibility: list[int] = field(default_factory=list)
     capabilities: dict[str, Any] = field(default_factory=dict)
     cost_per_million_tokens: float = 0.0

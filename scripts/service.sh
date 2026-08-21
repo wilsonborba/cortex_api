@@ -56,7 +56,7 @@ service_start() {
       printf "Cortex API is already running (PID: %s).\n" "$(cat "$PID_FILE")"
       return 0
     fi
-    nohup "$VENV_DIR/bin/python" -m uvicorn lib.presentation.api.app:create_app --factory --host "$HOST" --port "$PORT" >> "$LOG_FILE" 2>&1 &
+    nohup "$VENV_DIR/bin/python" -c 'from lib.entrypoints import api_entrypoint; api_entrypoint()' >> "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     printf "Started standalone daemon with PID %s\n" "$(cat "$PID_FILE")"
   fi

@@ -20,7 +20,7 @@ run ./scripts/install.sh
 4. Allow user confirmation or manual selection
 5. Probe & resolve API port (defaults to 8003, reuses existing Cortex port on update)
 6. Create virtualenv & install profile-specific Python dependencies
-7. Initialize SQLite database & run migrations
+7. Initialize database schema and migrations
 8. Install & start background service (Systemd on Linux, Launchd on macOS)
 9. Configure LAN firewall rules (UFW if active)
 10. Run healthcheck probe & display completion summary
@@ -28,71 +28,50 @@ run ./scripts/install.sh
 
 ---
 
-## 2. Installation Profiles
+## 2. Configuration Architecture During Install
 
-Cortex supports three runtime profiles to ensure reliable execution across both low-spec hardware and high-performance multi-GPU workstations. **Every profile produces a 100% operational Cortex system.**
+The installer follows the same configuration architecture as the application:
+- non-secret defaults come from `lib/core/settings.py`;
+- `.env` is for secrets, machine-specific values, and explicit overrides;
+- existing legitimate overrides are preserved;
+- generic defaults are not written into `.env` just to make Cortex run.
 
-### Comparison Table
-
-| Profile | Hardware Target | Included Components | Omitted / Unavailable Capabilities |
-| :--- | :--- | :--- | :--- |
-| **`light`** | $< 8$ GB RAM, $< 4$ CPU cores, basic cloud VMs | Core orchestration, FastAPI, Uvicorn, SQLAlchemy, Typer, DuckDuckGo/Trafilatura, all 14+ cloud providers | Local C++ Whisper compilation (`pywhispercpp`), heavy local vision models. *(Cloud audio transcription via Groq is supported)* |
-| **`medium`** | $8$ to $16$ GB RAM, modern multi-core CPU | Core orchestration, Web crawler extensions (`crawl4ai`), PostgreSQL connectors (`psycopg`), standard Ollama integration | Heavy local C++ Whisper compilation (unless build tools present) |
-| **`complete`** | $\ge 16$ GB RAM, NVIDIA CUDA GPU ($\ge 6$ GB VRAM), or Apple Silicon Metal | Core orchestration, Web crawler, PostgreSQL, local Whisper.cpp C++ audio transcription, developer test suite (`pytest`) | None (all capabilities enabled) |
+Examples:
+- If `CORTEX_API_HOST` is absent, Cortex uses the built-in default `0.0.0.0`.
+- If `CORTEX_API_HOST=127.0.0.1` already exists, the installer preserves it.
+- If `CORTEX_API_PORT` must change because `8003` is occupied, the installer writes the resolved override into `.env`.
+- If the default SQLite database is acceptable, you do not need `CORTEX_DATABASE_URL` in `.env`.
 
 ---
 
-## 3. Platform Setup Instructions
+## 3. Installation Profiles
 
-### 3.1 Debian, Ubuntu, Kali Linux & Derivatives
-Ensure standard build and virtualenv packages are present before running the installer:
-```bash
-sudo apt update
-sudo apt install -y python3 python3-pip python3-venv build-essential curl git
-./scripts/install.sh
-```
+Cortex supports three runtime profiles to ensure reliable execution across both low-spec hardware and high-performance multi-GPU workstations. Every profile produces a functional Cortex installation.
 
-### 3.2 macOS (Apple Silicon M-Series & Intel)
-Ensure Homebrew and Python 3.11+ are installed:
-```bash
-brew install python@3.12 git
-./scripts/install.sh
-```
-*Note: The installer automatically configures a Launchd user agent (`~/Library/LaunchAgents/com.cortex.api.plist`) and leverages Apple Silicon Unified Memory.*
-
-### 3.3 Windows via WSL2 (Recommended)
-Native Windows is not supported. Use Windows Subsystem for Linux (WSL2):
-1. In Windows PowerShell: `wsl --install -d Ubuntu`
-2. Inside the Ubuntu WSL shell:
-   ```bash
-   sudo apt update && sudo apt install -y python3 python3-venv python3-pip build-essential
-   git clone https://github.com/wilsonborba/cortex.git
-   cd cortex
-   ./scripts/install.sh
-   ```
+| Profile | Hardware Target | Included Components | Omitted / Unavailable Capabilities |
+| :--- | :--- | :--- | :--- |
+| `light` | < 8 GB RAM, < 4 CPU cores, basic cloud VMs | Core orchestration, FastAPI, Uvicorn, SQLAlchemy, Typer, DuckDuckGo/Trafilatura, cloud providers | Local Whisper.cpp compilation and heavy local models |
+| `medium` | 8 to 16 GB RAM, modern multi-core CPU | Core orchestration, crawler extensions, PostgreSQL connectors, standard Ollama integration | Heavy local Whisper.cpp compilation unless build tools are present |
+| `complete` | >= 16 GB RAM, NVIDIA CUDA GPU, or Apple Silicon Metal | Core orchestration, crawler, PostgreSQL, local Whisper.cpp transcription, developer test suite | None |
 
 ---
 
 ## 4. Smart Port Allocation & Reinstallation Handling
 
-* **Default Port:** `8003` (binds to `0.0.0.0` by default).
-* **Port Conflict Resolution:** If port `8003` is occupied by an unrelated third-party service, the installer automatically detects the next available port (`8004`, `8005`, ...) and persists `CORTEX_API_PORT` into `.env`.
-* **Reinstall / Update Idempotence:** If port `8003` is currently occupied by an existing Cortex instance, the installer recognizes the existing instance, preserves the port, and updates the service in-place **without port drift**.
+- Built-in API defaults are `CORTEX_API_HOST=0.0.0.0` and `CORTEX_API_PORT=8003`.
+- If port `8003` is occupied by another service, the installer finds the next available port and writes `CORTEX_API_PORT` to `.env` as an explicit override.
+- If the configured port is already owned by Cortex, the installer preserves it and avoids drift.
+- The generated service uses the Python entrypoint, so runtime host/port are resolved from `Settings` instead of being hard-coded into the unit file.
 
 ---
 
 ## 5. Service Lifecycle Management
 
 ```bash
-# Check status of the background service
 ./scripts/service.sh status
-
-# Start, stop, or restart the API
 ./scripts/service.sh start
 ./scripts/service.sh stop
 ./scripts/service.sh restart
-
-# Follow real-time API logs
 ./scripts/service.sh logs
 ```
 
@@ -101,9 +80,15 @@ Native Windows is not supported. Use Windows Subsystem for Linux (WSL2):
 ## 6. Uninstallation
 
 ```bash
-# Standard uninstall (stops service, removes systemd/launchd, cleans .venv):
 ./scripts/uninstall.sh
-
-# Complete purge (removes service, .venv, and purges SQLite database and log files):
 ./scripts/uninstall.sh --purge-data
 ```
+
+
+## 7. Optional Model Calibration
+
+- `light` never offers calibration and only reads `Personal > Canonical > Default`.
+- `medium` and `complete` inspect existing calibration first, then may offer an opt-in calibration flow.
+- The installer detects supported judges automatically and shows an informative progress bar during calibration.
+- Declining calibration never blocks installation success.
+- Normal calibration writes only `var/personal_calibration.db`.

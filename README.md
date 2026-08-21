@@ -79,7 +79,7 @@ cd cortex
 ```
 
 ### 3. Configure Provider API Keys
-Edit `.env` to provide keys for any cloud providers you wish to activate (e.g. Groq, Google AI Studio, OpenRouter, Mistral, SambaNova):
+Edit `.env` only for provider credentials, machine-specific paths, or explicit deployment overrides. General defaults already live in `lib/core/settings.py`. For cloud providers, add only the keys you want to activate:
 ```bash
 # Example in .env
 CORTEX_GROQ_API_KEY=gsk_...
@@ -177,8 +177,9 @@ The Cortex native REST API listens on `0.0.0.0:8003` by default:
 
 Comprehensive operational and technical guides are available in the [`documentation/`](documentation/) directory:
 
-* 🚀 **[Installation & Profiles Guide](documentation/installation.md):** Hardware profiling, `Light`/`Medium`/`Complete` profiles, Linux/macOS/WSL setup, and smart port allocation.
-* ⚙️ **[Configuration Reference](documentation/configuration.md):** Environment variables, database connection strings, sliding-window quotas, and scoring weights.
+* 🚀 **[Installation & Profiles Guide](documentation/installation.md):** Hardware profiling, `Light`/`Medium`/`Complete` profiles, Linux/macOS/WSL setup, smart port allocation, and optional install-time calibration.
+* ⚙️ **[Configuration Reference](documentation/configuration.md):** Environment variables, database connection strings, sliding-window quotas, scoring weights, and calibration DB overrides.
+* 🧪 **[Model Auto-Calibration Guide](documentation/calibration.md):** Judge detection, progress reporting, persistence, precedence, reruns, and canonical/personal baseline workflow.
 * 🌐 **[AI Providers Setup Guide](documentation/providers.md):** Setup instructions, API key generation links, and `.env` variables for all 14+ AI providers.
 * 🛠️ **[External AI Tools & CLI Setup](documentation/external-tools.md):** Configuration for Codex CLI, Antigravity CLI, Claude Docker, local Ollama, and local Whisper.
 * 🔍 **[Troubleshooting & Diagnostics](documentation/troubleshooting.md):** Solutions for installation errors, missing libraries, port conflicts, and capability degradation.
@@ -218,7 +219,7 @@ To cleanly stop all background services, remove firewall rules, virtual environm
   sudo apt update && sudo apt install -y python3-venv python3-pip build-essential
   ```
 * **Port Conflict on 8003:**
-  Update `CORTEX_API_PORT` in `.env` or run `./scripts/install.sh --port 8005`.
+  Set `CORTEX_API_PORT` in `.env` only when overriding the built-in default `8003`, or run `./scripts/install.sh --port 8005`.
 * **Checking Hardware Detection:**
   ```bash
   ./scripts/detect_hardware.sh

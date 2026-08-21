@@ -14,10 +14,10 @@ app = typer.Typer(help="Model Registry: list, inspect, and configure models (iss
 def _table(models: List[ModelOut]) -> None:
     print_table(
         "Models",
-        ["ID", "PROVIDER", "TIERS", "STATUS", "REASON", "ENABLED", "CTX FORMAT", "PIN", "PIN EXPIRES"],
+        ["ID", "PROVIDER", "SOURCE", "TIERS", "STATUS", "REASON", "ENABLED", "CTX FORMAT", "PIN", "PIN EXPIRES"],
         [
             [
-                m.id, m.provider, m.tier_eligibility, m.access_status, m.status_reason, m.is_enabled,
+                m.id, m.provider, m.source_kind, m.tier_eligibility, m.access_status, m.status_reason, m.is_enabled,
                 m.context_format_computed, m.context_format_pin, m.context_format_pin_expires_at,
             ]
             for m in models

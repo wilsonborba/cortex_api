@@ -21,7 +21,7 @@ from lib.presentation.api.deps import (
 )
 from lib.presentation.api.schemas.execute import ExecuteResponse
 from lib.presentation.api.schemas.quota import QuotaOut
-from lib.presentation.cli import models_cmd, pins_cmd, telemetry_cmd, tiers_cmd
+from lib.presentation.cli import calibration_cmd, models_cmd, pins_cmd, telemetry_cmd, tiers_cmd
 from lib.presentation.cli.output import CliState, console, emit, error_exit, print_table
 
 logger = get_logger(__name__)
@@ -35,6 +35,7 @@ app.add_typer(models_cmd.app, name="models")
 app.add_typer(tiers_cmd.app, name="tiers")
 app.add_typer(pins_cmd.app, name="pin")
 app.add_typer(telemetry_cmd.app, name="telemetry")
+app.add_typer(calibration_cmd.app, name="calibration")
 
 
 def _version() -> str:

@@ -17,6 +17,7 @@ class ModelOut(BaseModel):
     parameter_size: Optional[str] = None
     context_window: int
     is_local: bool
+    source_kind: str
     tier_eligibility: List[int]
     capabilities: Dict[str, Any]
     cost_per_million_tokens: float
@@ -31,7 +32,7 @@ class ModelOut(BaseModel):
             id=entry.id, provider=entry.provider, display_name=entry.display_name,
             access_status=entry.access_status, status_reason=entry.status_reason,
             parameter_size=entry.parameter_size, context_window=entry.context_window,
-            is_local=entry.is_local, tier_eligibility=list(entry.tier_eligibility or []),
+            is_local=entry.is_local, source_kind=entry.source_kind, tier_eligibility=list(entry.tier_eligibility or []),
             capabilities=dict(entry.capabilities or {}), cost_per_million_tokens=entry.cost_per_million_tokens,
             is_enabled=entry.is_enabled,
             context_format_computed=entry.context_format_computed,

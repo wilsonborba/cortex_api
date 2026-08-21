@@ -41,6 +41,7 @@ class ModelCatalogEntry(Base, TimestampMixin):
     parameter_size: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     context_window: Mapped[int] = mapped_column(Integer, default=8192, nullable=False)
     is_local: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(16), default="api", nullable=False)
     tier_eligibility: Mapped[List[int]] = mapped_column(JSON, default=list, nullable=False)
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     cost_per_million_tokens: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

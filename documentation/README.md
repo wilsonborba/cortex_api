@@ -12,7 +12,10 @@ This directory contains detailed technical guides to help developers, system adm
   Detailed guide covering automated installation, hardware profiling, `Light`, `Medium`, and `Complete` profile selection, platform support (Debian/Ubuntu/Kali Linux, macOS, WSL2), service lifecycle (Systemd & Launchd), and smart port allocation.
 
 * ⚙️ **[Configuration & Environment Variables (`configuration.md`)](./configuration.md)**
-  Complete reference for all `.env` and environment variables, database backends (SQLite & PostgreSQL), server network bindings, quota window tuning, scoring weights, and logging targets.
+  Complete reference for all `.env` and environment variables, database backends (SQLite & PostgreSQL), server network bindings, quota window tuning, scoring weights, logging targets, and calibration DB overrides.
+
+* 🧪 **[Model Auto-Calibration (`calibration.md`)](./calibration.md)**
+  Optional install-time and on-demand benchmarking workflow, judge detection, progress reporting, `Personal > Canonical > Default` precedence, persistence details, and canonical-baseline publishing flow.
 
 * 🌐 **[AI Providers Setup Guide (`providers.md`)](./providers.md)**
   Exhaustive setup instructions for all 14+ supported AI providers (Groq, Google AI Studio, OpenRouter, Mistral, Cohere, Cloudflare, NVIDIA NIM, SambaNova, HuggingFace, Ollama, SiliconFlow, Zai, Aion Labs, Inference.net). Includes official portal URLs, API key acquisition steps, exact environment variable names, and verification commands.
