@@ -141,6 +141,19 @@ def test_antigravity_discovery_raises_when_binary_missing():
         discovery.discover()
 
 
+def test_antigravity_discovery_uses_configured_binary_path():
+    seen = {}
+
+    def runner(args, **kwargs):
+        seen["argv0"] = args[0]
+        return _completed(stdout="gemini-3.7-flash-high\n")
+
+    discovery = AntigravityDiscovery(command="/opt/tools/agy", runner=runner)
+    discovery.discover()
+
+    assert seen["argv0"] == "/opt/tools/agy"
+
+
 # --- ClaudeDockerDiscovery ----------------------------------------------------
 
 
