@@ -48,8 +48,8 @@ Removing `personal_calibration.db` naturally exposes the canonical baseline agai
 
 Cortex currently auto-detects these judge families:
 
-- `gemini` via `agy-docker` plus Google credentials;
-- `claude` via `claude-docker` plus Claude credentials;
+- `gemini` via `agy` plus Google credentials;
+- `claude` via `claude` plus Claude credentials;
 - `codex` via `codex` plus `~/.codex/auth.json`.
 
 Use:
