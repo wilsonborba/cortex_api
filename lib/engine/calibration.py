@@ -469,69 +469,59 @@ class JudgeDetector:
 
     def detect(self) -> list[JudgeInfo]:
         judges = [
-            self._detect_agy(),
-            self._detect_claude(),
-            self._detect_codex(),
+            self._detect_standard("agy", self.settings.agy_command, "agy", self._agy_available, "gemini-2.5-pro"),
+            self._detect_standard("claude", self.settings.claude_command, "claude", self._claude_available, "claude-opus-5"),
+            self._detect_standard("codex", self.settings.codex_command, "codex", self._codex_available, "o3"),
         ]
-        for extra in (self._detect_agy_docker(), self._detect_claude_docker(), self._detect_codex_docker()):
-            if extra is not None:
-                judges.append(extra)
-        return judges
+        judges.extend(self._detect_custom_variants("agy", self.settings.agy_extra_commands, self._agy_available, "gemini-2.5-pro"))
+        judges.extend(self._detect_custom_variants("claude", self.settings.claude_extra_commands, self._claude_available, "claude-opus-5"))
+        judges.extend(self._detect_custom_variants("codex", self.settings.codex_extra_commands, self._codex_available, "o3"))
+        disabled = {item.strip().lower() for item in self.settings.calibration_disabled_judge_ids}
+        result: list[JudgeInfo] = []
+        for judge in judges:
+            if judge.id in disabled:
+                result.append(JudgeInfo(judge.id, judge.family, judge.provider, judge.command, False, "disabled by configuration", judge.default_model, judge.label))
+            else:
+                result.append(judge)
+        return result
 
     def available(self) -> list[JudgeInfo]:
         return [judge for judge in self.detect() if judge.available]
 
-    def _detect_agy(self) -> JudgeInfo:
-        command = self.settings.agy_command
+    def _detect_standard(self, judge_id: str, command: str, provider: str, available_check: Callable[[], bool], default_model: str) -> JudgeInfo:
         binary = shutil.which(command)
-        available = bool(binary and (self.settings.google_api_key or self.settings.google_ai_studio_api_key))
-        reason = "command and Google credentials present" if available else "requires agy plus Google credentials"
-        return JudgeInfo("agy", "agy", "agy", command, available, reason, "gemini-2.5-pro", "agy")
+        available = bool(binary and available_check())
+        family_label = judge_id
+        reason = f"command and credentials present" if available else f"requires {judge_id} plus credentials/config"
+        return JudgeInfo(judge_id, family_label, provider, command, available, reason, default_model, judge_id)
 
-    def _detect_agy_docker(self) -> Optional[JudgeInfo]:
-        command = self.settings.agy_docker_command
-        if not command:
-            return None
-        binary = shutil.which(command)
-        available = bool(binary and (self.settings.google_api_key or self.settings.google_ai_studio_api_key))
-        reason = "custom AGY Docker command and Google credentials present" if available else "custom AGY Docker variant is configured but not ready"
-        return JudgeInfo("agy-docker", "agy", "agy", command, available, reason, "gemini-2.5-pro", "agy-docker")
+    def _detect_custom_variants(self, family: str, raw_items: Sequence[str], available_check: Callable[[], bool], default_model: str) -> list[JudgeInfo]:
+        judges: list[JudgeInfo] = []
+        for index, raw_item in enumerate(raw_items, start=1):
+            label, command = self._parse_variant_entry(raw_item, family, index)
+            binary = shutil.which(command)
+            available = bool(binary and available_check())
+            reason = "custom variant command and credentials present" if available else "custom variant configured but not ready"
+            judges.append(JudgeInfo(label, family, family, command, available, reason, default_model, label))
+        return judges
 
-    def _detect_claude(self) -> JudgeInfo:
-        command = self.settings.claude_command
-        binary = shutil.which(command)
-        creds = self.settings.claude_credentials_path.exists()
-        available = bool(binary and creds)
-        reason = "command and Claude credentials present" if available else "requires claude plus ~/.claude credentials"
-        return JudgeInfo("claude", "claude", "claude", command, available, reason, "claude-opus-5", "claude")
+    @staticmethod
+    def _parse_variant_entry(raw_item: str, family: str, index: int) -> tuple[str, str]:
+        item = raw_item.strip()
+        if "=" in item:
+            label, command = item.split("=", 1)
+            normalized_label = f"{family}:{label.strip()}"
+            return normalized_label, command.strip()
+        return f"{family}:custom-{index}", item
 
-    def _detect_claude_docker(self) -> Optional[JudgeInfo]:
-        command = self.settings.claude_docker_command
-        if not command:
-            return None
-        binary = shutil.which(command)
-        creds = self.settings.claude_credentials_path.exists()
-        available = bool(binary and creds)
-        reason = "custom Claude Docker command and credentials present" if available else "custom Claude Docker variant is configured but not ready"
-        return JudgeInfo("claude-docker", "claude", "claude", command, available, reason, "claude-opus-5", "claude-docker")
+    def _agy_available(self) -> bool:
+        return bool(self.settings.google_api_key or self.settings.google_ai_studio_api_key)
 
-    def _detect_codex(self) -> JudgeInfo:
-        command = self.settings.codex_command
-        binary = shutil.which(command)
-        creds = self.settings.codex_auth_path.exists()
-        available = bool(binary and creds)
-        reason = "command and Codex auth present" if available else "requires codex plus ~/.codex/auth.json"
-        return JudgeInfo("codex", "codex", "codex", command, available, reason, "o3", "codex")
+    def _claude_available(self) -> bool:
+        return self.settings.claude_credentials_path.exists()
 
-    def _detect_codex_docker(self) -> Optional[JudgeInfo]:
-        command = self.settings.codex_docker_command
-        if not command:
-            return None
-        binary = shutil.which(command)
-        creds = self.settings.codex_auth_path.exists()
-        available = bool(binary and creds)
-        reason = "custom Codex Docker command and auth present" if available else "custom Codex Docker variant is configured but not ready"
-        return JudgeInfo("codex-docker", "codex", "codex", command, available, reason, "o3", "codex-docker")
+    def _codex_available(self) -> bool:
+        return self.settings.codex_auth_path.exists()
 
 
 class CalibrationEngine:

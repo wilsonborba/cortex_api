@@ -65,3 +65,15 @@ def test_settings_support_binary_alias_envs_and_expand_user_paths(monkeypatch):
     assert settings.codex_command == str(Path("~/bin/codex").expanduser())
     assert settings.claude_credentials_path == Path("~/.claude/.credentials.json").expanduser()
     assert settings.codex_auth_path == Path("~/.codex/auth.json").expanduser()
+
+
+def test_settings_parse_custom_judge_command_lists_and_disabled_ids():
+    settings = Settings(
+        agy_extra_commands="docker=/bin/agy-docker,work=/opt/agy-work",
+        claude_extra_commands=["docker=/bin/claude-docker"],
+        calibration_disabled_judge_ids="claude,claude:docker",
+    )
+
+    assert settings.agy_extra_commands == ["docker=/bin/agy-docker", "work=/opt/agy-work"]
+    assert settings.claude_extra_commands == ["docker=/bin/claude-docker"]
+    assert settings.calibration_disabled_judge_ids == ["claude", "claude:docker"]

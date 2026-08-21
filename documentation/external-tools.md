@@ -54,7 +54,7 @@ Codex CLI allows routing reasoning and coding tasks through local Codex authenti
 
 ## 3. Google Antigravity CLI / AGY
 
-Antigravity CLI provides access to Google Gemini models (Gemini 2.0 Flash, Gemini 1.5 Pro). The default auto-detected command is `agy`; optional custom variants such as `agy-docker` can be configured manually.
+Antigravity CLI provides access to Google Gemini models (Gemini 2.0 Flash, Gemini 1.5 Pro). The default auto-detected command is `agy`; optional custom variants can be configured manually through a list of commands.
 
 * **Authentication:**
   ```bash
@@ -64,8 +64,8 @@ Antigravity CLI provides access to Google Gemini models (Gemini 2.0 Flash, Gemin
   Add these only when PATH resolution is not enough on your machine.
   ```env
   CORTEX_AGY_COMMAND=/home/your-user/.local/bin/agy
-  # Optional custom variant
-  CORTEX_AGY_DOCKER_COMMAND=/home/your-user/.local/bin/agy-docker
+  # Optional custom variants
+  CORTEX_AGY_EXTRA_COMMANDS=docker=/home/your-user/.local/bin/agy-docker,work=/opt/tools/agy-work
   ```
 
 ---
@@ -80,8 +80,8 @@ Claude CLI is auto-detected via the standard `claude` command. Optional custom v
   ```env
   CORTEX_CLAUDE_CREDENTIALS_PATH=/home/your-user/.claude/.credentials.json
   CORTEX_CLAUDE_COMMAND=/home/your-user/.local/bin/claude
-  # Optional custom variant
-  CORTEX_CLAUDE_DOCKER_COMMAND=/home/your-user/.local/bin/claude-docker
+  # Optional custom variants
+  CORTEX_CLAUDE_EXTRA_COMMANDS=docker=/home/your-user/.local/bin/claude-docker,team=/opt/tools/claude-team
   ```
 
 ---

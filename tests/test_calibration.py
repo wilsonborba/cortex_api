@@ -99,21 +99,22 @@ def test_judge_detector_reports_available_tools(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("PATH", f"{bin_dir}:{Path().cwd()}")
     settings = Settings(
         agy_command=str(bin_dir / "agy"),
-        agy_docker_command=str(bin_dir / "agy-docker"),
+        agy_extra_commands=["docker=" + str(bin_dir / "agy-docker")],
         claude_command=str(bin_dir / "claude"),
-        claude_docker_command=str(bin_dir / "claude-docker"),
+        claude_extra_commands=["docker=" + str(bin_dir / "claude-docker")],
         codex_command=str(bin_dir / "codex"),
         claude_credentials_path=claude_creds,
         codex_auth_path=codex_auth,
         google_api_key="test-key",
+        calibration_disabled_judge_ids=[],
     )
     judges = {judge.id: judge for judge in JudgeDetector(settings=settings).detect()}
 
     assert judges["agy"].available is True
     assert judges["claude"].available is True
     assert judges["codex"].available is True
-    assert judges["agy-docker"].available is True
-    assert judges["claude-docker"].available is True
+    assert judges["agy:docker"].available is True
+    assert judges["claude:docker"].available is True
 
 
 def test_calibration_engine_writes_personal_only_and_keeps_canonical_unchanged(tmp_path: Path):
@@ -186,3 +187,27 @@ def test_scorer_uses_calibrated_quality_when_available(tmp_path: Path, telemetry
     result = scorer.score(model, "general", 45, requested_tier=3)
 
     assert result.capability == 0.93
+
+
+def test_judge_detector_can_disable_default_and_keep_custom_variant(monkeypatch, tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("claude", "claude-docker"):
+        cmd = bin_dir / name
+        cmd.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        cmd.chmod(0o755)
+
+    claude_creds = tmp_path / ".claude.json"
+    claude_creds.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("PATH", f"{bin_dir}:{Path().cwd()}")
+    settings = Settings(
+        claude_command=str(bin_dir / "claude"),
+        claude_extra_commands=["docker=" + str(bin_dir / "claude-docker")],
+        claude_credentials_path=claude_creds,
+        calibration_disabled_judge_ids=["claude"],
+    )
+    judges = {judge.id: judge for judge in JudgeDetector(settings=settings).detect()}
+
+    assert judges["claude"].available is False
+    assert judges["claude:docker"].available is True
