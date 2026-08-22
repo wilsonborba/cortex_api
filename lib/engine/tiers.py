@@ -26,11 +26,11 @@ class TierPreset:
 # docs/tier-and-execution-envelope.md. T0 is local-only and single-shot;
 # T5 is the only tier that requires a dedicated critic by default.
 FACTORY_PRESETS: Dict[int, TierPreset] = {
-    0: TierPreset(0, "Basic", 5, False, False, "none", False, 1),
-    1: TierPreset(1, "Light", 10, False, True, "simple", False, 1),
-    2: TierPreset(2, "Standard", 20, True, True, "vector_rerank", False, 2),
-    3: TierPreset(3, "Advanced", 45, True, True, "full", False, 2),
-    4: TierPreset(4, "High", 90, True, True, "deep", False, 3),
+    0: TierPreset(0, "Basic", 180, False, False, "none", False, 1),
+    1: TierPreset(1, "Light", 180, False, True, "simple", False, 1),
+    2: TierPreset(2, "Standard", 180, True, True, "vector_rerank", False, 2),
+    3: TierPreset(3, "Advanced", 180, True, True, "full", False, 2),
+    4: TierPreset(4, "High", 180, True, True, "deep", False, 3),
     5: TierPreset(5, "Ultra", 180, True, True, "deep_web", True, 4),
 }
 
@@ -60,12 +60,13 @@ class TierService:
         self._repo = repo or TierPolicyRepository()
 
     def ensure_seeded(self) -> None:
-        """Idempotent: only inserts tiers missing from the DB. A tier the
-        user has already customized is never overwritten by this."""
-        existing = {p.tier for p in self._repo.list_policies()}
+        """Idempotent: inserts missing tiers and updates latency budget to 180s."""
+        existing = {p.tier: p for p in self._repo.list_policies()}
         for tier, preset in FACTORY_PRESETS.items():
             if tier not in existing:
                 self._repo.upsert_policy(preset_to_policy(preset))
+            else:
+                self._repo.update_policy(tier, max_latency_seconds=180)
 
     def get_envelope(self, tier: int) -> TierPolicy:
         policy = self._repo.get_policy(tier)
