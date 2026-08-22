@@ -640,6 +640,10 @@ class Executor:
             # retrieval happen, and how).
             context_format=context_format,
             context_type=(gathered.source if gathered and gathered.source != "none" else None),
+            phase="model",
+            attempt_index=step.attempts,
+            deadline_remaining_ms=None,
+            audit_details=f"provider={selection.provider};model={selection.model_id};role={selection.role}",
         )
         self._telemetry.record_async(event)
 
