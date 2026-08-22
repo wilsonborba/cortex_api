@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 from lib.dal.models import TierPolicy
 from lib.dal.repositories.tier_policy_repository import TierPolicyRepository
+from lib.engine.curated_tier_catalog import model_ids_for_tier
 
 MIN_TIER = 0
 MAX_TIER = 5
@@ -26,12 +27,12 @@ class TierPreset:
 # docs/tier-and-execution-envelope.md. T0 is local-only and single-shot;
 # T5 is the only tier that requires a dedicated critic by default.
 FACTORY_PRESETS: Dict[int, TierPreset] = {
-    0: TierPreset(0, "Basic", 180, False, False, "none", False, 1),
-    1: TierPreset(1, "Light", 180, False, True, "simple", False, 1),
-    2: TierPreset(2, "Standard", 180, True, True, "vector_rerank", False, 2),
-    3: TierPreset(3, "Advanced", 180, True, True, "full", False, 2),
-    4: TierPreset(4, "High", 180, True, True, "deep", False, 3),
-    5: TierPreset(5, "Ultra", 180, True, True, "deep_web", True, 4),
+    0: TierPreset(0, "Basic", 300, False, False, "none", False, 1),
+    1: TierPreset(1, "Light", 300, False, True, "simple", False, 1),
+    2: TierPreset(2, "Standard", 300, True, True, "vector_rerank", False, 2),
+    3: TierPreset(3, "Advanced", 300, True, True, "full", False, 2),
+    4: TierPreset(4, "High", 300, True, True, "deep", False, 3),
+    5: TierPreset(5, "Ultra", 300, True, True, "deep_web", True, 4),
 }
 
 
@@ -45,7 +46,7 @@ def preset_to_policy(preset: TierPreset) -> TierPolicy:
         retrieval_mode=preset.retrieval_mode,
         require_verification=preset.require_verification,
         max_model_calls=preset.max_model_calls,
-        allowed_models=None,
+        allowed_models=model_ids_for_tier(preset.tier),
     )
 
 
@@ -60,13 +61,13 @@ class TierService:
         self._repo = repo or TierPolicyRepository()
 
     def ensure_seeded(self) -> None:
-        """Idempotent: inserts missing tiers and updates latency budget to 180s."""
+        """Idempotent: inserts missing tiers and updates the normal budget to 300s."""
         existing = {p.tier: p for p in self._repo.list_policies()}
         for tier, preset in FACTORY_PRESETS.items():
             if tier not in existing:
                 self._repo.upsert_policy(preset_to_policy(preset))
             else:
-                self._repo.update_policy(tier, max_latency_seconds=180)
+                self._repo.update_policy(tier, max_latency_seconds=300)
 
     def get_envelope(self, tier: int) -> TierPolicy:
         policy = self._repo.get_policy(tier)

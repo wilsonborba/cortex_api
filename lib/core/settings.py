@@ -104,7 +104,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_DISABLED_PROVIDERS", "DISABLED_PROVIDERS"),
     )
     driver_timeout_seconds: float = Field(
-        default=180.0,
+        default=300.0,
         validation_alias=AliasChoices("CORTEX_DRIVER_TIMEOUT_SECONDS", "DRIVER_TIMEOUT_SECONDS"),
     )
     thinking_timeout_seconds: int = Field(

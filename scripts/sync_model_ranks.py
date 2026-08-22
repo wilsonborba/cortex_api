@@ -14,6 +14,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.engine.curated_tier_catalog import CURATED_TIER_CATALOG
+
 # Root directory of cortex
 ROOT_DIR = Path(__file__).resolve().parent.parent
 SEED_DB_FILE = ROOT_DIR / "lib" / "dal" / "seeds" / "model_tier_benchmark.db"
@@ -108,6 +111,24 @@ def elo_to_capabilities(elo: float, is_coding: bool = False, is_vision: bool = F
     return res
 
 
+def apply_curated_overrides(cursor: sqlite3.Cursor) -> None:
+    """Make reviewed, single-tier assignments win over generic Elo fallback.
+
+    Most provider catalog IDs do not exist in public leaderboards.  Their
+    old shared ELO=1200 fallback made them indistinguishable and therefore
+    unsafe as a runtime policy.  The reviewed runtime catalog is the source
+    of truth for its small set of generation candidates.
+    """
+    for tier, candidates in CURATED_TIER_CATALOG.items():
+        for candidate in candidates:
+            cursor.execute(
+                "UPDATE model_benchmarks SET tier_eligibility_json = ? WHERE model_key = ?",
+                (json.dumps([tier]), candidate.model_id),
+            )
+    cursor.execute("INSERT OR REPLACE INTO benchmark_metadata VALUES ('version', '2.0-curated');")
+    cursor.execute("INSERT OR REPLACE INTO benchmark_metadata VALUES ('source', 'Curated Cortex runtime catalog; generic LMSYS/LiveBench fallback retained as metadata only');")
+
+
 def sync() -> None:
     cortex_models = fetch_cortex_models()
     online_scores = fetch_online_leaderboard()
@@ -177,6 +198,8 @@ def sync() -> None:
         )
         updated_count += 1
 
+    apply_curated_overrides(cursor)
+
     conn.commit()
     cursor.execute("SELECT COUNT(*) FROM model_benchmarks;")
     total_count = cursor.fetchone()[0]
@@ -187,4 +210,3 @@ def sync() -> None:
 
 if __name__ == "__main__":
     sync()
-
