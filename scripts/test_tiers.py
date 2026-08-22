@@ -186,7 +186,7 @@ def test_hippocampus_end_to_end() -> None:
             method="POST",
             payload={
                 "prompt": "Qual banco de dados o Cortex utiliza para a DAL e logs?",
-                "tier": 1,
+                "tier": 0,
                 "capabilities": {"memory": True},
                 "memory_topic": test_topic,
                 "tenant_id": TEST_TENANT_ID,
@@ -275,7 +275,7 @@ def test_plane_end_to_end() -> None:
             method="POST",
             payload={
                 "prompt": "Quais tarefas estão cadastradas para execução?",
-                "tier": 1,
+                "tier": 0,
                 "capabilities": {"tasks": True},
                 "tenant_id": TEST_TENANT_ID,
             },

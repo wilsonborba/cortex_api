@@ -260,16 +260,28 @@ class Router:
         # Tiers 0-2: Ensure Ollama is appended as local safety net if primary candidates exhaust
         # Tiers 3-5: Ensure CLI sidecars (antigravity/codex/claude) are appended if available
         if tier <= 2:
-            all_models = self._registry.list_available_for_router(tier=tier)
+            all_models = self._registry.list_models()
             local_fallbacks = [m for m in all_models if m.is_local or m.provider == "ollama"]
+            if not local_fallbacks:
+                # Guaranteed fallback entry for local Ollama
+                local_fallbacks = [
+                    ModelCatalogEntry(
+                        id="ollama/qwen2.5vl:7b",
+                        provider="ollama",
+                        display_name="Ollama Local Safety Net",
+                        access_status="AVAILABLE",
+                        is_local=True,
+                        tier_eligibility=[0, 1, 2, 3],
+                    )
+                ]
             for fb in local_fallbacks:
-                if fb not in models:
+                if not any(m.id == fb.id for m in models):
                     models.append(fb)
         else:
-            all_models = self._registry.list_available_for_router(tier=tier)
+            all_models = self._registry.list_models()
             sidecar_fallbacks = [m for m in all_models if m.provider in ("antigravity", "codex", "claude")]
             for fb in sidecar_fallbacks:
-                if fb not in models:
+                if not any(m.id == fb.id for m in models):
                     models.append(fb)
 
         return models
