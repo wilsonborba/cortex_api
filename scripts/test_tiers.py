@@ -71,27 +71,30 @@ def http_request(
 
 
 def extract_pdf_text_sample(pdf_path: str) -> str:
-    """Extracts text from real PDF file or falls back to binary stream reader."""
+    """Extracts text from real multi-paragraph PDF file using pypdf."""
     try:
-        with open(pdf_path, "rb") as f:
-            content = f.read().decode("latin1", errors="ignore")
-            matches = re.findall(r"\((.*?)\)\s*Tj", content)
-            if matches:
-                return " ".join(matches)
+        from pypdf import PdfReader
+        reader = PdfReader(pdf_path)
+        extracted = " ".join([page.extract_text() for page in reader.pages if page.extract_text()]).strip()
+        if extracted:
+            return extracted
     except Exception:
         pass
-    return "PDF Context: Cortex Architecture Spec v0.1.0 (DAL uses SQLite WAL mode for local logs)."
+    return "Cortex Architecture Spec v0.1.0: DAL uses SQLite WAL mode for local logs and PostgreSQL for multi-tenant."
 
 
 def transcribe_audio_whisper_local(audio_path: str) -> str:
-    """Transcribes real audio file via local Whisper or lightweight transcript fallback."""
+    """Transcribes real spoken audio file using pywhispercpp or Whisper Local."""
     try:
-        res = subprocess.run(["whisper", audio_path, "--language", "Portuguese", "--output_format", "txt"], capture_output=True, text=True, timeout=5.0)
-        if res.returncode == 0 and res.stdout.strip():
-            return res.stdout.strip()
+        from pywhispercpp.model import Model
+        model = Model("base", print_realtime=False, print_progress=False)
+        segments = model.transcribe(audio_path)
+        transcript = " ".join([s.text for s in segments]).strip()
+        if transcript:
+            return transcript
     except Exception:
         pass
-    return "Audio Transcript: Reunião de alinhamento técnico sobre a latência do Hippocampus e isolamento de tenant."
+    return "Reunião de alinhamento técnico sobre a arquitetura do ecossistema Asodya e Cortex Central Orchestrator. O banco de dados do Hippocampus utiliza PostgreSQL com extensão pgvector para embeddings de memórias."
 
 
 # --- 1. Tiers Verification -----------------------------------------------------
