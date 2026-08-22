@@ -59,8 +59,8 @@ class QuotaTracker:
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
             )
-        if not result.success and result.error_type == "rate_limit":
-            self.enter_cooldown(model, reason=result.error_message)
+        if not result.success and result.error_type in ("rate_limit", "rate_limit_exceeded", "quota_exceeded"):
+            self.enter_cooldown(model, provider=provider, reason=result.error_message)
 
     # -- reads --------------------------------------------------------------
 
@@ -103,12 +103,15 @@ class QuotaTracker:
     # -- cooling down ---------------------------------------------------------
 
     def enter_cooldown(
-        self, model_id: str, reason: Optional[str] = None, minutes: Optional[int] = None
+        self, model_id: str, provider: Optional[str] = None, reason: Optional[str] = None, minutes: Optional[int] = None
     ) -> None:
         until = datetime.now(timezone.utc) + timedelta(
             minutes=minutes if minutes is not None else self._settings.cooldown_minutes
         )
         self._model_repo.set_cooldown(model_id, until=until, reason=reason or "Rate limited (429)")
+        prov = provider or (model_id.split("/")[0] if "/" in model_id else None)
+        if prov:
+            self._model_repo.set_provider_cooldown(prov, until=until, reason=reason or f"Provider {prov} rate limited")
 
     def refresh_cooldowns(self) -> List[str]:
         """Moves any model whose cooldown window has elapsed back to `OFFLINE`.

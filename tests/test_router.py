@@ -17,6 +17,7 @@ from lib.engine.registry_service import ModelRegistryService
 from lib.engine.router import NoEligibleModelError, Router, RoutingRequest
 from lib.engine.scoring import ModelScorer, ScoringWeights
 from lib.engine.tiers import TierService
+from lib.engine.curated_tier_catalog import model_ids_for_tier
 
 
 @pytest.fixture
@@ -144,6 +145,45 @@ def test_dynamic_routing_picks_highest_scoring_candidate(
 
     assert plan.source == "dynamic"
     assert plan.selections[0].model_id == "ollama/router-strong"
+
+
+def test_curated_tier_one_preserves_order_then_adds_local_ollama_fallback(
+    router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
+):
+    _dynamic(pin_repo_, 1, "general")
+    curated = model_ids_for_tier(1)
+    for index, model_id in enumerate(curated):
+        _seed_model(
+            model_repo_, id=model_id, provider=f"remote{index}", is_local=False,
+            tier_eligibility=[1], capabilities={"general": 0.99 - index / 100},
+        )
+    _seed_model(
+        model_repo_, id="ollama/qwen2.5vl:7b", provider="ollama", is_local=True,
+        tier_eligibility=[0, 1], capabilities={"general": 0.1},
+    )
+    tier_service_.set_models(1, curated)
+
+    plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=1))
+
+    assert [selection.model_id for selection in plan.selections] == curated + ["ollama/qwen2.5vl:7b"]
+    assert [selection.role for selection in plan.selections] == ["primary"] + ["fallback"] * 5
+
+
+def test_curated_tier_two_does_not_admit_a_model_reserved_for_tier_three(
+    router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
+):
+    _dynamic(pin_repo_, 2, "general")
+    curated = model_ids_for_tier(2)
+    for index, model_id in enumerate(curated):
+        _seed_model(model_repo_, id=model_id, provider=f"remote{index}", is_local=False, tier_eligibility=[2])
+    _seed_model(model_repo_, id="mistral/reserved-t3", provider="mistral", is_local=False, tier_eligibility=[3])
+    _seed_model(model_repo_, id="ollama/qwen2.5vl:7b", provider="ollama", is_local=True, tier_eligibility=[0, 1])
+    tier_service_.set_models(2, curated)
+
+    plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=2))
+
+    assert "mistral/reserved-t3" not in [selection.model_id for selection in plan.selections]
+    assert [selection.model_id for selection in plan.selections] == curated + ["ollama/qwen2.5vl:7b"]
     assert plan.selections[0].role == "primary"
 
 

@@ -46,7 +46,16 @@ from lib.engine.attachments import AttachmentIngestor, IngestedAttachments, buil
 logger = get_logger(__name__)
 
 # Worth one quick retry: plumbing hiccups, not "this will never work".
-_RETRYABLE_ERRORS = {"unreachable", "http_error", "cli_error"}
+_RETRYABLE_ERRORS = {
+    "unreachable",
+    "http_error",
+    "cli_error",
+    "rate_limit",
+    "rate_limit_exceeded",
+    "provider_server_error",
+    "provider_timeout",
+    "empty_response",
+}
 
 TERMINAL_FALLBACK_MESSAGE = (
     "Sorry, we can't respond to your request right now. Our service is currently at capacity. Please try again in a few minutes."
@@ -271,7 +280,8 @@ class Executor:
 
         return await self._execute_plan(
             working_plan, reroutes_left=self._max_reroutes, context_retry=context_retry,
-            images=ingested.image_data_uris,
+            images=ingested.image_data_uris, request_id=str(uuid.uuid4()),
+            deadline=monotonic() + working_plan.max_latency_seconds,
         )
 
     def _lookup_model(self, model_id: str) -> Optional[ModelCatalogEntry]:
@@ -326,9 +336,15 @@ class Executor:
         reroutes_left: int,
         context_retry: Optional[_ContextRetryState] = None,
         images: Optional[List[str]] = None,
+        request_id: Optional[str] = None,
+        deadline: Optional[float] = None,
     ) -> ExecutionResult:
-        request_id = str(uuid.uuid4())
-        deadline = monotonic() + plan.max_latency_seconds
+        request_id = request_id or str(uuid.uuid4())
+        deadline = deadline if deadline is not None else monotonic() + plan.max_latency_seconds
+        if any(selection.role == "fallback" for selection in plan.selections):
+            return await self._execute_ordered_cascade(
+                plan, request_id=request_id, deadline=deadline, context_retry=context_retry, images=images
+            )
         steps: List[StepResult] = []
         context = plan.prompt
         # The primary's original text, kept separate from `context` (which
@@ -382,14 +398,81 @@ class Executor:
                 continue
 
             if not step.success:
-                # Step failed (primary, refiner, or critic):
-                # Enter cooldown and attempt rerouting to the next eligible candidate model/provider in this tier.
-                self._quota_tracker.enter_cooldown(selection.model_id, reason=step.error_message or step.error_type)
+                # Primary/step failed: Mark model & provider in Cooldown
+                self._quota_tracker.enter_cooldown(selection.model_id, provider=selection.provider, reason=step.error_message or step.error_type)
+                
+                # Attempt primary candidate rerouting first
                 if self._router is not None and reroutes_left > 0:
                     rerouted = self._try_reroute(plan)
                     if rerouted is not None:
-                        return await self._execute_plan(rerouted, reroutes_left - 1, images=images)
+                        return await self._execute_plan(
+                            rerouted, reroutes_left - 1, images=images, request_id=request_id, deadline=deadline
+                        )
+                
+                # CLI fallback is allowed only for T3-T5.
+                if plan.tier <= 2:
+                    break
+
+                # Primary Fallback Loop across CLI Sidecars (agy -> codex)
+                cli_sidecars = [
+                    ("agy", "agy/gemini-2.5-pro"),
+                    ("codex", "codex/gpt-5.4"),
+                ]
+                for cli_provider, cli_model_id in cli_sidecars:
+                    if cli_provider == selection.provider:
+                        continue  # skip provider that just failed
+                    sidecar_selection = ModelSelection(model_id=cli_model_id, provider=cli_provider, role="primary")
+                    sidecar_step = await self._run_step(plan, sidecar_selection, context, deadline, images=images)
+                    self._log_step(plan, request_id, sidecar_selection, sidecar_step, None, None)
+                    steps.append(sidecar_step)
+                    if sidecar_step.success:
+                        return self._build_result(plan, request_id, steps, gathered=gathered if 'gathered' in locals() else None)
+                    else:
+                        self._quota_tracker.enter_cooldown(cli_model_id, provider=cli_provider, reason=sidecar_step.error_message or sidecar_step.error_type)
                 break
+
+        return self._build_result(plan, request_id, steps, gathered=gathered)
+
+    async def _execute_ordered_cascade(
+        self,
+        plan: ExecutionPlan,
+        *,
+        request_id: str,
+        deadline: float,
+        context_retry: Optional[_ContextRetryState],
+        images: Optional[List[str]],
+    ) -> ExecutionResult:
+        """Run an explicitly curated list in order, stopping on success.
+
+        This path intentionally does not re-route or borrow an adjacent
+        tier.  The local T1/T2 fallback and the T3-T5 CLI fallbacks are
+        already prescribed by the product policy.
+        """
+        steps: List[StepResult] = []
+        gathered = context_retry.gathered if context_retry is not None else None
+        for index, selection in enumerate(plan.selections):
+            step = await self._run_step(plan, selection, plan.prompt, deadline, images=images if index == 0 else None)
+            self._log_step(
+                plan, request_id, selection, step, gathered if index == 0 else None,
+                context_retry.format_name if index == 0 and context_retry is not None else None,
+            )
+            steps.append(step)
+            if step.success:
+                return self._build_result(plan, request_id, steps, gathered=gathered)
+            self._quota_tracker.enter_cooldown(
+                selection.model_id, provider=selection.provider,
+                reason=step.error_message or step.error_type,
+            )
+
+        if plan.tier >= 3:
+            for provider, model_id in (("agy", "agy/gemini-2.5-pro"), ("codex", "codex/gpt-5.4")):
+                selection = ModelSelection(model_id=model_id, provider=provider, role="fallback")
+                step = await self._run_step(plan, selection, plan.prompt, deadline, images=images)
+                self._log_step(plan, request_id, selection, step, None, None)
+                steps.append(step)
+                if step.success:
+                    return self._build_result(plan, request_id, steps, gathered=gathered)
+                self._quota_tracker.enter_cooldown(model_id, provider=provider, reason=step.error_message or step.error_type)
 
         return self._build_result(plan, request_id, steps, gathered=gathered)
 
@@ -514,7 +597,7 @@ class Executor:
             if remaining <= 0:
                 result = DriverResult(
                     success=False, response_text="", input_tokens=0, output_tokens=0, latency_ms=0,
-                    error_type="timeout", error_message="tier latency budget exhausted before this step ran",
+                    error_type="timeout", error_message="request deadline exhausted before this step ran",
                 )
                 break
             try:
@@ -604,6 +687,10 @@ class Executor:
             # retrieval happen, and how).
             context_format=context_format,
             context_type=(gathered.source if gathered and gathered.source != "none" else None),
+            phase="model",
+            attempt_index=step.attempts,
+            deadline_remaining_ms=None,
+            audit_details=f"provider={selection.provider};model={selection.model_id};role={selection.role}",
         )
         self._telemetry.record_async(event)
 
@@ -621,7 +708,7 @@ class Executor:
             error_type = primary.error_type if (primary and primary.error_type) else "all_candidates_exhausted"
         else:
             final_text = next(
-                (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "refiner", "reviser")),
+                (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "fallback", "refiner", "reviser")),
                 "",
             )
             if gathered and gathered.web_items and "References:" not in final_text:

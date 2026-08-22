@@ -72,8 +72,13 @@ def find_benchmark_entry(model_name: str, is_local: bool = False) -> Optional[di
     return None
 
 
+_NON_TEXT_MARKERS = ("flux", "sdxl", "stable-diffusion", "bge-", "embedding", "whisper", "tts", "dall-e")
+
+
 def infer_tier_eligibility(model_name: str, parameter_size: Optional[str] = None, is_local: bool = False) -> list[int]:
     lowered = model_name.lower()
+    if any(marker in lowered for marker in _NON_TEXT_MARKERS):
+        return []
 
     if is_local:
         bm_entry = find_benchmark_entry(model_name, is_local=True)

@@ -8,6 +8,36 @@ from lib.core.settings import Settings, get_settings
 
 
 @dataclass(frozen=True)
+class CapabilitiesConfig:
+    memory: bool = False
+    tasks: bool = False
+    thinking: bool = False
+    web: bool = False
+    temporary: bool = False
+
+    def to_dict(self) -> Dict[str, bool]:
+        return {
+            "memory": self.memory,
+            "tasks": self.tasks,
+            "thinking": self.thinking,
+            "web": self.web,
+            "temporary": self.temporary,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> CapabilitiesConfig:
+        if not data:
+            return cls()
+        return cls(
+            memory=bool(data.get("memory", False)),
+            tasks=bool(data.get("tasks", False)),
+            thinking=bool(data.get("thinking", False)),
+            web=bool(data.get("web", False)),
+            temporary=bool(data.get("temporary", False)),
+        )
+
+
+@dataclass(frozen=True)
 class RuntimeCapabilities:
     profile: str
     core_orchestration: bool = True

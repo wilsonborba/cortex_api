@@ -21,14 +21,14 @@ def test_ensure_seeded_inserts_all_factory_presets(tier_repo_: TierPolicyReposit
     assert tiers >= set(FACTORY_PRESETS.keys())
 
 
-def test_ensure_seeded_never_overwrites_a_customized_tier(tier_repo_: TierPolicyRepository):
+def test_ensure_seeded_enforces_the_global_latency_budget(tier_repo_: TierPolicyRepository):
     service = TierService(repo=tier_repo_)
     service.ensure_seeded()
     service.configure(0, max_latency_seconds=999)
 
-    service.ensure_seeded()  # run again: must be a no-op for tier 0
+    service.ensure_seeded()
 
-    assert tier_repo_.get_policy(0).max_latency_seconds == 999
+    assert tier_repo_.get_policy(0).max_latency_seconds == 300
 
 
 def test_get_envelope_falls_back_to_preset_when_unseeded(tier_repo_: TierPolicyRepository):

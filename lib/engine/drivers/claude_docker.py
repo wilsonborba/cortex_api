@@ -13,7 +13,7 @@ class ClaudeDockerDriver:
 
     def __init__(
         self,
-        command: str = "claude-docker",
+        command: str = "claude",
         timeout: float = 180.0,
         runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
     ) -> None:

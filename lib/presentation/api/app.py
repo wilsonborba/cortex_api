@@ -280,3 +280,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(system.router)
 
     return app
+
+
+app = create_app()

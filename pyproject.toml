@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-model AI orchestration system: dynamic effort tiers, quota tracking, and evidence-based routing."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -45,6 +45,7 @@ cortex-api = "lib.entrypoints:api_entrypoint"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

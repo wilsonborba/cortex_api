@@ -101,6 +101,10 @@ class TelemetryEvent(Base, TimestampMixin):
     # web/memory context at all. Feeds issue #15's evaluation algorithm.
     context_format: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     context_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    phase: Mapped[str] = mapped_column(String(32), nullable=False, default="model", index=True)
+    attempt_index: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    deadline_remaining_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    audit_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         Index("idx_telemetry_strategy", "strategy_id", "task_type", "success"),

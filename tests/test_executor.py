@@ -197,6 +197,24 @@ async def test_single_step_success(quota_tracker_, telemetry_, telemetry_repo_):
 
 
 @pytest.mark.asyncio
+async def test_ordered_cascade_stops_at_first_success_without_rerouting(quota_tracker_, telemetry_, telemetry_repo_):
+    first = _ScriptedDriver([_failure("http_error")])
+    second = _ScriptedDriver([_success("fallback answer")])
+    executor = _executor({"first": first, "second": second}, quota_tracker_, telemetry_, max_retries=0)
+    plan = _plan([
+        ModelSelection(model_id="first/model", provider="first", role="primary"),
+        ModelSelection(model_id="second/model", provider="second", role="fallback"),
+    ])
+
+    result = await _run_and_flush(executor, plan, telemetry_repo_)
+
+    assert result.success is True
+    assert result.response_text == "fallback answer"
+    assert len(first.calls) == 1
+    assert len(second.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_unresolved_strategy_plan_raises(quota_tracker_, telemetry_):
     executor = _executor({}, quota_tracker_, telemetry_)
     plan = _plan([])

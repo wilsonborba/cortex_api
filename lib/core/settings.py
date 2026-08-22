@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         default="http://localhost:8001",
         validation_alias=AliasChoices("CORTEX_HIPPOCAMPUS_URL", "HIPPOCAMPUS_URL"),
     )
+    max_provider_candidates: int = Field(
+        default=5,
+        validation_alias=AliasChoices("CORTEX_MAX_PROVIDER_CANDIDATES", "MAX_PROVIDER_CANDIDATES"),
+    )
 
     # Logging
     log_level: str = Field(
@@ -100,8 +104,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_DISABLED_PROVIDERS", "DISABLED_PROVIDERS"),
     )
     driver_timeout_seconds: float = Field(
-        default=180.0,
+        default=300.0,
         validation_alias=AliasChoices("CORTEX_DRIVER_TIMEOUT_SECONDS", "DRIVER_TIMEOUT_SECONDS"),
+    )
+    thinking_timeout_seconds: int = Field(
+        default=600,
+        validation_alias=AliasChoices("CORTEX_THINKING_TIMEOUT_SECONDS", "THINKING_TIMEOUT_SECONDS"),
     )
 
     # Quota Tracker: sliding window token budget
