@@ -15,6 +15,11 @@
 - Restore verifiable security and tier contracts
 
 
+### Documentation
+
+- Update changelog for runtime contract fix
+
+
 ### Features
 
 - Implement execution trace logging with auto-rotation in DAL
@@ -41,6 +46,8 @@
 
 - Update all Tier preset policies (Tiers 0-5) to 180s max_latency_seconds budget
 
+- Add structured execution audit fields
+
 
 ### Refactoring
 
@@ -52,6 +59,11 @@
 - Enhance test_tiers.py with capabilities, Hippocampus, plane-slim and security tests
 
 - Update API HTTP client timeout to 180s (3 minutes)
+
+
+### merge
+
+- Integrate runtime contract fix (#57)
 
 
 ### security
