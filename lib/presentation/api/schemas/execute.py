@@ -8,6 +8,14 @@ from lib.engine.executor import ExecutionResult, StepResult
 from lib.presentation.api.schemas.attachments import Attachment
 
 
+class CapabilitySchema(BaseModel):
+    memory: bool = False
+    tasks: bool = False
+    thinking: bool = False
+    web: bool = False
+    temporary: bool = False
+
+
 class ExecuteRequest(BaseModel):
     prompt: str
     tier: Optional[Union[int, str]] = Field(default=None, description="0-5, 'auto', or omitted for auto")
@@ -16,6 +24,7 @@ class ExecuteRequest(BaseModel):
     thinking: bool = False
     needs_web: bool = False
     use_memory: bool = False
+    capabilities: CapabilitySchema = Field(default_factory=CapabilitySchema)
     auto_retrieval: bool = False
     memory_topic: Optional[str] = None
     force_model: Optional[str] = None
