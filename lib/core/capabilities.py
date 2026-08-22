@@ -93,7 +93,7 @@ def detect_runtime_capabilities(settings: Optional[Settings] = None) -> RuntimeC
     local_whisper = False
     if settings.whisper_local_enabled:
         try:
-            import pywhispercpp  # noqa: F401
+            import faster_whisper  # noqa: F401
             local_whisper = True
         except ImportError:
             local_whisper = False
@@ -116,7 +116,7 @@ def detect_runtime_capabilities(settings: Optional[Settings] = None) -> RuntimeC
 
     missing: List[str] = []
     if not local_whisper:
-        missing.append("local_whisper (pywhispercpp not installed)")
+        missing.append("local_whisper (faster-whisper not installed)")
     if not cloud_transcription:
         missing.append("cloud_transcription (CORTEX_GROQ_API_KEY not set)")
     if not has_ffmpeg:
