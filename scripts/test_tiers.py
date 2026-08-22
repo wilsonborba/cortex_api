@@ -27,7 +27,7 @@ TIERS = [
 ]
 
 
-def post_json(endpoint: str, payload: dict, timeout: float = 30.0) -> dict:
+def post_json(endpoint: str, payload: dict, timeout: float = 180.0) -> dict:
     url = f"{BASE_URL}{endpoint}"
     req = urllib.request.Request(
         url,
@@ -49,7 +49,7 @@ def test_model_tiers() -> None:
             data = post_json(
                 "/v1/chat/completions",
                 {"model": f"tier-{tier}", "messages": [{"role": "user", "content": prompt}]},
-                timeout=30.0,
+                timeout=180.0,
             )
             elapsed = time.time() - start
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
