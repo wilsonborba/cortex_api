@@ -87,20 +87,17 @@ class HippocampusClient:
         # only send the header when a key is actually configured here.
         return {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
 
-    async def search_memory(self, topic: str, query: str, limit: int = 5) -> List[MemoryChunk]:
-        """`POST /api/v1/recall`: `topic` (if given) is sent as a tag
-        filter, not a real hippocampus field -- kept as this method's
-        parameter name for call-site compatibility (#9/#16 call this
-        positionally). The response is hippocampus's `DataResponse`
-        envelope wrapping a list of `{memory, score, signals,
-        match_reasons}`; only `memory.content` (falling back to `summary`
-        then `title`) and `score` are used here.
-        """
+    async def search_memory(
+        self, topic: str, query: str, limit: int = 5, tenant_id: Optional[str] = None
+    ) -> List[MemoryChunk]:
+        tags = [topic] if topic else []
+        if tenant_id:
+            tags.append(f"tenant:{tenant_id}")
         try:
             async with self._client_factory() as client:
                 response = await client.post(
                     f"{self._base_url}/api/v1/recall",
-                    json={"query": query, "tags": [topic] if topic else [], "limit": limit},
+                    json={"query": query, "tags": tags, "limit": limit},
                     headers=self._headers(),
                 )
                 response.raise_for_status()
@@ -128,21 +125,17 @@ class HippocampusClient:
         return chunks
 
     async def store_event(
-        self, topic: str, key: str, value: Any, ttl_seconds: Optional[int] = None
+        self, topic: str, key: str, value: Any, ttl_seconds: Optional[int] = None, tenant_id: Optional[str] = None
     ) -> bool:
-        """`POST /api/v1/memories`: hippocampus has no raw key/event write
-        endpoint (`GET .../events` is a read-only, server-derived audit
-        trail, not something a client posts to) -- this creates a memory
-        instead. `topic` becomes a tag, `key` becomes the title (also kept
-        in metadata), `value` becomes the content (JSON-encoded unless
-        already a string), `ttl_seconds` becomes `expires_at`.
-        """
         content = value if isinstance(value, str) else json.dumps(value, default=str)
+        tags = [topic] if topic else []
+        if tenant_id:
+            tags.append(f"tenant:{tenant_id}")
         body: Dict[str, Any] = {
             "content": content,
             "title": key,
-            "tags": [topic] if topic else [],
-            "metadata": {"key": key},
+            "tags": tags,
+            "metadata": {"key": key, "tenant_id": tenant_id},
         }
         if ttl_seconds is not None:
             body["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
