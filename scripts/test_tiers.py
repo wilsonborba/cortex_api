@@ -213,14 +213,16 @@ def test_hippocampus_end_to_end() -> None:
     test_topic = "e2e_architecture_test"
     stored_nodes = []
 
-    # Prepare real PDF and WAV text extractions
+    # Prepare real PDF and WAV text extractions (synthesized & downloaded external audio)
     pdf_text = extract_pdf_text_sample("test_assets/architecture_spec.pdf")
-    audio_transcript = transcribe_audio_whisper_local("test_assets/meeting_audio.wav")
+    audio_transcript_pt = transcribe_audio_whisper_local("test_assets/meeting_audio.wav")
+    audio_transcript_ext = transcribe_audio_whisper_local("test_assets/downloaded_meeting_sample.wav")
 
     files_to_ingest = [
         ("cortex_db_choice", "Text Fact: Cortex usa SQLite local para DAL de logs e PostgreSQL para produção multi-tenant.", "text_fact", "inline"),
         ("architecture_spec.pdf", f"PDF Content: {pdf_text}", "document_pdf", "test_assets/architecture_spec.pdf"),
-        ("meeting_audio.wav", f"Audio Transcript: {audio_transcript}", "audio_transcript", "test_assets/meeting_audio.wav"),
+        ("meeting_audio.wav", f"Audio Transcript (PT): {audio_transcript_pt}", "audio_transcript", "test_assets/meeting_audio.wav"),
+        ("downloaded_meeting_sample.wav", f"Audio Transcript (Downloaded): {audio_transcript_ext}", "audio_transcript", "test_assets/downloaded_meeting_sample.wav"),
     ]
 
     try:
