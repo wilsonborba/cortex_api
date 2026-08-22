@@ -28,7 +28,7 @@ def pytest_configure(config) -> None:
     # 2. Strict Safety Guardrail: Inspect engine database URL
     test_engine = get_engine(f"sqlite:///{_TEST_DB_PATH}")
     db_url = str(test_engine.url)
-    if "var/cortex.db" in db_url or "test" not in db_url.lower():
+    if "lib/dal/var/cortex.db" in db_url or "test" not in db_url.lower():
         raise RuntimeError(
             f"Refusing to run tests against {db_url!r}: it looks like the real database, "
             "not an isolated test database. Guardrail aborted test execution."

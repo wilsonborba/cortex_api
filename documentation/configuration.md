@@ -68,7 +68,6 @@ These may belong in `.env` because they depend on the local machine or user acco
 | `CORTEX_CLAUDE_COMMAND` | `claude` |
 | `CORTEX_CODEX_COMMAND` | `codex` |
 | `CORTEX_DISABLED_PROVIDERS` | `[]` |
-| `CORTEX_CALIBRATION_JUDGE_COMMANDS` | `{}` |
 
 Only override them when your installation differs from the standard defaults or PATH lookup.
 
@@ -117,20 +116,5 @@ else:
 ```
 
 The background service and standalone launcher both resolve host and port through `Settings`, so runtime behavior matches the same default-plus-override architecture used by the application itself.
-
-
-## 5. Calibration Overrides
-
-These are optional and usually do not need to be set:
-
-| Environment Variable | Built-in Default | Purpose |
-| :--- | :--- | :--- |
-| `CORTEX_CALIBRATION_CANONICAL_DB_PATH` | `var/canonical_calibration.db` | Read-only distributed baseline path. |
-| `CORTEX_CALIBRATION_PERSONAL_DB_PATH` | `var/personal_calibration.db` | Local writable override produced by calibration runs. |
-| `CORTEX_CALIBRATION_MAX_MODELS_PER_TIER` | `0` | `0` means test every eligible model in each tier; positive values cap candidates per tier. |
-| `CORTEX_CALIBRATION_JUDGE_TIMEOUT_SECONDS` | `180` | Timeout for judge CLI evaluation calls. |
-| `CORTEX_DISABLED_PROVIDERS` | `[]` | Disable providers from normal discovery/execution while leaving calibration judges configurable separately. |
-| `CORTEX_CALIBRATION_JUDGE_COMMANDS` | `{}` | Optional JSON map of calibration-only custom judges, keyed by `family:alias`. |
-| `CORTEX_CALIBRATION_DISABLED_JUDGE_IDS` | `[]` | Disable default or custom judge ids, e.g. `claude` or `claude:docker`. |
 
 Routing weights now default to a quality-dominant balance so slower but materially better models are less likely to be dominated by merely fast ones.

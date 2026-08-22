@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from lib.core.settings import Settings, get_settings
-from lib.engine.calibration import CalibrationResolver
 from lib.dal.models import ModelCatalogEntry
 from lib.dal.repositories.telemetry_repository import TelemetryRepository
 from lib.engine.quota import QuotaTracker
@@ -45,13 +44,11 @@ class ModelScorer:
         telemetry_repo: Optional[TelemetryRepository] = None,
         weights: Optional[ScoringWeights] = None,
         cost_ceiling: float = 20.0,
-        calibration_resolver: Optional[CalibrationResolver] = None,
     ) -> None:
         self._quota_tracker = quota_tracker
         self._telemetry_repo = telemetry_repo or TelemetryRepository()
         self._weights = weights or ScoringWeights()
         self._cost_ceiling = cost_ceiling
-        self._calibration_resolver = calibration_resolver or CalibrationResolver()
 
     def score(
         self,
@@ -61,10 +58,6 @@ class ModelScorer:
         requested_tier: Optional[int] = None,
     ) -> ModelScore:
         capability = self._capability(model, task_type)
-        if requested_tier is not None:
-            calibrated_quality = self._calibration_resolver.get_quality(model.id, requested_tier)
-            if calibrated_quality is not None:
-                capability = calibrated_quality
         quota_factor = self._quota_tracker.get_quota(model.provider).quota_factor
         latency_norm = self._latency_norm(model, max_latency_seconds)
         cost_norm = self._cost_norm(model)
@@ -136,5 +129,4 @@ def build_default_scorer(
         quota_tracker=quota_tracker or QuotaTracker(settings=settings),
         weights=weights,
         cost_ceiling=settings.routing_cost_ceiling_usd_per_million,
-        calibration_resolver=CalibrationResolver(settings=settings),
     )

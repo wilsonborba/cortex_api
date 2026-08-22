@@ -1,6 +1,8 @@
-from __future__ import annotations
-
+import json
 import re
+import sqlite3
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Optional
 
 
@@ -15,11 +17,69 @@ _HIGH_TIER_MARKERS = (
 _VISION_MARKERS = ("vision", "vl", "llava")
 _CODING_MARKERS = ("coder", "codex", "code", "devstral")
 
+BENCHMARK_DB_PATH = Path(__file__).resolve().parent.parent.parent / "dal" / "seeds" / "model_tier_benchmark.db"
+
+
+@lru_cache(maxsize=1)
+def load_benchmark_catalog() -> dict[str, Any]:
+    if not BENCHMARK_DB_PATH.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(str(BENCHMARK_DB_PATH))
+        cursor = conn.cursor()
+        cursor.execute("SELECT model_key, display_name, elo, tier_eligibility_json, capabilities_json, is_local FROM model_benchmarks")
+        rows = cursor.fetchall()
+        conn.close()
+
+        catalog: dict[str, Any] = {}
+        for row in rows:
+            model_key, display_name, elo, tier_json, cap_json, is_local = row
+            catalog[model_key] = {
+                "display_name": display_name,
+                "elo": elo,
+                "tier_eligibility": json.loads(tier_json) if tier_json else [],
+                "capabilities": json.loads(cap_json) if cap_json else {},
+                "is_local": bool(is_local),
+            }
+        return catalog
+    except Exception:
+        return {}
+
+
+def find_benchmark_entry(model_name: str, is_local: bool = False) -> Optional[dict[str, Any]]:
+    catalog = load_benchmark_catalog()
+    if not catalog:
+        return None
+    lowered = model_name.lower().strip()
+
+    # Exact match first
+    if lowered in catalog:
+        entry = catalog[lowered]
+        if not is_local or entry.get("is_local"):
+            return entry
+
+    if is_local:
+        # Local models use parameter-size heuristics unless explicitly registered with exact key
+        return None
+
+    # Substring / key containment match for cloud models
+    for key, data in catalog.items():
+        if data.get("is_local"):
+            continue
+        key_lowered = key.lower()
+        if key_lowered == lowered or key_lowered in lowered or lowered in key_lowered:
+            return data
+    return None
+
 
 def infer_tier_eligibility(model_name: str, parameter_size: Optional[str] = None, is_local: bool = False) -> list[int]:
     lowered = model_name.lower()
 
     if is_local:
+        bm_entry = find_benchmark_entry(model_name, is_local=True)
+        if bm_entry and "tier_eligibility" in bm_entry:
+            return list(bm_entry["tier_eligibility"])
+
         size = _parse_billions(parameter_size or lowered)
         if size is None:
             return [0, 1, 2, 3]
@@ -28,6 +88,10 @@ def infer_tier_eligibility(model_name: str, parameter_size: Optional[str] = None
         if size <= 20:
             return [1, 2, 3, 4]
         return [2, 3, 4, 5]
+
+    bm_entry = find_benchmark_entry(model_name, is_local=False)
+    if bm_entry and "tier_eligibility" in bm_entry:
+        return list(bm_entry["tier_eligibility"])
 
     if any(marker in lowered for marker in _HIGH_TIER_MARKERS):
         return [3, 4, 5]
@@ -39,6 +103,10 @@ def infer_tier_eligibility(model_name: str, parameter_size: Optional[str] = None
 
 
 def infer_capabilities(model_name: str, parameter_size: Optional[str] = None) -> dict[str, Any]:
+    bm_entry = find_benchmark_entry(model_name, is_local=False)
+    if bm_entry and "capabilities" in bm_entry:
+        return dict(bm_entry["capabilities"])
+
     lowered = model_name.lower()
     tiers = infer_tier_eligibility(model_name, parameter_size=parameter_size, is_local=False)
     max_tier = max(tiers) if tiers else 3

@@ -328,7 +328,8 @@ install_project_dependencies() {
 }
 
 configure_environment() {
-  mkdir -p "$ROOT_DIR/var"
+  mkdir -p "$ROOT_DIR/var" "$ROOT_DIR/lib/dal/var" "$ROOT_DIR/lib/dal/seeds"
+  chown -R "$(service_account_user):$(service_account_group)" "$ROOT_DIR/var" "$ROOT_DIR/lib/dal/var" "$ROOT_DIR/lib/dal/seeds" 2>/dev/null || true
 
   if [ "$HOST_WAS_EXPLICIT" != "true" ] && env_has_key CORTEX_API_HOST; then
     DEFAULT_HOST=$(env_value CORTEX_API_HOST "$DEFAULT_HOST")
@@ -569,114 +570,6 @@ else:
 JSONPY
 }
 
-show_calibration_status() {
-  if [ ! -x "$VENV_DIR/bin/cortex" ]; then
-    return
-  fi
-  local status_json
-  status_json=$($VENV_DIR/bin/cortex --json calibration status 2>/dev/null || true)
-  if [ -z "$status_json" ]; then
-    return
-  fi
-  local source path updated best
-  source=$(printf '%s' "$status_json" | json_field source)
-  path=$(printf '%s' "$status_json" | json_field path)
-  updated=$(printf '%s' "$status_json" | json_field updated_at)
-  best=$(printf '%s' "$status_json" | json_field best_models_by_tier)
-  log_info "Calibration source: ${source:-default}"
-  [ -n "$path" ] && log_info "Calibration DB: $path"
-  [ -n "$updated" ] && log_info "Calibration updated at: $updated"
-  [ -n "$best" ] && log_info "Best models by tier: $best"
-}
-
-maybe_run_calibration() {
-  show_calibration_status
-
-  if [ "$SELECTED_PROFILE" = "light" ]; then
-    log_info "Light profile never runs calibration; using Personal > Canonical > Default resolution only."
-    return
-  fi
-
-  if [ ! -x "$VENV_DIR/bin/cortex" ]; then
-    log_warn "Calibration CLI is unavailable; skipping optional calibration."
-    return
-  fi
-
-  local judges_json available_count available_names ranking_depth
-  judges_json=$($VENV_DIR/bin/cortex --json calibration judges 2>/dev/null || true)
-  if [ -z "$judges_json" ]; then
-    log_info "No calibration judges detected; continuing with existing baseline or default selection."
-    return
-  fi
-
-  if [ "$NON_INTERACTIVE" != "true" ]; then
-    read -r -p " Show current calibration ranking depth [3/5/10, default 3]: " ranking_depth || ranking_depth=""
-    case "$ranking_depth" in
-      5|10) ranking_depth=${ranking_depth:-3} ;;
-      3|"") ranking_depth=${ranking_depth:-3} ;;
-      *) ranking_depth=3 ;;
-    esac
-    "$VENV_DIR/bin/cortex" calibration status --top "$ranking_depth" || true
-  fi
-
-  available_count=$(JUDGES_JSON="$judges_json" python3 - <<'COUNTJSON'
-import json, os
-items = json.loads(os.environ.get('JUDGES_JSON', '[]') or '[]')
-print(sum(1 for item in items if item.get('available')))
-COUNTJSON
-)
-  available_names=$(JUDGES_JSON="$judges_json" python3 - <<'NAMESJSON'
-import json, os
-items = json.loads(os.environ.get('JUDGES_JSON', '[]') or '[]')
-print(','.join(item['id'] for item in items if item.get('available')))
-NAMESJSON
-)
-
-  if [ "${available_count:-0}" -eq 0 ]; then
-    log_info "No calibration judges detected; continuing with existing baseline or default selection."
-    "$VENV_DIR/bin/cortex" calibration judges || true
-    return
-  fi
-
-  log_info "Optional personal calibration is available with judges: ${available_names}."
-  printf " Calibration notes:
-"
-  printf "   - Uses real model calls plus judge evaluation; token/quota usage may apply.
-"
-  printf "   - Writes only personal_calibration.db; canonical_calibration.db stays unchanged.
-"
-  printf "   - progress bar shows model/task/judge stage, completed steps, and elapsed time.
-"
-
-  if [ "$NON_INTERACTIVE" = "true" ]; then
-    log_info "Non-interactive install skips optional calibration by default."
-    return
-  fi
-
-  local run_choice judge_choice
-  read -r -p " Run optional model calibration now? [y/N]: " run_choice || run_choice=""
-  case "$run_choice" in
-    y|Y|yes|YES)
-      ;;
-    *)
-      log_info "Skipping optional calibration."
-      return
-      ;;
-  esac
-
-  if [ "$available_count" -gt 1 ]; then
-    read -r -p " Judges to use [all or comma-separated from ${available_names}]: " judge_choice || judge_choice=""
-  else
-    judge_choice="$available_names"
-  fi
-  judge_choice=${judge_choice:-all}
-
-  log_info "Starting calibration with progress reporting..."
-  log_info "Installer command: cortex calibration run --profile <profile> --judges <selection>"
-  "$VENV_DIR/bin/cortex" calibration run --profile "$SELECTED_PROFILE" --judges "$judge_choice"
-  show_calibration_status
-}
-
 run_healthcheck() {
   if [ "$SKIP_HEALTHCHECK" = "true" ]; then
     return
@@ -718,7 +611,6 @@ main() {
   install_project_dependencies
   configure_environment
   initialize_database
-  maybe_run_calibration
 
   if [ "$INSTALL_SERVICE" = "true" ]; then
     local kernel

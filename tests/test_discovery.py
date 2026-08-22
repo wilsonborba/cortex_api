@@ -180,14 +180,14 @@ def test_claude_docker_discovery_offline_without_credentials(tmp_path: Path):
 # --- CodexDiscovery ------------------------------------------------------------
 
 
-def test_codex_discovery_requires_subscription_for_chatgpt_auth(tmp_path: Path):
+def test_codex_discovery_available_for_chatgpt_auth(tmp_path: Path):
     auth = tmp_path / "auth.json"
     auth.write_text(json.dumps({"auth_mode": "chatgpt"}), encoding="utf-8")
 
     models = CodexDiscovery(auth_path=auth).discover()
 
     assert len(models) >= 1
-    assert all(m.access_status == AccessStatus.REQUIRES_SUBSCRIPTION.value for m in models)
+    assert all(m.access_status == AccessStatus.AVAILABLE.value for m in models)
 
 
 def test_codex_discovery_available_for_apikey_auth(tmp_path: Path):
@@ -205,3 +205,14 @@ def test_codex_discovery_offline_without_auth_file(tmp_path: Path):
     models = CodexDiscovery(auth_path=missing).discover()
 
     assert all(m.access_status == AccessStatus.OFFLINE.value for m in models)
+
+
+def test_static_benchmark_seed_heuristics():
+    from lib.engine.discovery.heuristics import infer_capabilities, infer_tier_eligibility
+
+    tiers = infer_tier_eligibility("gpt-5.4")
+    caps = infer_capabilities("gpt-5.4")
+
+    assert tiers == [4, 5]
+    assert caps["general"] >= 0.90
+    assert caps["reasoning"] >= 0.90

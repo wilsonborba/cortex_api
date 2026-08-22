@@ -48,6 +48,26 @@ logger = get_logger(__name__)
 # Worth one quick retry: plumbing hiccups, not "this will never work".
 _RETRYABLE_ERRORS = {"unreachable", "http_error", "cli_error"}
 
+TERMINAL_FALLBACK_MESSAGE = (
+    "Sorry, we can't respond to your request right now. Our service is currently at capacity. Please try again in a few minutes."
+)
+
+
+def format_web_references(web_items: List[Dict[str, Any]]) -> str:
+    if not web_items:
+        return ""
+    seen_urls = set()
+    refs = []
+    for item in web_items:
+        url = item.get("url")
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            refs.append(url)
+    if not refs:
+        return ""
+    ref_lines = [f"{i+1}. {url}" for i, url in enumerate(refs)]
+    return "\n\nReferences:\n" + "\n".join(ref_lines)
+
 # Issue #20: the critic's first non-empty line must be exactly this, so a
 # revision decision never depends on inferring "quality" from free text.
 _VERDICT_LINE_RE = re.compile(r"^VERDICT:\s*(OK|NEEDS_REVISION)\s*$", re.IGNORECASE)
@@ -361,25 +381,17 @@ class Executor:
                     )
                 continue
 
-            if selection.role != "primary":
-                continue
-            if step.success:
-                continue
-
-            # Primary failed (possibly after the JSON fallback above):
-            # refining/critiquing a failure serves no purpose.
-            if step.error_type == "rate_limit":
-                self._quota_tracker.enter_cooldown(selection.model_id, reason=step.error_message)
+            if not step.success:
+                # Step failed (primary, refiner, or critic):
+                # Enter cooldown and attempt rerouting to the next eligible candidate model/provider in this tier.
+                self._quota_tracker.enter_cooldown(selection.model_id, reason=step.error_message or step.error_type)
                 if self._router is not None and reroutes_left > 0:
                     rerouted = self._try_reroute(plan)
                     if rerouted is not None:
-                        # No context_retry passed along: reroute reuses the
-                        # already-assembled prompt as-is rather than
-                        # re-gathering/re-optimizing format for the new model.
                         return await self._execute_plan(rerouted, reroutes_left - 1, images=images)
-            break
+                break
 
-        return self._build_result(plan, request_id, steps)
+        return self._build_result(plan, request_id, steps, gathered=gathered)
 
     async def _run_revision_loop(
         self,
@@ -520,6 +532,12 @@ class Executor:
                 )
                 break
 
+            if result and result.success and not result.response_text.strip():
+                result = DriverResult(
+                    success=False, response_text="", input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                    latency_ms=result.latency_ms, cost_usd=result.cost_usd, error_type="empty_response",
+                    error_message=f"{driver.provider}: step returned empty response text",
+                )
             self._quota_tracker.record_execution(selection.provider, selection.model_id, result)
             if result.success or result.error_type not in _RETRYABLE_ERRORS:
                 break
@@ -589,13 +607,29 @@ class Executor:
         )
         self._telemetry.record_async(event)
 
-    def _build_result(self, plan: ExecutionPlan, request_id: str, steps: List[StepResult]) -> ExecutionResult:
+    def _build_result(
+        self,
+        plan: ExecutionPlan,
+        request_id: str,
+        steps: List[StepResult],
+        gathered: Optional[GatheredContext] = None,
+    ) -> ExecutionResult:
         primary = steps[0] if steps else None
-        success = bool(primary and primary.success)
-        final_text = next(
-            (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "refiner", "reviser")),
-            "",
-        )
+        success = bool(primary and any(s.success for s in steps))
+        if not success:
+            final_text = TERMINAL_FALLBACK_MESSAGE
+            error_type = primary.error_type if (primary and primary.error_type) else "all_candidates_exhausted"
+        else:
+            final_text = next(
+                (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "refiner", "reviser")),
+                "",
+            )
+            if gathered and gathered.web_items and "References:" not in final_text:
+                refs_formatted = format_web_references(gathered.web_items)
+                if refs_formatted:
+                    final_text = final_text.rstrip() + refs_formatted
+            error_type = None
+
         return ExecutionResult(
             request_id=request_id,
             tier_requested=plan.tier,
@@ -609,7 +643,7 @@ class Executor:
             total_output_tokens=sum(s.output_tokens for s in steps),
             total_cost_usd=sum(s.cost_usd for s in steps),
             latency_ms=sum(s.latency_ms for s in steps),
-            error_type=None if success else (primary.error_type if primary else "no_steps_executed"),
+            error_type=error_type,
         )
 
 

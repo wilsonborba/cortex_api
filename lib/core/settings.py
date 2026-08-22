@@ -28,16 +28,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_PROFILE", "PROFILE"),
     )
     database_url: str = Field(
-        default="sqlite:///var/cortex.db",
+        default="sqlite:///lib/dal/var/cortex.db",
         validation_alias=AliasChoices("CORTEX_DATABASE_URL", "DATABASE_URL"),
-    )
-    calibration_canonical_db_path: Path = Field(
-        default=Path("var/canonical_calibration.db"),
-        validation_alias=AliasChoices("CORTEX_CALIBRATION_CANONICAL_DB_PATH"),
-    )
-    calibration_personal_db_path: Path = Field(
-        default=Path("var/personal_calibration.db"),
-        validation_alias=AliasChoices("CORTEX_CALIBRATION_PERSONAL_DB_PATH"),
     )
 
     # Service endpoints
@@ -107,25 +99,9 @@ class Settings(BaseSettings):
         default_factory=list,
         validation_alias=AliasChoices("CORTEX_DISABLED_PROVIDERS", "DISABLED_PROVIDERS"),
     )
-    calibration_judge_commands: Annotated[dict[str, str], NoDecode] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("CORTEX_CALIBRATION_JUDGE_COMMANDS", "CALIBRATION_JUDGE_COMMANDS"),
-    )
-    calibration_disabled_judge_ids: Annotated[list[str], NoDecode] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices("CORTEX_CALIBRATION_DISABLED_JUDGE_IDS", "CALIBRATION_DISABLED_JUDGE_IDS"),
-    )
     driver_timeout_seconds: float = Field(
         default=180.0,
         validation_alias=AliasChoices("CORTEX_DRIVER_TIMEOUT_SECONDS", "DRIVER_TIMEOUT_SECONDS"),
-    )
-    calibration_max_models_per_tier: int = Field(
-        default=0,
-        validation_alias=AliasChoices("CORTEX_CALIBRATION_MAX_MODELS_PER_TIER"),
-    )
-    calibration_judge_timeout_seconds: float = Field(
-        default=180.0,
-        validation_alias=AliasChoices("CORTEX_CALIBRATION_JUDGE_TIMEOUT_SECONDS"),
     )
 
     # Quota Tracker: sliding window token budget
@@ -215,7 +191,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CORTEX_EXECUTOR_MAX_RETRIES", "EXECUTOR_MAX_RETRIES"),
     )
     executor_max_reroutes: int = Field(
-        default=1,
+        default=5,
         validation_alias=AliasChoices("CORTEX_EXECUTOR_MAX_REROUTES", "EXECUTOR_MAX_REROUTES"),
     )
     executor_max_critic_revisions: int = Field(
@@ -326,7 +302,7 @@ class Settings(BaseSettings):
         default=None, validation_alias=AliasChoices("CORTEX_OLLAMA_CLOUD_API_KEY")
     )
 
-    @field_validator("claude_credentials_path", "codex_auth_path", "calibration_canonical_db_path", "calibration_personal_db_path", mode="before")
+    @field_validator("claude_credentials_path", "codex_auth_path", mode="before")
     @classmethod
     def _expand_user_paths(cls, value):
         if value is None:
@@ -353,7 +329,7 @@ class Settings(BaseSettings):
         default=None, validation_alias=AliasChoices("CORTEX_SAMBANOVA_API_KEY")
     )
 
-    @field_validator("disabled_providers", "calibration_disabled_judge_ids", mode="before")
+    @field_validator("disabled_providers", mode="before")
     @classmethod
     def _parse_string_lists(cls, value):
         if value is None or value == "":
@@ -367,32 +343,6 @@ class Settings(BaseSettings):
             parsed = json.loads(text)
             return [str(item).strip().lower() for item in parsed if str(item).strip()]
         return [item.strip().lower() for item in text.split(",") if item.strip()]
-
-    @field_validator("calibration_judge_commands", mode="before")
-    @classmethod
-    def _parse_judge_command_map(cls, value):
-        if value is None or value == "":
-            return {}
-        if isinstance(value, dict):
-            return {
-                str(key).strip().lower(): cls._normalize_command_value(item)
-                for key, item in value.items()
-                if str(item).strip()
-            }
-        text = str(value).strip()
-        if not text:
-            return {}
-        parsed = json.loads(text)
-        return {
-            str(key).strip().lower(): cls._normalize_command_value(item)
-            for key, item in parsed.items()
-            if str(item).strip()
-        }
-
-    @staticmethod
-    def _normalize_command_value(value: object) -> str:
-        text = str(value).strip()
-        return str(Path(text).expanduser()) if text.startswith("~") else text
 
 
 

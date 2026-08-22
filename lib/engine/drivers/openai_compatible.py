@@ -60,10 +60,14 @@ class OpenAICompatibleDriver:
         latency_ms = int((time.monotonic() - started) * 1000)
         choices = data.get("choices") or []
         message = (choices[0].get("message") or {}) if choices else {}
+        text = message.get("content") or ""
+        if not text.strip():
+            return failed("empty_response", f"{self.provider}: returned empty response text")
+
         usage = data.get("usage") or {}
         return DriverResult(
             success=True,
-            response_text=message.get("content") or "",
+            response_text=text,
             input_tokens=int(usage.get("prompt_tokens", 0) or 0),
             output_tokens=int(usage.get("completion_tokens", 0) or 0),
             latency_ms=latency_ms,

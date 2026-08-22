@@ -13,7 +13,7 @@ def test_default_settings(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     settings = Settings()
     assert settings.environment == "development"
-    assert settings.database_url == "sqlite:///var/cortex.db"
+    assert settings.database_url == "sqlite:///lib/dal/var/cortex.db"
     assert settings.ollama_base_url == "http://localhost:11434"
     assert settings.hippocampus_url == "http://localhost:8001"
     assert settings.log_level == "INFO"
@@ -67,16 +67,9 @@ def test_settings_support_binary_alias_envs_and_expand_user_paths(monkeypatch):
     assert settings.codex_auth_path == Path("~/.codex/auth.json").expanduser()
 
 
-def test_settings_parse_judge_command_map_and_disabled_lists():
+def test_settings_parse_disabled_providers_list():
     settings = Settings(
         disabled_providers="claude,codex",
-        calibration_judge_commands='{"agy:work":"/opt/agy-work","claude:service":"~/bin/claude-service"}',
-        calibration_disabled_judge_ids="claude,claude:docker",
     )
 
     assert settings.disabled_providers == ["claude", "codex"]
-    assert settings.calibration_judge_commands == {
-        "agy:work": "/opt/agy-work",
-        "claude:service": str(Path("~/bin/claude-service").expanduser()),
-    }
-    assert settings.calibration_disabled_judge_ids == ["claude", "claude:docker"]

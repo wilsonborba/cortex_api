@@ -368,7 +368,7 @@ def test_build_default_registry_service_skips_disabled_standard_providers():
     assert "agy" in providers
 
 
-def test_build_default_registry_service_can_ignore_disabled_providers_for_calibration():
+def test_build_default_registry_service_can_ignore_disabled_providers():
     settings = Settings(disabled_providers=["claude", "codex"])
 
     service = build_default_registry_service(settings=settings, respect_disabled_providers=False)

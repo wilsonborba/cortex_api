@@ -55,8 +55,8 @@ class CodexDiscovery:
             return AccessStatus.OFFLINE.value, reason
         if auth_mode == "chatgpt":
             return (
-                AccessStatus.REQUIRES_SUBSCRIPTION.value,
-                "Logged in via ChatGPT; access depends on plan entitlements",
+                AccessStatus.AVAILABLE.value,
+                "Logged in via ChatGPT subscription",
             )
         return AccessStatus.AVAILABLE.value, reason
 

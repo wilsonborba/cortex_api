@@ -227,9 +227,16 @@ class Router:
         model_id: Optional[str] = None,
     ) -> List[ModelCatalogEntry]:
         models = self._registry.list_available_for_router(tier=tier)
+        if not models and envelope.allow_external and not provider and not model_id:
+            # Fallback expansion to adjacent tiers if all primary tier candidates are in cooldown/unavailable
+            for delta in (-1, +1, -2, +2):
+                adj_tier = tier + delta
+                if 0 <= adj_tier <= 5:
+                    models = self._registry.list_available_for_router(tier=adj_tier)
+                    if models:
+                        break
+
         if envelope.allowed_models is not None:
-            # Layer 2 restriction: `[]` deliberately means "nothing is eligible
-            # right now", distinct from `None` (unset -> no restriction).
             allowed = set(envelope.allowed_models)
             models = [m for m in models if m.id in allowed]
         if not envelope.allow_external:

@@ -21,7 +21,7 @@ from lib.presentation.api.deps import (
 )
 from lib.presentation.api.schemas.execute import ExecuteResponse
 from lib.presentation.api.schemas.quota import QuotaOut
-from lib.presentation.cli import calibration_cmd, models_cmd, pins_cmd, telemetry_cmd, tiers_cmd
+from lib.presentation.cli import models_cmd, pins_cmd, telemetry_cmd, tiers_cmd
 from lib.presentation.cli.output import CliState, console, emit, error_exit, print_table
 
 logger = get_logger(__name__)
@@ -35,7 +35,6 @@ app.add_typer(models_cmd.app, name="models")
 app.add_typer(tiers_cmd.app, name="tiers")
 app.add_typer(pins_cmd.app, name="pin")
 app.add_typer(telemetry_cmd.app, name="telemetry")
-app.add_typer(calibration_cmd.app, name="calibration")
 
 
 def _version() -> str:
@@ -86,6 +85,9 @@ def run(
     context_format: Optional[str] = typer.Option(
         None, "--context-format", help="'toon' or 'json' -- overrides the model's auto/pinned preference for this call"
     ),
+    timeout: Optional[float] = typer.Option(
+        None, "--timeout", "-t", help="Driver timeout in seconds for this execution (default: 180)"
+    ),
 ) -> None:
     if normalize_prompt:
         prompt = get_prompt_normalizer().normalize(prompt).prompt
@@ -98,7 +100,13 @@ def run(
     )
     try:
         plan = get_router().build_execution_plan(routing_request)
-        result = asyncio.run(get_executor().execute(plan))
+        if timeout is not None:
+            from lib.engine.executor import build_default_executor
+            custom_settings = get_settings().model_copy(update={"driver_timeout_seconds": timeout})
+            executor = build_default_executor(settings=custom_settings)
+        else:
+            executor = get_executor()
+        result = asyncio.run(executor.execute(plan))
     except NoEligibleModelError as exc:
         error_exit(str(exc))
         return

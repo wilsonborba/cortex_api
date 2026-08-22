@@ -9,17 +9,18 @@ docs/
 
 # Python
 .venv/
+.venv.old/
 __pycache__/
 *.pyc
 *.egg-info/
 dist/
 build/
+lib/dal/var/*.db
+!lib/dal/var/.gitkeep
 var/*.pid
 var/*.log
 var/*.log.*
 var/*.db
-!var/canonical_calibration.db
-var/personal_calibration.db
 var/whisper-models/
 .pytest_cache/
 .mypy_cache/

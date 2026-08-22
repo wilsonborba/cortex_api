@@ -83,12 +83,3 @@ Cortex supports three runtime profiles to ensure reliable execution across both 
 ./scripts/uninstall.sh
 ./scripts/uninstall.sh --purge-data
 ```
-
-
-## 7. Optional Model Calibration
-
-- `light` never offers calibration and only reads `Personal > Canonical > Default`.
-- `medium` and `complete` inspect existing calibration first, then may offer an opt-in calibration flow.
-- The installer detects supported judges automatically and shows an informative progress bar during calibration.
-- Declining calibration never blocks installation success.
-- Normal calibration writes only `var/personal_calibration.db`.

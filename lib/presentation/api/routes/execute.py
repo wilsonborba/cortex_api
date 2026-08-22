@@ -67,5 +67,10 @@ async def execute(
     # NoEligibleModelError / UnresolvedStrategyError propagate to the
     # app-level exception handlers registered in lib.presentation.api.app.
     plan = router_.build_execution_plan(routing_request)
+    if payload.timeout is not None:
+        from lib.core.settings import get_settings
+        from lib.engine.executor import build_default_executor
+        custom_settings = get_settings().model_copy(update={"driver_timeout_seconds": payload.timeout})
+        executor = build_default_executor(settings=custom_settings)
     result = await executor.execute(plan)
     return ExecuteResponse.from_result(result)

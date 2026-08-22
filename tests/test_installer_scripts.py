@@ -60,11 +60,3 @@ def test_uninstall_script_help():
     )
     assert "Usage:" in result.stdout
     assert "--purge-data" in result.stdout
-
-
-def test_install_script_mentions_optional_calibration_flow():
-    script = (SCRIPTS_DIR / "install.sh").read_text(encoding="utf-8")
-    assert "maybe_run_calibration" in script
-    assert "cortex --json calibration judges" in script
-    assert "cortex calibration run" in script
-    assert "progress bar shows model/task/judge stage" in script

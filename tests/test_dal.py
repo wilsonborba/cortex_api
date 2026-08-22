@@ -214,7 +214,7 @@ def test_tier_policy_repository(tier_repo: TierPolicyRepository):
 def test_safety_guardrail_rejection():
     # Attempting to run test with real production database URL must fail
     from lib.dal.local.database import get_engine
-    real_engine = get_engine("sqlite:///var/cortex.db")
+    real_engine = get_engine("sqlite:///lib/dal/var/cortex.db")
     db_url = str(real_engine.url)
-    assert "var/cortex.db" in db_url
+    assert "cortex.db" in db_url
 

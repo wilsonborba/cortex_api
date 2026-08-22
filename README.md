@@ -177,9 +177,8 @@ The Cortex native REST API listens on `0.0.0.0:8003` by default:
 
 Comprehensive operational and technical guides are available in the [`documentation/`](documentation/) directory:
 
-* 🚀 **[Installation & Profiles Guide](documentation/installation.md):** Hardware profiling, `Light`/`Medium`/`Complete` profiles, Linux/macOS/WSL setup, smart port allocation, and optional install-time calibration.
-* ⚙️ **[Configuration Reference](documentation/configuration.md):** Environment variables, database connection strings, sliding-window quotas, scoring weights, and calibration DB overrides.
-* 🧪 **[Model Auto-Calibration Guide](documentation/calibration.md):** Judge detection, progress reporting, persistence, precedence, reruns, and canonical/personal baseline workflow.
+* 🚀 **[Installation & Profiles Guide](documentation/installation.md):** Hardware profiling, `Light`/`Medium`/`Complete` profiles, Linux/macOS/WSL setup, and smart port allocation.
+* ⚙️ **[Configuration Reference](documentation/configuration.md):** Environment variables, database connection strings, sliding-window quotas, and scoring weights.
 * 🌐 **[AI Providers Setup Guide](documentation/providers.md):** Setup instructions, API key generation links, and `.env` variables for all 14+ AI providers.
 * 🛠️ **[External AI Tools & CLI Setup](documentation/external-tools.md):** Configuration for Codex CLI, Antigravity CLI, Claude Docker, local Ollama, and local Whisper.
 * 🔍 **[Troubleshooting & Diagnostics](documentation/troubleshooting.md):** Solutions for installation errors, missing libraries, port conflicts, and capability degradation.

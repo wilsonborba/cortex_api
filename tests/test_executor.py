@@ -705,3 +705,44 @@ async def test_no_retrieval_requested_leaves_prompt_untouched(quota_tracker_, te
 def test_bare_model_name_strips_provider_prefix():
     assert _bare_model_name("claude/claude-sonnet-5") == "claude-sonnet-5"
     assert _bare_model_name("no-prefix-model") == "no-prefix-model"
+
+
+@pytest.mark.asyncio
+async def test_terminal_fallback_when_all_providers_fail(quota_tracker_, telemetry_):
+    driver = _ScriptedDriver([_failure("http_error", "server error 500")])
+    executor = _executor({"execA": driver}, quota_tracker_, telemetry_)
+    plan = _plan([ModelSelection(model_id="execA/model", provider="execA", role="primary")])
+
+    res = await executor.execute(plan)
+
+    assert not res.success
+    assert res.response_text == "Sorry, we can't respond to your request right now. Our service is currently at capacity. Please try again in a few minutes."
+    assert res.error_type == "http_error"
+    assert len(driver.calls) == 2  # 1 initial call + 1 driver retry, zero secondary LLM models!
+
+
+@pytest.mark.asyncio
+async def test_web_references_appended_when_web_search_used(quota_tracker_, telemetry_):
+    driver = _ScriptedDriver([_success("Synthesized answer based on evidence.")])
+    web = _FakeWebRetrieval("search context markdown", ["https://example.com/doc"])
+    executor = _executor({"execA": driver}, quota_tracker_, telemetry_, web_retrieval=web)
+    plan = _plan([ModelSelection(model_id="execA/model", provider="execA", role="primary")], needs_web=True)
+
+    res = await executor.execute(plan)
+
+    assert res.success
+    assert "Synthesized answer based on evidence." in res.response_text
+    assert "References:" in res.response_text
+    assert "1. https://example.com/doc" in res.response_text
+
+
+@pytest.mark.asyncio
+async def test_web_references_not_appended_when_web_not_used(quota_tracker_, telemetry_):
+    driver = _ScriptedDriver([_success("Synthesized answer without web search.")])
+    executor = _executor({"execA": driver}, quota_tracker_, telemetry_)
+    plan = _plan([ModelSelection(model_id="execA/model", provider="execA", role="primary")], needs_web=False)
+
+    res = await executor.execute(plan)
+
+    assert res.success
+    assert "References:" not in res.response_text

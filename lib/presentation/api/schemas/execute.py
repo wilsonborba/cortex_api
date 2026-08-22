@@ -28,6 +28,9 @@ class ExecuteRequest(BaseModel):
     attachment_job_id: Optional[str] = Field(
         default=None, description="id of a finished /attachments/video job (see #23) whose summary to inject as context"
     )
+    timeout: Optional[float] = Field(
+        default=None, description="Optional driver timeout in seconds for this execution (overrides default)"
+    )
 
 
 class StepOut(BaseModel):
