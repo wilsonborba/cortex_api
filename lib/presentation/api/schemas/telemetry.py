@@ -46,6 +46,10 @@ class TelemetryEventOut(BaseModel):
     success: bool
     error_type: Optional[str] = None
     estimated_cost_usd: float
+    phase: str
+    attempt_index: int
+    deadline_remaining_ms: Optional[int] = None
+    audit_details: Optional[str] = None
 
     @classmethod
     def from_event(cls, event: TelemetryEvent) -> "TelemetryEventOut":
@@ -56,4 +60,6 @@ class TelemetryEventOut(BaseModel):
             output_tokens=event.output_tokens, total_tokens=event.total_tokens, started_at=event.started_at,
             finished_at=event.finished_at, latency_ms=event.latency_ms, success=event.success,
             error_type=event.error_type, estimated_cost_usd=event.estimated_cost_usd,
+            phase=event.phase, attempt_index=event.attempt_index,
+            deadline_remaining_ms=event.deadline_remaining_ms, audit_details=event.audit_details,
         )

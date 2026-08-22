@@ -114,6 +114,28 @@ class ModelRepository:
         with session_scope(self._session_factory) as s:
             return _update(s)
 
+    def set_provider_cooldown(
+        self,
+        provider: str,
+        until: datetime,
+        reason: Optional[str] = None,
+        session: Optional[Session] = None,
+    ) -> List[ModelCatalogEntry]:
+        def _update(s: Session) -> List[ModelCatalogEntry]:
+            stmt = select(ModelCatalogEntry).where(ModelCatalogEntry.provider == provider)
+            entries = list(s.scalars(stmt).all())
+            for m in entries:
+                m.access_status = AccessStatus.COOLING_DOWN.value
+                m.cooldown_until = until
+                if reason is not None:
+                    m.status_reason = reason
+            return entries
+
+        if session:
+            return _update(session)
+        with session_scope(self._session_factory) as s:
+            return _update(s)
+
     def clear_cooldown(
         self, model_id: str, session: Optional[Session] = None
     ) -> Optional[ModelCatalogEntry]:

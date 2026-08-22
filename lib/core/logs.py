@@ -35,6 +35,42 @@ LOG_FILE_MAX_BYTES = 5 * 1024 * 1024
 LOG_FILE_BACKUP_COUNT = 3
 POLL_INTERVAL_SECONDS = 0.3
 
+# DAL Log Storage Location
+DEFAULT_LOG_DIR = Path(__file__).resolve().parent.parent / "dal" / "logs"
+DEFAULT_TRACE_LOG_FILE = DEFAULT_LOG_DIR / "execution_trace.log"
+
+
+def truncate_snippet(text: str | None, max_length: int = 120) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_length:
+        return cleaned
+    return cleaned[: max_length - 3] + "..."
+
+
+def log_execution_trace(
+    logger_instance: logging.Logger,
+    stage: str,
+    message: str,
+    *,
+    level: str = "INFO",
+    origin: str = "API",
+    snippet: str | None = None,
+    location: str | None = None,
+) -> None:
+    trunc = f" | snippet: {truncate_snippet(snippet)}" if snippet else ""
+    loc_str = f" [{location}]" if location else ""
+    formatted_msg = f"[{origin}] [{stage}]{loc_str} {message}{trunc}"
+
+    lvl = level.upper()
+    if lvl == "ERROR":
+        logger_instance.error(formatted_msg)
+    elif lvl == "WARN" or lvl == "WARNING":
+        logger_instance.warning(formatted_msg)
+    else:
+        logger_instance.info(formatted_msg)
+
 
 class StructuredFormatter(logging.Formatter):
     def __init__(self, *, use_color: bool) -> None:

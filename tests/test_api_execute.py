@@ -7,7 +7,7 @@ from lib.core.settings import get_settings
 from lib.engine.executor import ExecutionResult, StepResult, UnresolvedStrategyError
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError, RoutingRequest
 from lib.presentation.api.app import create_app
-from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router
+from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router, get_security_shield
 
 
 def _plan(strategy_id: str = "general_t1_dynamic") -> ExecutionPlan:
@@ -58,6 +58,12 @@ class _FakePromptNormalizer:
         return PromptNormalizationResult(prompt=self._prompt, changed=self._prompt != prompt)
 
 
+class _FakeSecurityShield:
+    def evaluate(self, prompt: str):
+        from lib.core.security import SecurityEvaluation
+        return SecurityEvaluation(risk_flag_detected=False, flags=[], is_blocked=False)
+
+
 def _result(**overrides) -> ExecutionResult:
     defaults = dict(
         request_id="req-api-1", tier_requested=1, tier_executed=1, strategy_id="general_t1_dynamic",
@@ -81,6 +87,7 @@ def app_and_overrides():
         update={"api_sync_models_on_startup": False, "api_background_tasks_enabled": False}
     )
     app = create_app(settings=settings)
+    app.dependency_overrides[get_security_shield] = lambda: _FakeSecurityShield()
     return app
 
 

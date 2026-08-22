@@ -15,7 +15,7 @@ class OllamaDriver:
     def __init__(
         self,
         base_url: str,
-        timeout: float = 180.0,
+        timeout: float = 300.0,
         client_factory: Optional[Callable[[], httpx.Client]] = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
