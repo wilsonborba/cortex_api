@@ -6,31 +6,74 @@
 
 ### Bug Fixes
 
-- Make external CLI binaries explicit and portable
+- Implement instant 2-layer SecurityShield evaluation and instant Proxy Passthrough for memory and tasks
+
+- Remove claude from sidecars and drivers, use agy and codex as active CLI sidecars
+
+- Resolve deadline latency budget exhaustion in executor step fallback and ensure SecurityShield direct return
+
+- Restore verifiable security and tier contracts
+
+- Curate ordered tier cascades
 
 
 ### Documentation
 
-- Update release notes for routing quality improvements
-
-- Update release notes for routing follow-ups
+- Update changelog for runtime contract fix
 
 
 ### Features
 
-- Improve tier quality controls and prompt normalization
+- Implement execution trace logging with auto-rotation in DAL
 
-- Expose quality controls and improve retrieval heuristics
+- Implement granular error taxonomy across drivers and pipeline
+
+- Formalize opt-in capability contract with false defaults
+
+- Implement tenant namespace isolation in HippocampusClient
+
+- Implement plane-slim Task Management integration & PlaneClient
+
+- Implement application tenant isolation boundaries and tenant_id schema
+
+- Implement max_provider_candidates flag, smart fallbacks, dynamic test seed and visual test runner enhancements
+
+- Implement issues #46-#50 (provider cooldown, ollama tier 0 fallback, security shield fix, document ingestion & plane-slim dynamic DB lifecycle)
+
+- Implement issues #51-#55 (passthrough proxy, 2-layer security shield, real PDF/Whisper ingestion, hybrid tag extractor & multi-task loop)
+
+- Replace placeholders with real multi-paragraph PDF and real spoken Portuguese WAV audio file via gTTS and pypdf
+
+- Download external public audio sample from Wikimedia Commons and ingest both audio files in test runner
+
+- Update all Tier preset policies (Tiers 0-5) to 180s max_latency_seconds budget
+
+- Add structured execution audit fields
+
+
+### Refactoring
+
+- Restructure Cortex to align with standard project architecture (lib/domain & lib/dal)
+
+
+### Tests
+
+- Enhance test_tiers.py with capabilities, Hippocampus, plane-slim and security tests
+
+- Update API HTTP client timeout to 180s (3 minutes)
 
 
 ### merge
 
-- Issue #24 routing quality improvements into release/main
-
-- Issues #25 #26 #27 routing follow-ups into release/main
+- Integrate runtime contract fix (#57)
 
 
-## v0.1.0 - 2026-08-20
+### security
+
+- Implement context-aware SecurityShield & prompt injection guardrail
+
+
+## v0.1.0 - 2026-08-22
 
 
 ### Bug Fixes
@@ -46,6 +89,12 @@
 - Untrack docs/ directory per AI_AGENT_Working_Rules section 9 and consolidate in documentation/
 
 - Make startup model discovery non-blocking and improve service manager fallback
+
+- Make external CLI binaries explicit and portable
+
+- Make docker judge variants opt-in
+
+- Align default judge models and codex catalog with supported CLI flags (#33)
 
 
 ### Chores
@@ -72,6 +121,12 @@
 - Update changelog for multilingual scalar specs
 
 - Update changelog for tier 0-5 eligibility expansion
+
+- Update release notes for routing quality improvements
+
+- Update release notes for routing follow-ups
+
+- Update release notes for deploy-safe cli mapping
 
 
 ### Features
@@ -138,6 +193,21 @@
 
 - Enable full tier 0-5 eligibility across cloud and local providers
 
+- Improve tier quality controls and prompt normalization
+
+- Expose quality controls and improve retrieval heuristics
+
+- Align installer judges and catalog provenance
+
+- Persist task bank and benchmark all eligible models
+
+- Implement static tier catalog, configurable timeouts, terminal fallback and web references
+
+
+### Refactoring
+
+- Use generic custom judge command lists
+
 
 ### merge
 
@@ -197,4 +267,17 @@
 
 - Incorporate documentation directory and multilingual scalar navigation into release/main
 
+- Issue #24 routing quality improvements into release/main
+
+- Issues #25 #26 #27 routing follow-ups into release/main
+
+- Issues #28 #29 deploy-safe cli mapping into release/main
+
+- Align calibration install flow into release/main
+
+- Finalize calibration install flow in release/main
+
+- Finalize generic judge command lists in release/main
+
+- Issues #33 #34 #35 full calibration sweep into release/main
 

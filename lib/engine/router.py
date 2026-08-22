@@ -12,6 +12,7 @@ from lib.engine.quota import QuotaTracker
 from lib.engine.registry_service import ModelRegistryService, build_default_registry_service
 from lib.engine.scoring import ModelScorer, build_default_scorer
 from lib.engine.tiers import MAX_TIER, MIN_TIER, TierService
+from lib.engine.curated_tier_catalog import model_ids_for_tier
 
 @dataclass(frozen=True)
 class ModelSelection:
@@ -187,6 +188,25 @@ class Router:
         if not candidates:
             raise NoEligibleModelError(f"No AVAILABLE model eligible for tier {tier}")
 
+        # A persistent allowed-models policy is a reviewed execution
+        # cascade.  Do not score or re-sort it: position is intentional.
+        # The executor tries `primary`, then each `fallback`, stopping at the
+        # first success.
+        if self._is_curated_policy(tier, envelope):
+            selections = [
+                ModelSelection(
+                    model_id=model.id,
+                    provider=model.provider,
+                    role="primary" if index == 0 else "fallback",
+                )
+                for index, model in enumerate(candidates)
+            ]
+            return self._make_plan(
+                tier, request, prompt, envelope, selections,
+                strategy_id=f"{request.task_type}_t{tier}_{selections[0].provider}_curated",
+                source="dynamic", reason="ordered curated tier catalog",
+            )
+
         scored = [
             self._scorer.score(model, request.task_type, envelope.max_latency_seconds, requested_tier=tier)
             for model in candidates
@@ -219,6 +239,12 @@ class Router:
         strategy_id = f"{request.task_type}_t{tier}_{selections[0].provider}_dynamic"
         return self._make_plan(tier, request, prompt, envelope, selections, strategy_id, source="dynamic", reason=reason)
 
+    @staticmethod
+    def _is_curated_policy(tier: int, envelope: TierPolicy) -> bool:
+        """Custom API restrictions still use dynamic scoring; only the
+        shipped reviewed catalog is a deterministic execution cascade."""
+        return envelope.allowed_models == model_ids_for_tier(tier)
+
     # -- shared helpers --------------------------------------------------------
 
     def _candidates(
@@ -229,21 +255,39 @@ class Router:
         model_id: Optional[str] = None,
         max_candidates: Optional[int] = None,
     ) -> List[ModelCatalogEntry]:
+        disabled = {provider.strip().lower() for provider in self._settings.disabled_providers}
         models = self._registry.list_available_for_router(tier=tier)
         models = [m for m in models if not m.tier_eligibility or tier in m.tier_eligibility]
-        if not models and not provider and not model_id:
-            # Fallback expansion to adjacent tiers if all primary tier candidates are in cooldown/unavailable
-            for delta in (+1, -1, +2, -2, +3, +4):
-                adj_tier = tier + delta
-                if 0 <= adj_tier <= 5:
-                    models = self._registry.list_available_for_router(tier=adj_tier)
-                    models = [m for m in models if not m.tier_eligibility or adj_tier in m.tier_eligibility]
-                    if models:
-                        break
+        models = [m for m in models if m.provider.lower() not in disabled]
 
         if envelope.allowed_models is not None:
             allowed = set(envelope.allowed_models)
             models = [m for m in models if m.id in allowed]
+            if self._is_curated_policy(tier, envelope):
+                # The reviewed policy list is an ordered cascade, not an
+                # unordered filter.  Ad-hoc API restrictions remain dynamic.
+                order = {model_id: index for index, model_id in enumerate(envelope.allowed_models)}
+                models.sort(key=lambda model: order[model.id])
+
+            # T1/T2 reserve the local model for after every curated remote
+            # candidate.  It is deliberately not part of `allowed_models`:
+            # `/tiers` exposes the five reviewed remote choices, while this
+            # fallback remains explicit and deterministic at runtime.
+            if tier in (1, 2) and self._is_curated_policy(tier, envelope):
+                local_fallback_id = model_ids_for_tier(0)[0]
+                local_fallback = next(
+                    (
+                        model for model in self._registry.list_models()
+                        if model.id == local_fallback_id
+                        and model.provider == "ollama"
+                        and model.is_local
+                        and model.is_enabled
+                        and model.access_status == "AVAILABLE"
+                    ),
+                    None,
+                )
+                if local_fallback is not None and not any(model.id == local_fallback.id for model in models):
+                    models.append(local_fallback)
         if not envelope.allow_external and any(m.is_local for m in models):
             models = [m for m in models if m.is_local]
         if provider:
@@ -251,38 +295,16 @@ class Router:
         if model_id:
             models = [m for m in models if m.id == model_id]
 
-        # Apply configurable search limit (default 5; 0 or None means unlimited)
+        # Apply configurable search limit (default 5; 0 or None means unlimited).
+        # The curated list is already ordered and must never be re-ranked.
         max_limit = max_candidates if max_candidates is not None else getattr(self._settings, "max_provider_candidates", 5)
-        if max_limit is not None and max_limit > 0 and len(models) > max_limit:
+        if (
+            not self._is_curated_policy(tier, envelope)
+            and max_limit is not None
+            and max_limit > 0
+            and len(models) > max_limit
+        ):
             models = models[:max_limit]
-
-        # Smart Fallback Injection:
-        # Tiers 0-2: Ensure Ollama is appended as local safety net if primary candidates exhaust
-        # Tiers 3-5: Ensure CLI sidecars (antigravity/codex/claude) are appended if available
-        if tier <= 2:
-            all_models = self._registry.list_models()
-            local_fallbacks = [m for m in all_models if m.is_local or m.provider == "ollama"]
-            if not local_fallbacks:
-                # Guaranteed fallback entry for local Ollama
-                local_fallbacks = [
-                    ModelCatalogEntry(
-                        id="ollama/qwen2.5vl:7b",
-                        provider="ollama",
-                        display_name="Ollama Local Safety Net",
-                        access_status="AVAILABLE",
-                        is_local=True,
-                        tier_eligibility=[0, 1, 2, 3],
-                    )
-                ]
-            for fb in local_fallbacks:
-                if not any(m.id == fb.id for m in models):
-                    models.append(fb)
-        else:
-            all_models = self._registry.list_models()
-            sidecar_fallbacks = [m for m in all_models if m.provider in ("antigravity", "codex", "agy")]
-            for fb in sidecar_fallbacks:
-                if not any(m.id == fb.id for m in models):
-                    models.append(fb)
 
         return models
 
@@ -313,7 +335,7 @@ class Router:
             use_memory=request.use_memory or auto_retrieval,
             memory_topic=request.memory_topic,
             require_verification=require_verification,
-            max_latency_seconds=envelope.max_latency_seconds,
+            max_latency_seconds=(self._settings.thinking_timeout_seconds if request.thinking else envelope.max_latency_seconds),
             max_model_calls=envelope.max_model_calls,
             source=source,
             reason=reason,

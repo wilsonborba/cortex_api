@@ -12,6 +12,7 @@ from lib.engine.router import Router, build_default_router
 from lib.engine.tiers import TierService
 from lib.engine.video_ingest import VideoIngestor
 from lib.engine.video_jobs import VideoJobStore, get_default_video_job_store
+from lib.core.security import SecurityShield
 
 # One instance per process, same pattern as lib.core.settings.get_settings.
 # Overridable per-test via FastAPI's `app.dependency_overrides[get_x] = ...`.
@@ -56,6 +57,12 @@ def get_executor() -> Executor:
 def get_prompt_normalizer() -> PromptNormalizer:
     executor = get_executor()
     return PromptNormalizer(registry=get_registry(), drivers=executor.drivers)
+
+
+@lru_cache(maxsize=1)
+def get_security_shield() -> SecurityShield:
+    executor = get_executor()
+    return SecurityShield(registry=get_registry(), drivers=executor.drivers)
 
 
 @lru_cache(maxsize=1)
