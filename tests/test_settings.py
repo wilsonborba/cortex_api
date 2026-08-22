@@ -8,6 +8,18 @@ import pytest
 from lib.core.settings import Settings, get_settings
 
 
+def test_execution_trace_logging():
+    from lib.core.logs import truncate_snippet, log_execution_trace, get_logger
+
+    assert truncate_snippet("hello world", max_length=120) == "hello world"
+    long_str = "a" * 200
+    assert len(truncate_snippet(long_str, max_length=120)) == 120
+    assert truncate_snippet(long_str, max_length=120).endswith("...")
+
+    logger = get_logger("test_trace")
+    log_execution_trace(logger, "Router", "Candidate selected", origin="API", snippet="sample text", location="router.py:45")
+
+
 def test_default_settings(monkeypatch):
     monkeypatch.delenv("CORTEX_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
