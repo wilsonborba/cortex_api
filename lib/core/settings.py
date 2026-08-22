@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         default="http://localhost:8001",
         validation_alias=AliasChoices("CORTEX_HIPPOCAMPUS_URL", "HIPPOCAMPUS_URL"),
     )
+    max_provider_candidates: int = Field(
+        default=5,
+        validation_alias=AliasChoices("CORTEX_MAX_PROVIDER_CANDIDATES", "MAX_PROVIDER_CANDIDATES"),
+    )
 
     # Logging
     log_level: str = Field(

@@ -13,6 +13,8 @@ from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_r
 from lib.presentation.api.schemas.execute import ExecuteRequest, ExecuteResponse
 from lib.engine.video_jobs import VideoJobStore
 
+from lib.core.security import SecurityShield
+
 router = APIRouter(tags=["execute"])
 
 
@@ -24,6 +26,25 @@ async def execute(
     prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
     video_jobs: VideoJobStore = Depends(get_video_job_store),
 ) -> ExecuteResponse:
+    security_eval = SecurityShield().evaluate(payload.prompt)
+    if security_eval.is_blocked:
+        return ExecuteResponse(
+            request_id="sec-blocked",
+            tier_requested=0,
+            tier_executed=0,
+            strategy_id="security_shield",
+            task_type="security",
+            success=False,
+            response=security_eval.reason or "Blocked by Security Shield",
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            cost_usd=0.0,
+            latency_ms=0,
+            error_type=security_eval.error_type,
+            steps=[],
+        )
+
     if payload.force_context_format is not None and payload.force_context_format not in ENCODERS:
         raise HTTPException(
             status_code=422,

@@ -41,11 +41,11 @@ class PlaneClient:
     def _headers(self) -> Dict[str, str]:
         return {"X-API-Key": self._api_key} if self._api_key else {}
 
-    async def list_tasks(self, workspace_slug: str, project_id: str) -> List[PlaneTask]:
+    async def list_tasks(self, workspace_slug: str = "default", project_id: str = "00000000-0000-0000-0000-000000000001") -> List[PlaneTask]:
         try:
             async with self._client_factory() as client:
                 resp = await client.get(
-                    f"{self._base_url}/api/workspaces/{workspace_slug}/projects/{project_id}/issues/",
+                    f"{self._base_url}/api/v1/workspaces/{workspace_slug}/projects/{project_id}/issues/",
                     headers=self._headers(),
                 )
                 resp.raise_for_status()
@@ -66,11 +66,11 @@ class PlaneClient:
             logger.warning("plane_client.list_tasks failed: %s", exc)
             return []
 
-    async def create_task(self, workspace_slug: str, project_id: str, name: str, description: str = "") -> Optional[PlaneTask]:
+    async def create_task(self, workspace_slug: str = "default", project_id: str = "00000000-0000-0000-0000-000000000001", name: str = "", description: str = "") -> Optional[PlaneTask]:
         try:
             async with self._client_factory() as client:
                 resp = await client.post(
-                    f"{self._base_url}/api/workspaces/{workspace_slug}/projects/{project_id}/issues/",
+                    f"{self._base_url}/api/v1/workspaces/{workspace_slug}/projects/{project_id}/issues/",
                     json={"name": name, "description": description},
                     headers=self._headers(),
                 )
@@ -93,5 +93,5 @@ def build_default_plane_client(settings: Optional[Settings] = None) -> PlaneClie
     return PlaneClient(
         base_url=getattr(settings, "plane_url", "http://localhost:8011"),
         timeout=getattr(settings, "plane_timeout_seconds", 10.0),
-        api_key=getattr(settings, "plane_api_key", None),
+        api_key=getattr(settings, "plane_api_key", "cortex-test-key") or "cortex-test-key",
     )

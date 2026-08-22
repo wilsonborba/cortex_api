@@ -50,6 +50,7 @@ class ExecutionPlan:
     reason: str
     context_format: Optional[str] = None  # layer-3 force (#16); None => Executor resolves it itself
     attachments: List[Attachment] = field(default_factory=list)
+    tenant_id: str = "default"
 
 
 @dataclass(frozen=True)
@@ -226,26 +227,47 @@ class Router:
         envelope: TierPolicy,
         provider: Optional[str] = None,
         model_id: Optional[str] = None,
+        max_candidates: Optional[int] = None,
     ) -> List[ModelCatalogEntry]:
         models = self._registry.list_available_for_router(tier=tier)
-        if not models and envelope.allow_external and not provider and not model_id:
+        models = [m for m in models if not m.tier_eligibility or tier in m.tier_eligibility]
+        if not models and not provider and not model_id:
             # Fallback expansion to adjacent tiers if all primary tier candidates are in cooldown/unavailable
-            for delta in (-1, +1, -2, +2):
+            for delta in (+1, -1, +2, -2, +3, +4):
                 adj_tier = tier + delta
                 if 0 <= adj_tier <= 5:
                     models = self._registry.list_available_for_router(tier=adj_tier)
+                    models = [m for m in models if not m.tier_eligibility or adj_tier in m.tier_eligibility]
                     if models:
                         break
 
         if envelope.allowed_models is not None:
             allowed = set(envelope.allowed_models)
             models = [m for m in models if m.id in allowed]
-        if not envelope.allow_external:
+        if not envelope.allow_external and any(m.is_local for m in models):
             models = [m for m in models if m.is_local]
         if provider:
             models = [m for m in models if m.provider == provider]
         if model_id:
             models = [m for m in models if m.id == model_id]
+
+        max_limit = max_candidates if max_candidates is not None else getattr(self._settings, "max_provider_candidates", 5)
+        if max_limit is not None and max_limit > 0 and len(models) > max_limit:
+            models = models[:max_limit]
+
+        if tier <= 2:
+            all_models = self._registry.list_available_for_router(tier=tier)
+            local_fallbacks = [m for m in all_models if m.is_local or m.provider == "ollama"]
+            for fb in local_fallbacks:
+                if fb not in models:
+                    models.append(fb)
+        else:
+            all_models = self._registry.list_available_for_router(tier=tier)
+            sidecar_fallbacks = [m for m in all_models if m.provider in ("antigravity", "codex", "claude")]
+            for fb in sidecar_fallbacks:
+                if fb not in models:
+                    models.append(fb)
+
         return models
 
     def _make_plan(
@@ -281,6 +303,7 @@ class Router:
             reason=reason,
             context_format=request.force_context_format,
             attachments=request.attachments,
+            tenant_id=request.tenant_id,
         )
 
 
