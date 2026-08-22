@@ -45,6 +45,55 @@ async def execute(
             steps=[],
         )
 
+    # PARTE 1: Proxy Direto (Passthrough) para Memórias e Tarefas (Sem Travamento por IA)
+    if payload.capabilities.memory or payload.capabilities.tasks:
+        import urllib.request, json
+        if payload.capabilities.memory:
+            try:
+                req_data = json.dumps({"query": payload.prompt, "tags": [f"tenant:{payload.tenant_id}"], "limit": 5}).encode("utf-8")
+                req = urllib.request.Request("http://127.0.0.1:8001/api/v1/recall", data=req_data, headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    mem_data = json.loads(resp.read().decode("utf-8"))
+                    return ExecuteResponse(
+                        request_id="proxy-memory",
+                        tier_requested=payload.tier or 0,
+                        tier_executed=0,
+                        strategy_id="hippocampus_proxy_passthrough",
+                        task_type="memory_recall",
+                        success=True,
+                        response=f"[Proxy Passthrough] Memórias recuperadas do Hippocampus: {json.dumps(mem_data)[:300]}",
+                        input_tokens=0,
+                        output_tokens=0,
+                        total_tokens=0,
+                        cost_usd=0.0,
+                        latency_ms=15,
+                        steps=[],
+                    )
+            except Exception:
+                pass
+        if payload.capabilities.tasks:
+            try:
+                req = urllib.request.Request("http://127.0.0.1:8011/api/v1/workspaces/default/projects/00000000-0000-0000-0000-000000000001/issues/", headers={"X-Api-Key": "cortex-test-key"}, method="GET")
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    task_data = json.loads(resp.read().decode("utf-8"))
+                    return ExecuteResponse(
+                        request_id="proxy-tasks",
+                        tier_requested=payload.tier or 0,
+                        tier_executed=0,
+                        strategy_id="plane_slim_proxy_passthrough",
+                        task_type="task_management",
+                        success=True,
+                        response=f"[Proxy Passthrough] Tarefas recuperadas do plane-slim: {json.dumps(task_data)[:300]}",
+                        input_tokens=0,
+                        output_tokens=0,
+                        total_tokens=0,
+                        cost_usd=0.0,
+                        latency_ms=15,
+                        steps=[],
+                    )
+            except Exception:
+                pass
+
     if payload.force_context_format is not None and payload.force_context_format not in ENCODERS:
         raise HTTPException(
             status_code=422,
