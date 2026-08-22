@@ -84,12 +84,15 @@ def extract_pdf_text_sample(pdf_path: str) -> str:
 
 
 def transcribe_audio_whisper_local(audio_path: str) -> str:
-    """Transcribes real spoken audio file using pywhispercpp or Whisper Local."""
+    """Transcribes with the same CUDA-backed driver used by the application."""
     try:
-        from pywhispercpp.model import Model
-        model = Model("base", print_realtime=False, print_progress=False)
-        segments = model.transcribe(audio_path)
-        transcript = " ".join([s.text for s in segments]).strip()
+        from lib.engine.drivers.whisper_local import LocalWhisperTranscriber
+
+        # Keep E2E fast while still exercising the production CUDA driver.
+        audio_bytes = Path(audio_path).read_bytes()
+        transcript = LocalWhisperTranscriber(
+            model_name="base", models_dir="var/whisper-models"
+        ).transcribe(audio_bytes, suffix=Path(audio_path).suffix)
         if transcript:
             return transcript
     except Exception:
