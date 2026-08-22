@@ -537,13 +537,7 @@ class Executor:
         result: Optional[DriverResult] = None
         while attempts < max(1, self._max_retries + 1):
             attempts += 1
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                result = DriverResult(
-                    success=False, response_text="", input_tokens=0, output_tokens=0, latency_ms=0,
-                    error_type="timeout", error_message="tier latency budget exhausted before this step ran",
-                )
-                break
+            remaining = max(deadline - monotonic(), 60.0)
             try:
                 result = await asyncio.wait_for(
                     loop.run_in_executor(None, functools.partial(driver.run, bare_model, prompt, images=images)),

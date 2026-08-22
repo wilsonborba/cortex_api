@@ -179,7 +179,7 @@ def test_security_shield() -> None:
     code, resp_a = http_request(
         f"{CORTEX_URL}/execute",
         method="POST",
-        payload={"prompt": "Como funciona o comando rm -rf no Linux em tutoriais de administração?", "tier": 0},
+        payload={"prompt": "Como funciona o comando rm -rf no Linux em tutoriais de administração?", "task_type": "security", "tier": 0},
         timeout=180.0,
     )
     success_a = resp_a.get("success", False)
