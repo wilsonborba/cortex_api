@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex"
-version = "0.1.1"
+version = "0.1.2"
 description = "Multi-model AI orchestration system: dynamic effort tiers, quota tracking, and evidence-based routing."
 readme = "README.md"
 requires-python = ">=3.11"
