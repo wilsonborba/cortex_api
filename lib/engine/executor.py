@@ -391,13 +391,31 @@ class Executor:
                 continue
 
             if not step.success:
-                # Step failed (primary, refiner, or critic):
-                # Enter cooldown and attempt rerouting to the next eligible candidate model/provider in this tier.
-                self._quota_tracker.enter_cooldown(selection.model_id, reason=step.error_message or step.error_type)
+                # Primary/step failed: Mark model & provider in Cooldown
+                self._quota_tracker.enter_cooldown(selection.model_id, provider=selection.provider, reason=step.error_message or step.error_type)
+                
+                # Attempt primary candidate rerouting first
                 if self._router is not None and reroutes_left > 0:
                     rerouted = self._try_reroute(plan)
                     if rerouted is not None:
                         return await self._execute_plan(rerouted, reroutes_left - 1, images=images)
+                
+                # Primary Fallback Loop across CLI Sidecars (agy -> codex)
+                cli_sidecars = [
+                    ("agy", "agy/gemini-2.5-pro"),
+                    ("codex", "codex/gpt-5.4"),
+                ]
+                for cli_provider, cli_model_id in cli_sidecars:
+                    if cli_provider == selection.provider:
+                        continue  # skip provider that just failed
+                    sidecar_selection = ModelSelection(model_id=cli_model_id, provider=cli_provider, role="primary")
+                    sidecar_step = await self._run_step(plan, sidecar_selection, context, deadline, images=images)
+                    self._log_step(plan, request_id, sidecar_selection, sidecar_step, None, None)
+                    steps.append(sidecar_step)
+                    if sidecar_step.success:
+                        return self._build_result(plan, request_id, steps, gathered=gathered if 'gathered' in locals() else None)
+                    else:
+                        self._quota_tracker.enter_cooldown(cli_model_id, provider=cli_provider, reason=sidecar_step.error_message or sidecar_step.error_type)
                 break
 
         return self._build_result(plan, request_id, steps, gathered=gathered)

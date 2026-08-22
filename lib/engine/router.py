@@ -279,7 +279,7 @@ class Router:
                     models.append(fb)
         else:
             all_models = self._registry.list_models()
-            sidecar_fallbacks = [m for m in all_models if m.provider in ("antigravity", "codex", "claude")]
+            sidecar_fallbacks = [m for m in all_models if m.provider in ("antigravity", "codex", "agy")]
             for fb in sidecar_fallbacks:
                 if not any(m.id == fb.id for m in models):
                     models.append(fb)

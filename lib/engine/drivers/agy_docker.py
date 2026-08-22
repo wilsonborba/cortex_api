@@ -13,7 +13,7 @@ class AgyDockerDriver:
 
     def __init__(
         self,
-        command: str = "agy-docker",
+        command: str = "agy",
         timeout: float = 180.0,
         runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
     ) -> None:
@@ -25,7 +25,7 @@ class AgyDockerDriver:
         # `images` unused: not verified that the `agy-docker` CLI accepts a file/image attachment.
         try:
             result = self._runner(
-                [self._command, "-p", prompt, "--output-format", "json", "--model", model],
+                [self._command, "-p", prompt],
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
@@ -36,6 +36,14 @@ class AgyDockerDriver:
         combined = f"{result.stdout}\n{result.stderr}"
         data = parse_json_or_none(result.stdout)
         if data is None:
+            if result.returncode == 0 and result.stdout.strip():
+                return DriverResult(
+                    success=True,
+                    response_text=result.stdout.strip(),
+                    input_tokens=0,
+                    output_tokens=0,
+                    latency_ms=0,
+                )
             return failed("rate_limit" if looks_like_rate_limit(combined) else "cli_error", combined.strip()[:500])
 
         status = str(data.get("status") or "").upper()
