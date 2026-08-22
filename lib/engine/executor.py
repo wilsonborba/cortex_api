@@ -341,6 +341,10 @@ class Executor:
     ) -> ExecutionResult:
         request_id = request_id or str(uuid.uuid4())
         deadline = deadline if deadline is not None else monotonic() + plan.max_latency_seconds
+        if any(selection.role == "fallback" for selection in plan.selections):
+            return await self._execute_ordered_cascade(
+                plan, request_id=request_id, deadline=deadline, context_retry=context_retry, images=images
+            )
         steps: List[StepResult] = []
         context = plan.prompt
         # The primary's original text, kept separate from `context` (which
@@ -426,6 +430,49 @@ class Executor:
                     else:
                         self._quota_tracker.enter_cooldown(cli_model_id, provider=cli_provider, reason=sidecar_step.error_message or sidecar_step.error_type)
                 break
+
+        return self._build_result(plan, request_id, steps, gathered=gathered)
+
+    async def _execute_ordered_cascade(
+        self,
+        plan: ExecutionPlan,
+        *,
+        request_id: str,
+        deadline: float,
+        context_retry: Optional[_ContextRetryState],
+        images: Optional[List[str]],
+    ) -> ExecutionResult:
+        """Run an explicitly curated list in order, stopping on success.
+
+        This path intentionally does not re-route or borrow an adjacent
+        tier.  The local T1/T2 fallback and the T3-T5 CLI fallbacks are
+        already prescribed by the product policy.
+        """
+        steps: List[StepResult] = []
+        gathered = context_retry.gathered if context_retry is not None else None
+        for index, selection in enumerate(plan.selections):
+            step = await self._run_step(plan, selection, plan.prompt, deadline, images=images if index == 0 else None)
+            self._log_step(
+                plan, request_id, selection, step, gathered if index == 0 else None,
+                context_retry.format_name if index == 0 and context_retry is not None else None,
+            )
+            steps.append(step)
+            if step.success:
+                return self._build_result(plan, request_id, steps, gathered=gathered)
+            self._quota_tracker.enter_cooldown(
+                selection.model_id, provider=selection.provider,
+                reason=step.error_message or step.error_type,
+            )
+
+        if plan.tier >= 3:
+            for provider, model_id in (("agy", "agy/gemini-2.5-pro"), ("codex", "codex/gpt-5.4")):
+                selection = ModelSelection(model_id=model_id, provider=provider, role="fallback")
+                step = await self._run_step(plan, selection, plan.prompt, deadline, images=images)
+                self._log_step(plan, request_id, selection, step, None, None)
+                steps.append(step)
+                if step.success:
+                    return self._build_result(plan, request_id, steps, gathered=gathered)
+                self._quota_tracker.enter_cooldown(model_id, provider=provider, reason=step.error_message or step.error_type)
 
         return self._build_result(plan, request_id, steps, gathered=gathered)
 
@@ -661,7 +708,7 @@ class Executor:
             error_type = primary.error_type if (primary and primary.error_type) else "all_candidates_exhausted"
         else:
             final_text = next(
-                (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "refiner", "reviser")),
+                (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "fallback", "refiner", "reviser")),
                 "",
             )
             if gathered and gathered.web_items and "References:" not in final_text:

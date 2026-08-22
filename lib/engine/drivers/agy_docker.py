@@ -14,7 +14,7 @@ class AgyDockerDriver:
     def __init__(
         self,
         command: str = "agy",
-        timeout: float = 180.0,
+        timeout: float = 300.0,
         runner: Optional[Callable[..., subprocess.CompletedProcess]] = None,
     ) -> None:
         self._command = command
