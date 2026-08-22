@@ -280,7 +280,8 @@ class Executor:
 
         return await self._execute_plan(
             working_plan, reroutes_left=self._max_reroutes, context_retry=context_retry,
-            images=ingested.image_data_uris,
+            images=ingested.image_data_uris, request_id=str(uuid.uuid4()),
+            deadline=monotonic() + working_plan.max_latency_seconds,
         )
 
     def _lookup_model(self, model_id: str) -> Optional[ModelCatalogEntry]:
@@ -335,9 +336,11 @@ class Executor:
         reroutes_left: int,
         context_retry: Optional[_ContextRetryState] = None,
         images: Optional[List[str]] = None,
+        request_id: Optional[str] = None,
+        deadline: Optional[float] = None,
     ) -> ExecutionResult:
-        request_id = str(uuid.uuid4())
-        deadline = monotonic() + plan.max_latency_seconds
+        request_id = request_id or str(uuid.uuid4())
+        deadline = deadline if deadline is not None else monotonic() + plan.max_latency_seconds
         steps: List[StepResult] = []
         context = plan.prompt
         # The primary's original text, kept separate from `context` (which
@@ -398,8 +401,14 @@ class Executor:
                 if self._router is not None and reroutes_left > 0:
                     rerouted = self._try_reroute(plan)
                     if rerouted is not None:
-                        return await self._execute_plan(rerouted, reroutes_left - 1, images=images)
+                        return await self._execute_plan(
+                            rerouted, reroutes_left - 1, images=images, request_id=request_id, deadline=deadline
+                        )
                 
+                # CLI fallback is allowed only for T3-T5.
+                if plan.tier <= 2:
+                    break
+
                 # Primary Fallback Loop across CLI Sidecars (agy -> codex)
                 cli_sidecars = [
                     ("agy", "agy/gemini-2.5-pro"),
@@ -537,7 +546,13 @@ class Executor:
         result: Optional[DriverResult] = None
         while attempts < max(1, self._max_retries + 1):
             attempts += 1
-            remaining = max(deadline - monotonic(), 60.0)
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                result = DriverResult(
+                    success=False, response_text="", input_tokens=0, output_tokens=0, latency_ms=0,
+                    error_type="timeout", error_message="request deadline exhausted before this step ran",
+                )
+                break
             try:
                 result = await asyncio.wait_for(
                     loop.run_in_executor(None, functools.partial(driver.run, bare_model, prompt, images=images)),

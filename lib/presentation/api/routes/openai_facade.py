@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from lib.engine.executor import Executor, ExecutionResult, UnresolvedStrategyError
 from lib.engine.prompt_normalizer import PromptNormalizer
 from lib.engine.router import NoEligibleModelError, Router, RoutingRequest
-from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router
+from lib.core.security import SecurityShield
+from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router, get_security_shield
 from lib.presentation.api.schemas.openai_facade import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -43,12 +44,18 @@ async def chat_completions(
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
     prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
+    security_shield: SecurityShield = Depends(get_security_shield),
 ):
     tier, force_strategy = _translate_model(payload.model)
     prompt = _messages_to_prompt(payload.messages)
-    if payload.normalize_prompt:
-        normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
-        prompt = normalization.prompt
+    security_eval = await asyncio.to_thread(security_shield.evaluate, prompt)
+    if security_eval.is_blocked:
+        message = "Are you kidding me, clown?" if security_eval.error_type == "security_policy_violation" else (security_eval.reason or "Blocked by Security Shield")
+        return JSONResponse(status_code=403, content=_openai_error(message, security_eval.error_type or "security_policy_violation"))
+    normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
+    if not normalization.success:
+        return JSONResponse(status_code=503, content=_openai_error("Local prompt normalizer is unavailable.", normalization.error_type or "normalizer_failed"))
+    prompt = normalization.prompt
     routing_request = RoutingRequest(
         prompt=prompt,
         tier=tier,

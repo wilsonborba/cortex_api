@@ -9,7 +9,7 @@ from lib.engine.executor import Executor
 from lib.engine.format import ENCODERS
 from lib.engine.prompt_normalizer import PromptNormalizer
 from lib.engine.router import Router, RoutingRequest
-from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router, get_video_job_store
+from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router, get_security_shield, get_video_job_store
 from lib.presentation.api.schemas.execute import ExecuteRequest, ExecuteResponse
 from lib.engine.video_jobs import VideoJobStore
 
@@ -24,10 +24,12 @@ async def execute(
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
     prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
+    security_shield: SecurityShield = Depends(get_security_shield),
     video_jobs: VideoJobStore = Depends(get_video_job_store),
 ) -> ExecuteResponse:
-    security_eval = SecurityShield().evaluate(payload.prompt)
+    security_eval = await asyncio.to_thread(security_shield.evaluate, payload.prompt)
     if security_eval.is_blocked:
+        response_text = "Are you kidding me, clown?" if security_eval.error_type == "security_policy_violation" else (security_eval.reason or "Blocked by Security Shield")
         return ExecuteResponse(
             request_id="sec-blocked",
             tier_requested=0,
@@ -35,31 +37,13 @@ async def execute(
             strategy_id="security_shield",
             task_type="security",
             success=False,
-            response=security_eval.reason or "Blocked by Security Shield",
+            response=response_text,
             input_tokens=0,
             output_tokens=0,
             total_tokens=0,
             cost_usd=0.0,
             latency_ms=0,
             error_type=security_eval.error_type,
-            steps=[],
-        )
-
-    if payload.task_type == "security":
-        return ExecuteResponse(
-            request_id="sec-allowed",
-            tier_requested=payload.tier or 0,
-            tier_executed=0,
-            strategy_id="security_shield",
-            task_type="security",
-            success=True,
-            response="[Security Shield Evaluation Complete] Allowed (No security violation detected)",
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            cost_usd=0.0,
-            latency_ms=1,
-            error_type=None,
             steps=[],
         )
 
@@ -130,9 +114,15 @@ async def execute(
             raise HTTPException(status_code=422, detail=f"video job did not produce a usable summary: {detail}")
         prompt = f"## Video context\n\n{job.result.summary}\n\n{prompt}"
 
-    if payload.normalize_prompt:
-        normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
-        prompt = normalization.prompt
+    normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
+    if not normalization.success:
+        return ExecuteResponse(
+            request_id="normalizer-failed", tier_requested=payload.tier or 0, tier_executed=0,
+            strategy_id="prompt_normalizer", task_type=payload.task_type, success=False,
+            response="Local prompt normalizer is unavailable.", input_tokens=0, output_tokens=0,
+            total_tokens=0, cost_usd=0.0, latency_ms=0, error_type=normalization.error_type, steps=[],
+        )
+    prompt = normalization.prompt
 
     routing_request = RoutingRequest(
         prompt=prompt,

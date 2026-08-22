@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session, sessionmaker
 # 1. Set environment variable to isolated test DB BEFORE any database module is loaded
 _TEST_DB_PATH = Path(__file__).resolve().parent.parent / "lib" / "dal" / "var" / "test_cortex.db"
 os.environ.setdefault("CORTEX_DATABASE_URL", f"sqlite:///{_TEST_DB_PATH}")
+# Tests must not inherit a personal runtime policy from the repository .env.
+os.environ["CORTEX_DISABLED_PROVIDERS"] = ""
 
 from alembic.command import upgrade  # noqa: E402
 from alembic.config import Config  # noqa: E402
