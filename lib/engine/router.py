@@ -55,6 +55,7 @@ class ExecutionPlan:
 @dataclass(frozen=True)
 class RoutingRequest:
     prompt: str
+    tenant_id: str = "default"
     tier: Optional[Union[int, str]] = None  # None or "auto" => resolved by classifier/directive
     task_type: str = "general"
     needs_web: bool = False

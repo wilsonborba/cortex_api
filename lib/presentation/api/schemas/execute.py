@@ -18,6 +18,7 @@ class CapabilitySchema(BaseModel):
 
 class ExecuteRequest(BaseModel):
     prompt: str
+    tenant_id: Optional[str] = Field(default="default", description="Hard tenant/application namespace identifier")
     tier: Optional[Union[int, str]] = Field(default=None, description="0-5, 'auto', or omitted for auto")
     task_type: str = "general"
     normalize_prompt: bool = True
