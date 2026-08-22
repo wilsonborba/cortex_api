@@ -53,7 +53,19 @@ class OpenAICompatibleDriver:
                 data = response.json()
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else None
-            return failed("rate_limit" if status == 429 else "http_error", str(exc))
+            if status in (401, 403):
+                err_type = "auth_failure"
+            elif status == 429:
+                err_type = "rate_limit_exceeded"
+            elif status == 404:
+                err_type = "provider_not_found"
+            elif status and status >= 500:
+                err_type = "provider_server_error"
+            else:
+                err_type = "http_error"
+            return failed(err_type, str(exc))
+        except httpx.TimeoutException as exc:
+            return failed("provider_timeout", str(exc))
         except (httpx.HTTPError, ValueError) as exc:
             return failed("unreachable", str(exc))
 

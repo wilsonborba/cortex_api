@@ -46,7 +46,16 @@ from lib.engine.attachments import AttachmentIngestor, IngestedAttachments, buil
 logger = get_logger(__name__)
 
 # Worth one quick retry: plumbing hiccups, not "this will never work".
-_RETRYABLE_ERRORS = {"unreachable", "http_error", "cli_error"}
+_RETRYABLE_ERRORS = {
+    "unreachable",
+    "http_error",
+    "cli_error",
+    "rate_limit",
+    "rate_limit_exceeded",
+    "provider_server_error",
+    "provider_timeout",
+    "empty_response",
+}
 
 TERMINAL_FALLBACK_MESSAGE = (
     "Sorry, we can't respond to your request right now. Our service is currently at capacity. Please try again in a few minutes."

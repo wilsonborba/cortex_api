@@ -117,7 +117,7 @@ def test_openai_compatible_driver_maps_429_to_rate_limit():
     result = driver.run("llama-3.1-8b-instant", "hello")
 
     assert result.success is False
-    assert result.error_type == "rate_limit"
+    assert result.error_type == "rate_limit_exceeded"
 
 
 def test_openai_compatible_driver_fails_without_api_key():
@@ -192,7 +192,7 @@ def test_huggingface_discovery_checks_auth_then_lists_models():
     models = discovery.discover()
 
     assert models[0].id == "huggingface/meta-llama/Llama-3.1-8B-Instruct"
-    assert models[0].tier_eligibility == [1, 2, 3]
+    assert models[0].tier_eligibility == [2, 3, 4]
 
 
 def test_huggingface_discovery_raises_without_api_key():
