@@ -229,17 +229,22 @@ class Router:
         model_id: Optional[str] = None,
         max_candidates: Optional[int] = None,
     ) -> List[ModelCatalogEntry]:
+        disabled = {provider.strip().lower() for provider in self._settings.disabled_providers}
         models = self._registry.list_available_for_router(tier=tier)
         models = [m for m in models if not m.tier_eligibility or tier in m.tier_eligibility]
-        if not models and not provider and not model_id:
-            # Fallback expansion to adjacent tiers if all primary tier candidates are in cooldown/unavailable
-            for delta in (+1, -1, +2, -2, +3, +4):
-                adj_tier = tier + delta
-                if 0 <= adj_tier <= 5:
-                    models = self._registry.list_available_for_router(tier=adj_tier)
-                    models = [m for m in models if not m.tier_eligibility or adj_tier in m.tier_eligibility]
-                    if models:
-                        break
+        models = [m for m in models if m.provider.lower() not in disabled]
+
+        # T0-T2 are local-only. A local Ollama model remains eligible as the
+        # explicit safety net even when its benchmark range is narrower.
+        if tier <= 2:
+            models = [m for m in models if m.provider == "ollama" and m.is_local]
+            local_fallbacks = [
+                m for m in self._registry.list_models()
+                if m.provider == "ollama" and m.is_local and m.is_enabled and m.access_status == "AVAILABLE"
+            ]
+            for fallback in local_fallbacks:
+                if not any(m.id == fallback.id for m in models):
+                    models.append(fallback)
 
         if envelope.allowed_models is not None:
             allowed = set(envelope.allowed_models)
@@ -255,34 +260,6 @@ class Router:
         max_limit = max_candidates if max_candidates is not None else getattr(self._settings, "max_provider_candidates", 5)
         if max_limit is not None and max_limit > 0 and len(models) > max_limit:
             models = models[:max_limit]
-
-        # Smart Fallback Injection:
-        # Tiers 0-2: Ensure Ollama is appended as local safety net if primary candidates exhaust
-        # Tiers 3-5: Ensure CLI sidecars (antigravity/codex/claude) are appended if available
-        if tier <= 2:
-            all_models = self._registry.list_models()
-            local_fallbacks = [m for m in all_models if m.is_local or m.provider == "ollama"]
-            if not local_fallbacks:
-                # Guaranteed fallback entry for local Ollama
-                local_fallbacks = [
-                    ModelCatalogEntry(
-                        id="ollama/qwen2.5vl:7b",
-                        provider="ollama",
-                        display_name="Ollama Local Safety Net",
-                        access_status="AVAILABLE",
-                        is_local=True,
-                        tier_eligibility=[0, 1, 2, 3],
-                    )
-                ]
-            for fb in local_fallbacks:
-                if not any(m.id == fb.id for m in models):
-                    models.append(fb)
-        else:
-            all_models = self._registry.list_models()
-            sidecar_fallbacks = [m for m in all_models if m.provider in ("antigravity", "codex", "agy")]
-            for fb in sidecar_fallbacks:
-                if not any(m.id == fb.id for m in models):
-                    models.append(fb)
 
         return models
 
@@ -313,7 +290,7 @@ class Router:
             use_memory=request.use_memory or auto_retrieval,
             memory_topic=request.memory_topic,
             require_verification=require_verification,
-            max_latency_seconds=envelope.max_latency_seconds,
+            max_latency_seconds=(self._settings.thinking_timeout_seconds if request.thinking else envelope.max_latency_seconds),
             max_model_calls=envelope.max_model_calls,
             source=source,
             reason=reason,

@@ -107,6 +107,10 @@ class Settings(BaseSettings):
         default=180.0,
         validation_alias=AliasChoices("CORTEX_DRIVER_TIMEOUT_SECONDS", "DRIVER_TIMEOUT_SECONDS"),
     )
+    thinking_timeout_seconds: int = Field(
+        default=600,
+        validation_alias=AliasChoices("CORTEX_THINKING_TIMEOUT_SECONDS", "THINKING_TIMEOUT_SECONDS"),
+    )
 
     # Quota Tracker: sliding window token budget
     # `ollama` is intentionally excluded from these: it's local/free, so its

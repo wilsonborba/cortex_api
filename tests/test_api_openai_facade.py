@@ -10,7 +10,7 @@ from lib.engine.executor import ExecutionResult, StepResult, UnresolvedStrategyE
 from lib.engine.prompt_normalizer import PromptNormalizationResult
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError, RoutingRequest
 from lib.presentation.api.app import create_app
-from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router
+from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router, get_security_shield
 from lib.presentation.api.routes.openai_facade import _messages_to_prompt, _translate_model
 from lib.presentation.api.schemas.openai_facade import ChatMessage
 
@@ -59,6 +59,12 @@ class _FakePromptNormalizer:
         return PromptNormalizationResult(prompt=self._prompt, changed=self._prompt != prompt)
 
 
+class _FakeSecurityShield:
+    def evaluate(self, prompt: str):
+        from lib.core.security import SecurityEvaluation
+        return SecurityEvaluation(risk_flag_detected=False, flags=[], is_blocked=False)
+
+
 def _result(**overrides) -> ExecutionResult:
     defaults = dict(
         request_id="req-facade-1", tier_requested=3, tier_executed=3, strategy_id="general_t3_dynamic",
@@ -81,7 +87,9 @@ def app_():
     settings = get_settings().model_copy(
         update={"api_sync_models_on_startup": False, "api_background_tasks_enabled": False}
     )
-    return create_app(settings=settings)
+    app = create_app(settings=settings)
+    app.dependency_overrides[get_security_shield] = lambda: _FakeSecurityShield()
+    return app
 
 
 # --- model translation (pure functions) -------------------------------------------
