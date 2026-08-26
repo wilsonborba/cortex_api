@@ -52,10 +52,11 @@ async def chat_completions(
     if security_eval.is_blocked:
         message = "Are you kidding me, clown?" if security_eval.error_type == "security_policy_violation" else (security_eval.reason or "Blocked by Security Shield")
         return JSONResponse(status_code=403, content=_openai_error(message, security_eval.error_type or "security_policy_violation"))
-    normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
-    if not normalization.success:
-        return JSONResponse(status_code=503, content=_openai_error("Local prompt normalizer is unavailable.", normalization.error_type or "normalizer_failed"))
-    prompt = normalization.prompt
+    if payload.normalize_prompt:
+        normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
+        if not normalization.success:
+            return JSONResponse(status_code=503, content=_openai_error("Local prompt normalizer is unavailable.", normalization.error_type or "normalizer_failed"))
+        prompt = normalization.prompt
     routing_request = RoutingRequest(
         prompt=prompt,
         tier=tier,

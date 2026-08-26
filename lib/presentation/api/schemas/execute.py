@@ -21,7 +21,10 @@ class ExecuteRequest(BaseModel):
     tenant_id: Optional[str] = Field(default="default", description="Hard tenant/application namespace identifier")
     tier: Optional[Union[int, str]] = Field(default=None, description="0-5, 'auto', or omitted for auto")
     task_type: str = "general"
-    normalize_prompt: bool = True
+    normalize_prompt: bool = Field(
+        default=True,
+        description="Rewrite the user prompt with the local text normalizer; false forwards it unchanged after security evaluation.",
+    )
     thinking: bool = False
     needs_web: bool = False
     use_memory: bool = False
