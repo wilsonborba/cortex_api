@@ -245,6 +245,29 @@ def test_chat_completions_forwards_quality_controls(app_):
     assert router.last_request.memory_topic == "ops"
 
 
+def test_chat_completions_can_forward_the_raw_prompt_without_normalization(app_):
+    router = _FakeRouter(plan=_plan())
+    executor = _FakeExecutor(result=_result())
+    normalizer = _FakePromptNormalizer(prompt="structured prompt")
+    app_.dependency_overrides[get_router] = lambda: router
+    app_.dependency_overrides[get_executor] = lambda: executor
+    app_.dependency_overrides[get_prompt_normalizer] = lambda: normalizer
+
+    with TestClient(app_) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "cortex-t3",
+                "messages": [{"role": "user", "content": "messy prompt"}],
+                "normalize_prompt": False,
+            },
+        )
+
+    assert response.status_code == 200
+    assert normalizer.calls == []
+    assert router.last_request.prompt == "User: messy prompt"
+
+
 def test_chat_completions_streaming_emits_valid_sse_frames_ending_in_done(app_):
     router = _FakeRouter(plan=_plan())
     executor = _FakeExecutor(result=_result(response_text="one two three four five six seven"))

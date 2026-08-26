@@ -114,15 +114,16 @@ async def execute(
             raise HTTPException(status_code=422, detail=f"video job did not produce a usable summary: {detail}")
         prompt = f"## Video context\n\n{job.result.summary}\n\n{prompt}"
 
-    normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
-    if not normalization.success:
-        return ExecuteResponse(
-            request_id="normalizer-failed", tier_requested=payload.tier or 0, tier_executed=0,
-            strategy_id="prompt_normalizer", task_type=payload.task_type, success=False,
-            response="Local prompt normalizer is unavailable.", input_tokens=0, output_tokens=0,
-            total_tokens=0, cost_usd=0.0, latency_ms=0, error_type=normalization.error_type, steps=[],
-        )
-    prompt = normalization.prompt
+    if payload.normalize_prompt:
+        normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
+        if not normalization.success:
+            return ExecuteResponse(
+                request_id="normalizer-failed", tier_requested=payload.tier or 0, tier_executed=0,
+                strategy_id="prompt_normalizer", task_type=payload.task_type, success=False,
+                response="Local prompt normalizer is unavailable.", input_tokens=0, output_tokens=0,
+                total_tokens=0, cost_usd=0.0, latency_ms=0, error_type=normalization.error_type, steps=[],
+            )
+        prompt = normalization.prompt
 
     routing_request = RoutingRequest(
         prompt=prompt,

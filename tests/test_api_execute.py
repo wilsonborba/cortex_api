@@ -213,3 +213,20 @@ def test_execute_normalizes_prompt_before_routing(app_and_overrides):
 
     assert normalizer.calls == ["messy prompt"]
     assert router.last_request.prompt == "structured prompt"
+
+
+def test_execute_can_forward_the_raw_prompt_without_normalization(app_and_overrides):
+    app = app_and_overrides
+    router = _FakeRouter(plan=_plan())
+    executor = _FakeExecutor(result=_result())
+    normalizer = _FakePromptNormalizer(prompt="structured prompt")
+    app.dependency_overrides[get_router] = lambda: router
+    app.dependency_overrides[get_executor] = lambda: executor
+    app.dependency_overrides[get_prompt_normalizer] = lambda: normalizer
+
+    with TestClient(app) as client:
+        response = client.post("/execute", json={"prompt": "messy prompt", "normalize_prompt": False})
+
+    assert response.status_code == 200
+    assert normalizer.calls == []
+    assert router.last_request.prompt == "messy prompt"

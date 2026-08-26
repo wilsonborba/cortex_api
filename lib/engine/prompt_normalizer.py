@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from lib.core.logs import get_logger
+from lib.core.settings import Settings, get_settings
+from lib.dal.models import AccessStatus
 from lib.engine.drivers.base import ExecutionDriver
 from lib.engine.registry_service import ModelRegistryService
 
@@ -31,9 +33,11 @@ class PromptNormalizer:
         self,
         registry: ModelRegistryService,
         drivers: Dict[str, ExecutionDriver],
+        settings: Optional[Settings] = None,
     ) -> None:
         self._registry = registry
         self._drivers = drivers
+        self._settings = settings or get_settings()
 
     def normalize(self, prompt: str) -> PromptNormalizationResult:
         prompt = (prompt or "").strip()
@@ -73,12 +77,20 @@ class PromptNormalizer:
         )
 
     def _pick_model(self):
-        local_candidates = [
-            model
-            for model in self._registry.list_available_for_router(tier=0)
-            if model.is_local and model.provider == "ollama" and model.provider in self._drivers
-        ]
-        if local_candidates:
-            return local_candidates[0]
+        """Return only the configured local text model.
 
-        return None
+        Prompt normalization is text generation.  It must not select the
+        vision model by registry ordering, and it must fail explicitly rather
+        than silently choosing another local model when the text role is down.
+        """
+        model = self._registry.get_model(self._settings.local_text_model_id)
+        if (
+            model is None
+            or not model.is_local
+            or model.provider != "ollama"
+            or model.provider not in self._drivers
+            or not model.is_enabled
+            or model.access_status != AccessStatus.AVAILABLE.value
+        ):
+            return None
+        return model
