@@ -96,6 +96,17 @@ def test_models_config_updates_tiers_and_enabled(model_repo_):
     assert body["is_enabled"] is False
 
 
+def test_models_config_sets_explicit_vision_capability(model_repo_):
+    _seed_model(model_repo_, id="cli-test-provider/cli-vision-model", capabilities={"vision": True})
+
+    result = _invoke(
+        "models", "config", "cli-test-provider/cli-vision-model", "--no-vision-capable"
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)["capabilities"]["vision"] is False
+
+
 def test_models_config_sets_and_clears_context_format_pin(model_repo_):
     _seed_model(model_repo_, id="cli-test-provider/cli-pin-model")
 

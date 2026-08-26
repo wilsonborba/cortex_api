@@ -226,11 +226,20 @@ class Settings(BaseSettings):
         default="var/whisper-models",
         validation_alias=AliasChoices("CORTEX_WHISPER_MODELS_DIR", "WHISPER_MODELS_DIR"),
     )
-    # Resolved once by the setup process (ollama pull qwen2.5vl:7b, falling
-    # back to llava:7b) -- never two vision models installed/used at once.
+    # Bare Ollama model name used by the direct video-ingest driver.
     vision_model: str = Field(
         default="qwen2.5vl:7b",
         validation_alias=AliasChoices("CORTEX_VISION_MODEL", "VISION_MODEL"),
+    )
+    # Registry model IDs used by the Router's local-role policy. Tier-0 text
+    # goes to the text model and image attachments go to the vision model.
+    local_text_model_id: str = Field(
+        default="ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0",
+        validation_alias=AliasChoices("CORTEX_LOCAL_TEXT_MODEL", "LOCAL_TEXT_MODEL"),
+    )
+    local_vision_model_id: str = Field(
+        default="ollama/qwen2.5vl:7b",
+        validation_alias=AliasChoices("CORTEX_LOCAL_VISION_MODEL", "LOCAL_VISION_MODEL"),
     )
 
     # REST API

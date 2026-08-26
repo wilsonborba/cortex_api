@@ -86,6 +86,7 @@ class ModelRegistryService:
         model_id: str,
         tier_eligibility: Optional[List[int]] = None,
         is_enabled: Optional[bool] = None,
+        is_vision_capable: Optional[bool] = None,
         context_format_pin: Optional[str] = None,
         context_format_pin_ttl_seconds: Optional[int] = None,
     ) -> Optional[ModelCatalogEntry]:
@@ -109,6 +110,9 @@ class ModelRegistryService:
             self._repository.update_status(
                 model_id, AccessStatus.OFFLINE, reason="Re-enabled; pending next sync"
             )
+
+        if is_vision_capable is not None:
+            self.set_vision_capable(model_id, is_vision_capable)
 
         if context_format_pin is not None:
             if context_format_pin == "none":
