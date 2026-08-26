@@ -4,6 +4,9 @@
 ## Unreleased
 
 
+## v0.1.1 - 2026-08-22
+
+
 ### Bug Fixes
 
 - Implement instant 2-layer SecurityShield evaluation and instant Proxy Passthrough for memory and tasks
@@ -280,4 +283,3 @@
 - Finalize generic judge command lists in release/main
 
 - Issues #33 #34 #35 full calibration sweep into release/main
-

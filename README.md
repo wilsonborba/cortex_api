@@ -48,13 +48,13 @@ When installing, Cortex runs `./scripts/detect_hardware.sh` to profile your mach
 
 * **`light` (Cloud-First / Low Footprint):**
   * Recommended for systems with $< 8$ GB RAM, $< 4$ CPU cores, or basic cloud VMs.
-  * Installs core orchestration and cloud/free-tier API drivers. Omits heavy local C++ compilation (`pywhispercpp`) and large local model downloads.
+  * Installs core orchestration and cloud/free-tier API drivers. Omits the optional CUDA-backed local audio transcription stack and its model downloads.
 * **`medium` (Balanced Workstation):**
   * Recommended for systems with $8$ to $16$ GB RAM and standard multi-core processors.
   * Includes core orchestration plus database connectors and web crawler utilities.
 * **`complete` (Full Local Stack):**
   * Recommended for systems with $\ge 16$ GB RAM, NVIDIA CUDA GPU ($\ge 6$ GB VRAM), or Apple Silicon with Unified Memory.
-  * Installs full local media audio transcription bindings, developer testing suite, and advanced local models.
+  * Installs the CUDA-backed local audio transcription stack, developer testing suite, and advanced local models.
 
 ---
 

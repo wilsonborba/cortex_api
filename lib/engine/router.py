@@ -121,6 +121,24 @@ class Router:
         tier, prompt = self.resolve_tier(request.tier, request.prompt)
         envelope = self._tier_service.get_envelope(tier)
 
+        # Operational policy: Ollama keeps one model resident, so the local
+        # text and vision models cannot compete as generic Tier-0 candidates.
+        # This deliberately outranks caller overrides, pins and scoring.
+        if self._has_image_attachment(request):
+            return self._plan_required_local_model(
+                request, tier, prompt, envelope,
+                model_id=self._settings.local_vision_model_id,
+                role_name="vision",
+                require_vision=True,
+            )
+        if tier == 0:
+            return self._plan_required_local_model(
+                request, tier, prompt, envelope,
+                model_id=self._settings.local_text_model_id,
+                role_name="text",
+                require_vision=False,
+            )
+
         if request.force_model or request.force_provider or request.force_strategy:
             return self._plan_from_override(request, tier, prompt, envelope)
 
@@ -129,6 +147,44 @@ class Router:
             return self._plan_from_pin(request, tier, prompt, envelope, pin)
 
         return self._plan_dynamic(request, tier, prompt, envelope)
+
+    @staticmethod
+    def _has_image_attachment(request: RoutingRequest) -> bool:
+        return any(attachment.mime_type.startswith("image/") for attachment in request.attachments)
+
+    def _plan_required_local_model(
+        self,
+        request: RoutingRequest,
+        tier: int,
+        prompt: str,
+        envelope: TierPolicy,
+        *,
+        model_id: str,
+        role_name: str,
+        require_vision: bool,
+    ) -> ExecutionPlan:
+        """Build a plan for an explicitly configured local model role."""
+        model = self._registry.get_model(model_id)
+        valid = (
+            model is not None
+            and model.is_local
+            and model.is_enabled
+            and model.access_status == "AVAILABLE"
+            and (not require_vision or self._registry.is_vision_capable(model))
+        )
+        if not valid:
+            capability = " and marked vision-capable" if require_vision else ""
+            raise NoEligibleModelError(
+                f"Configured local {role_name} model {model_id!r} is not available, enabled and local{capability}"
+            )
+
+        selection = ModelSelection(model_id=model.id, provider=model.provider, role="primary")
+        return self._make_plan(
+            tier, request, prompt, envelope, [selection],
+            strategy_id=f"{request.task_type}_t{tier}_ollama_{role_name}_policy",
+            source="local-role-policy",
+            reason=f"configured local {role_name} routing policy",
+        )
 
     # -- layer 3: request-level overrides --------------------------------------
 
