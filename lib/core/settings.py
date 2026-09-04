@@ -212,6 +212,10 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CORTEX_SANITIZE_PROVIDER_TEXT", "SANITIZE_PROVIDER_TEXT"),
     )
+    security_shield_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CORTEX_SECURITY_SHIELD_ENABLED", "SECURITY_SHIELD_ENABLED"),
+    )
 
     # Attachments: local audio transcription + local vision model
     whisper_local_enabled: bool = Field(

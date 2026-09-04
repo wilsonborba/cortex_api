@@ -630,7 +630,7 @@ class Executor:
             error_type = primary.error_type if (primary and primary.error_type) else "all_candidates_exhausted"
         else:
             final_text = next(
-                (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "refiner", "reviser")),
+                (s.response_text for s in reversed(steps) if s.success and s.role in ("primary", "fallback", "refiner", "reviser")),
                 "",
             )
             if gathered and gathered.web_items and "References:" not in final_text:

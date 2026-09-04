@@ -46,6 +46,16 @@ def _build_lifespan(settings: Settings):
             upgrade_db(settings.database_url)
         except Exception:
             logger.warning("DB migration check failed on startup", exc_info=True)
+        finally:
+            # alembic's env.py calls logging.config.fileConfig() on every run
+            # (from alembic.ini's [loggers]/[handlers] sections), which resets
+            # the ROOT logger's handlers wholesale — silently detaching the
+            # rotating file handler configure_logging() just attached above.
+            # Every log line after this point (including the /logs/stream
+            # websocket's entire reason to exist) would otherwise go to
+            # alembic's bare console handler only, forever, for the life of
+            # the process. Re-attach ours now that alembic is done.
+            configure_logging(target=LogTarget.API, log_file=settings.log_file)
 
         try:
             TierService().ensure_seeded()

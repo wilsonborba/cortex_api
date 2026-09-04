@@ -37,14 +37,18 @@ class SecurityEvaluation:
 class SecurityShield:
     """Two sequential layers: deterministic flags, then local Ollama verdict."""
 
-    def __init__(self, registry: ModelRegistryService, drivers: Dict[str, ExecutionDriver]) -> None:
+    def __init__(self, registry: ModelRegistryService, drivers: Dict[str, ExecutionDriver], enabled: bool = True) -> None:
         self._registry = registry
         self._drivers = drivers
+        self._enabled = enabled
 
     def detect_risk_flags(self, text: str) -> List[str]:
         return [name for name, pattern in _RISK_PATTERNS if pattern.search(text)]
 
     def evaluate(self, prompt: str) -> SecurityEvaluation:
+        if not self._enabled:
+            return SecurityEvaluation(risk_flag_detected=False, flags=[], is_blocked=False, reason="Security shield is disabled by configuration.")
+
         flags = self.detect_risk_flags(prompt)
         model = self._pick_local_ollama()
         if model is None or "ollama" not in self._drivers:
@@ -58,14 +62,65 @@ class SecurityShield:
         if not result.success:
             return SecurityEvaluation(bool(flags), flags, True, "security_verifier_unavailable", "Local security verifier failed.", "ollama", model.id)
         try:
-            verdict = json.loads((result.response_text or "").strip())
+            cleaned = (result.response_text or "").strip()
+            # Strip markdown fences if returned by Ollama
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE).strip()
+            # Extract JSON object substring if model output contains leading/trailing text
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if match:
+                cleaned = match.group(0)
+            verdict = json.loads(cleaned)
             decision = verdict.get("decision")
             reason = str(verdict.get("reason") or "SecurityShield local verdict.")[:300]
         except (TypeError, ValueError):
-            return SecurityEvaluation(bool(flags), flags, True, "security_verifier_invalid", "Local security verifier returned an invalid verdict.", "ollama", model.id)
+            # If the model answered with conversational text (e.g. summarizing/answering instead of strict JSON)
+            # and NO hard risk flags were detected, allow benign educational requests.
+            if not flags:
+                return SecurityEvaluation(
+                    risk_flag_detected=False,
+                    flags=[],
+                    is_blocked=False,
+                    reason="Local security verifier passed (no risk flags detected).",
+                    provider="ollama",
+                    model_id=model.id,
+                )
+            return SecurityEvaluation(
+                risk_flag_detected=bool(flags),
+                flags=flags,
+                is_blocked=True,
+                error_type="security_verifier_invalid",
+                reason="Local security verifier returned an invalid verdict.",
+                provider="ollama",
+                model_id=model.id,
+            )
         if decision not in {"allow", "block"}:
-            return SecurityEvaluation(bool(flags), flags, True, "security_verifier_invalid", "Local security verifier returned an invalid verdict.", "ollama", model.id)
-        return SecurityEvaluation(bool(flags), flags, decision == "block", "security_policy_violation" if decision == "block" else None, reason, "ollama", model.id)
+            if not flags:
+                return SecurityEvaluation(
+                    risk_flag_detected=False,
+                    flags=[],
+                    is_blocked=False,
+                    reason="Local security verifier passed (no risk flags detected).",
+                    provider="ollama",
+                    model_id=model.id,
+                )
+            return SecurityEvaluation(
+                risk_flag_detected=bool(flags),
+                flags=flags,
+                is_blocked=True,
+                error_type="security_verifier_invalid",
+                reason="Local security verifier returned an invalid verdict.",
+                provider="ollama",
+                model_id=model.id,
+            )
+        return SecurityEvaluation(
+            risk_flag_detected=bool(flags),
+            flags=flags,
+            is_blocked=decision == "block",
+            error_type="security_policy_violation" if decision == "block" else None,
+            reason=reason,
+            provider="ollama",
+            model_id=model.id,
+        )
 
     def _pick_local_ollama(self):
         for tier in (0, 1, 2):

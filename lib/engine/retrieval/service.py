@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from lib.core.settings import Settings, get_settings
 from lib.engine.retrieval.base import ContentScraper, RetrievalError, ScrapedPage, SearchProvider, SearchResult
 from lib.engine.retrieval.scraper import Crawl4AIScraper, TrafilaturaScraper
-from lib.engine.retrieval.search import DuckDuckGoSearchProvider, SearXNGSearchProvider
+from lib.engine.retrieval.search import DuckDuckGoHtmlProvider, DuckDuckGoSearchProvider, SearXNGSearchProvider
 
 
 @dataclass(frozen=True)
@@ -131,6 +131,10 @@ def build_default_web_retrieval_service(settings: Optional[Settings] = None) -> 
                 base_url=settings.searxng_base_url, timeout=settings.web_retrieval_timeout_seconds
             )
         )
+    # Plain HTML scrape first (least likely to be fingerprinted/throttled),
+    # then the duckduckgo-search library as a second attempt - independent
+    # failure modes, so a request only comes back empty if both are blocked.
+    search_providers.append(DuckDuckGoHtmlProvider(timeout=settings.web_retrieval_timeout_seconds))
     search_providers.append(DuckDuckGoSearchProvider(timeout=settings.web_retrieval_timeout_seconds))
 
     return WebRetrievalService(

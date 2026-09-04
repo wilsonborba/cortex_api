@@ -310,8 +310,19 @@ class Executor:
                     web_items = web_result.items
                     documents += len(web_result.sources)
                     used_web = True
+                # Unambiguous, request-scoped signal for exactly what happened -
+                # this codebase's background health-check/registry-sync loop
+                # also hits duckduckgo.com on its own schedule, which makes the
+                # DEBUG-level HTTP client traces alone impossible to attribute
+                # to a specific /execute call after the fact.
+                logger.info(
+                    "web retrieval for query %r: %d item(s), sources=%s",
+                    plan.prompt[:80], len(web_items), [item.get("url") for item in web_items],
+                )
             except Exception as exc:
                 logger.warning("web retrieval failed for this request: %s", exc)
+        elif plan.needs_web and self._web_retrieval is None:
+            logger.warning("needs_web=True but no web retrieval service is configured")
 
         if plan.use_memory and self._hippocampus is not None:
             try:

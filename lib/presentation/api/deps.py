@@ -13,6 +13,7 @@ from lib.engine.tiers import TierService
 from lib.engine.video_ingest import VideoIngestor
 from lib.engine.video_jobs import VideoJobStore, get_default_video_job_store
 from lib.core.security import SecurityShield
+from lib.core.settings import get_settings
 
 # One instance per process, same pattern as lib.core.settings.get_settings.
 # Overridable per-test via FastAPI's `app.dependency_overrides[get_x] = ...`.
@@ -61,8 +62,13 @@ def get_prompt_normalizer() -> PromptNormalizer:
 
 @lru_cache(maxsize=1)
 def get_security_shield() -> SecurityShield:
+    settings = get_settings()
     executor = get_executor()
-    return SecurityShield(registry=get_registry(), drivers=executor.drivers)
+    return SecurityShield(
+        registry=get_registry(),
+        drivers=executor.drivers,
+        enabled=settings.security_shield_enabled,
+    )
 
 
 @lru_cache(maxsize=1)
