@@ -44,6 +44,10 @@ class ExecuteRequest(BaseModel):
     timeout: Optional[float] = Field(
         default=None, description="Optional driver timeout in seconds for this execution (overrides default)"
     )
+    skip_security: bool = Field(
+        default=False,
+        description="Bypass local SecurityShield verification for trusted internal service generation (e.g. Certifications pipeline).",
+    )
 
 
 class StepOut(BaseModel):

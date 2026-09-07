@@ -27,25 +27,26 @@ async def execute(
     security_shield: SecurityShield = Depends(get_security_shield),
     video_jobs: VideoJobStore = Depends(get_video_job_store),
 ) -> ExecuteResponse:
-    security_eval = await asyncio.to_thread(security_shield.evaluate, payload.prompt)
-    if security_eval.is_blocked:
-        response_text = "Are you kidding me, clown?" if security_eval.error_type == "security_policy_violation" else (security_eval.reason or "Blocked by Security Shield")
-        return ExecuteResponse(
-            request_id="sec-blocked",
-            tier_requested=0,
-            tier_executed=0,
-            strategy_id="security_shield",
-            task_type="security",
-            success=False,
-            response=response_text,
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            cost_usd=0.0,
-            latency_ms=0,
-            error_type=security_eval.error_type,
-            steps=[],
-        )
+    if not payload.skip_security:
+        security_eval = await asyncio.to_thread(security_shield.evaluate, payload.prompt)
+        if security_eval.is_blocked:
+            response_text = "Are you kidding me, clown?" if security_eval.error_type == "security_policy_violation" else (security_eval.reason or "Blocked by Security Shield")
+            return ExecuteResponse(
+                request_id="sec-blocked",
+                tier_requested=0,
+                tier_executed=0,
+                strategy_id="security_shield",
+                task_type="security",
+                success=False,
+                response=response_text,
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                cost_usd=0.0,
+                latency_ms=0,
+                error_type=security_eval.error_type,
+                steps=[],
+            )
 
     # PARTE 1: Proxy Direto (Passthrough) para Memórias e Tarefas (Sem Travamento por IA)
     if payload.capabilities.memory or payload.capabilities.tasks:
