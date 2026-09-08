@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse
 
 from lib.core.logs import LogTarget, configure_logging, get_logger
 from lib.core.settings import Settings, get_settings
-from lib.dal.migrations import upgrade_db
 from lib.engine.executor import UnresolvedStrategyError
 from lib.engine.quota import QuotaTracker, refresh_and_resync
 from lib.engine.registry_service import build_default_registry_service
@@ -42,20 +41,12 @@ def _build_lifespan(settings: Settings):
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         configure_logging(target=LogTarget.API, log_file=settings.log_file)
 
-        try:
-            upgrade_db(settings.database_url)
-        except Exception:
-            logger.warning("DB migration check failed on startup", exc_info=True)
-        finally:
-            # alembic's env.py calls logging.config.fileConfig() on every run
-            # (from alembic.ini's [loggers]/[handlers] sections), which resets
-            # the ROOT logger's handlers wholesale — silently detaching the
-            # rotating file handler configure_logging() just attached above.
-            # Every log line after this point (including the /logs/stream
-            # websocket's entire reason to exist) would otherwise go to
-            # alembic's bare console handler only, forever, for the life of
-            # the process. Re-attach ours now that alembic is done.
-            configure_logging(target=LogTarget.API, log_file=settings.log_file)
+        # Migrations no longer run automatically on startup: this was
+        # causing the service to silently stop mid-startup (never reaching
+        # "application startup complete") and get endlessly restarted by
+        # systemd (Restart=always). Run migrations explicitly and separately
+        # via the CLI (`lib/presentation/cli/main.py`'s upgrade_db call)
+        # before starting the service instead.
 
         try:
             TierService().ensure_seeded()
