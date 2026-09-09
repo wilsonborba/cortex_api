@@ -97,7 +97,12 @@ class HippocampusClient:
             async with self._client_factory() as client:
                 response = await client.post(
                     f"{self._base_url}/api/v1/recall",
-                    json={"query": query, "tags": tags, "limit": limit},
+                    # `workspace_id` (not just the `tenant:` tag) is what
+                    # Hippocampus actually enforces at the repository level
+                    # (see MemoryRepository.list/get); pass both so recall
+                    # is scoped by the real, enforced field, tags stay for
+                    # the topic filter only.
+                    json={"query": query, "tags": tags, "workspace_id": tenant_id, "limit": limit},
                     headers=self._headers(),
                 )
                 response.raise_for_status()

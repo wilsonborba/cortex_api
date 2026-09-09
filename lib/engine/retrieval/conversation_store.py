@@ -20,7 +20,12 @@ async def record_conversation_turn(
     tenant_id: str = "default",
     title: Optional[str] = None,
 ) -> bool:
-    """Stores a completed conversation turn to Hippocampus under tags `conversation:{id}` and `tenant:{tenant_id}`."""
+    """Stores a completed conversation turn to Hippocampus under tags
+    `conversation:{id}` and `tenant:{tenant_id}`, and (this is the part
+    that actually gets enforced at the repository level, unlike tags,
+    which Hippocampus never even echoes back on read) `workspace_id`, so
+    `MemoryRepository.get`/`list`'s real workspace filtering applies to
+    every turn this backend ever writes."""
     turn_data = {
         "user": user_prompt,
         "assistant": assistant_response,
@@ -32,6 +37,7 @@ async def record_conversation_turn(
         "content": content,
         "title": title or f"Turn in {conversation_id}",
         "tags": tags,
+        "workspace_id": tenant_id,
         "metadata": {
             "conversation_id": conversation_id,
             "tenant_id": tenant_id,

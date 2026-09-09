@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from lib.core.tenant import resolve_tenant_id
 from lib.engine.attachments import Attachment
 from lib.engine.executor import Executor
 from lib.engine.format import ENCODERS
@@ -23,6 +24,7 @@ router = APIRouter(tags=["execute"])
 @router.post("/execute", response_model=ExecuteResponse)
 async def execute(
     payload: ExecuteRequest,
+    request: Request,
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
     prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
@@ -79,8 +81,10 @@ async def execute(
         if job and job.result and job.result.summary:
             prompt = f"## Video context\n\n{job.result.summary}\n\n{prompt}"
 
+    tenant_id = resolve_tenant_id(request, payload.tenant_id)
     routing_request = RoutingRequest(
         prompt=prompt,
+        tenant_id=tenant_id,
         tier=payload.tier,
         task_type=payload.task_type,
         thinking=payload.capabilities.thinking or payload.thinking,
@@ -113,7 +117,7 @@ async def execute(
                 conversation_id=payload.conversation_id,
                 user_prompt=payload.prompt,
                 assistant_response=result.response_text,
-                tenant_id=payload.tenant_id or "default",
+                tenant_id=tenant_id,
             )
         )
     return ExecuteResponse.from_result(result)

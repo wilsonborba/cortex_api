@@ -120,8 +120,36 @@ async def test_search_memory_sends_query_as_tags_filter_and_auth_header():
     await client.search_memory("asodya_core", "how does routing work", limit=5)
 
     assert captured["url"] == "http://localhost:8001/api/v1/recall"
-    assert captured["json"] == {"query": "how does routing work", "tags": ["asodya_core"], "limit": 5}
+    assert captured["json"] == {
+        "query": "how does routing work",
+        "tags": ["asodya_core"],
+        "workspace_id": None,
+        "limit": 5,
+    }
     assert captured["headers"] == {"Authorization": "Bearer secret-key"}
+
+
+@pytest.mark.asyncio
+async def test_search_memory_passes_tenant_id_as_workspace_id():
+    """`workspace_id` is what Hippocampus actually enforces at the
+    repository level (unlike the `tenant:` tag, which is a best-effort
+    filter only); a real tenant_id must reach the recall call as both."""
+    captured: dict[str, Any] = {}
+
+    class _CapturingClient(_FakeAsyncClient):
+        async def post(self, url: str, json: Optional[dict] = None, headers: Optional[dict] = None) -> _FakeResponse:
+            captured["json"] = json
+            return await super().post(url, json=json, headers=headers)
+
+    client = HippocampusClient(
+        base_url="http://localhost:8001",
+        client_factory=lambda: _CapturingClient({"data": []}),
+    )
+
+    await client.search_memory("asodya_core", "q", tenant_id="user-123")
+
+    assert captured["json"]["tags"] == ["asodya_core", "tenant:user-123"]
+    assert captured["json"]["workspace_id"] == "user-123"
 
 
 @pytest.mark.asyncio

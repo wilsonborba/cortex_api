@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import uuid
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from lib.core.tenant import resolve_tenant_id
 from lib.dal.repositories.conversation_repository import ConversationRepository
 from lib.engine.retrieval.hippocampus import HippocampusClient
 from lib.presentation.api.deps import get_conversation_repo, get_hippocampus_client
@@ -18,12 +19,12 @@ from lib.presentation.api.schemas.conversations import (
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
-async def _fetch_hippocampus_turns(hippocampus: HippocampusClient, tag: str, limit: int) -> list:
+async def _fetch_hippocampus_turns(hippocampus: HippocampusClient, tag: str, workspace_id: str, limit: int) -> list:
     try:
         async with hippocampus._client_factory() as client:
             resp = await client.get(
                 f"{hippocampus._base_url}/api/v1/memories",
-                params={"tag": tag, "limit": limit},
+                params={"tag": tag, "workspace_id": workspace_id, "limit": limit},
                 headers=hippocampus._headers(),
             )
             resp.raise_for_status()
@@ -34,15 +35,16 @@ async def _fetch_hippocampus_turns(hippocampus: HippocampusClient, tag: str, lim
 
 @router.get("", response_model=List[ConversationSummaryOut])
 async def list_conversations(
-    tenant_id: str = Query("default"),
+    request: Request,
     limit: int = Query(50, ge=1, le=200),
     hippocampus: HippocampusClient = Depends(get_hippocampus_client),
     conversation_repo: ConversationRepository = Depends(get_conversation_repo),
 ) -> List[ConversationSummaryOut]:
-    """Lists conversations for a tenant: metadata (title/pin) from the local
-    store, message stats (count/preview/last activity) derived from
-    Hippocampus turns tagged `conversation_turn` for this tenant."""
-    data = await _fetch_hippocampus_turns(hippocampus, f"tenant:{tenant_id}", limit * 4)
+    """Lists conversations for the authenticated user: metadata (title/pin)
+    from the local store, message stats (count/preview/last activity)
+    derived from Hippocampus turns tagged `conversation_turn` for them."""
+    tenant_id = resolve_tenant_id(request)
+    data = await _fetch_hippocampus_turns(hippocampus, f"tenant:{tenant_id}", tenant_id, limit * 4)
 
     # Group memory turns by conversation_id. Hippocampus never echoes back
     # `metadata`/`tags` on read (see `get_conversation`'s equivalent
@@ -107,15 +109,17 @@ async def list_conversations(
 
 @router.post("", response_model=ConversationSummaryOut)
 async def create_conversation(
+    request: Request,
     payload: ConversationCreateIn,
     conversation_repo: ConversationRepository = Depends(get_conversation_repo),
 ) -> ConversationSummaryOut:
     """Creates a new, empty conversation's metadata row. No message turns
     exist yet, so it will not appear from Hippocampus alone until the first
     turn is recorded, this row is what makes it visible in the meantime."""
+    tenant_id = resolve_tenant_id(request)
     conversation_id = payload.id or str(uuid.uuid4())
     row = conversation_repo.create(
-        conversation_id=conversation_id, tenant_id=payload.tenant_id, title=payload.title
+        conversation_id=conversation_id, tenant_id=tenant_id, title=payload.title
     )
     return ConversationSummaryOut(
         id=row.id,
@@ -132,11 +136,12 @@ async def create_conversation(
 async def patch_conversation(
     conversation_id: str,
     payload: ConversationPatchIn,
-    tenant_id: str = Query("default"),
+    request: Request,
     conversation_repo: ConversationRepository = Depends(get_conversation_repo),
 ) -> ConversationSummaryOut:
     """Renames and/or pins/unpins a conversation. Adopts (creates) the local
     metadata row on first write if it doesn't exist yet."""
+    tenant_id = resolve_tenant_id(request)
     row = None
     if payload.title is not None:
         row = conversation_repo.rename(conversation_id, payload.title, tenant_id=tenant_id)
@@ -161,24 +166,25 @@ async def patch_conversation(
 @router.delete("/{conversation_id}", status_code=204)
 async def delete_conversation(
     conversation_id: str,
-    tenant_id: str = Query("default"),
+    request: Request,
     conversation_repo: ConversationRepository = Depends(get_conversation_repo),
 ) -> None:
     """Soft-deletes a conversation: its metadata row is marked deleted and it
     stops appearing in `list_conversations`. Message turns already recorded
     in Hippocampus are left untouched (Hippocampus has no delete verb)."""
-    conversation_repo.soft_delete(conversation_id, tenant_id=tenant_id)
+    conversation_repo.soft_delete(conversation_id, tenant_id=resolve_tenant_id(request))
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetailOut)
 async def get_conversation(
     conversation_id: str,
-    tenant_id: str = Query("default"),
+    request: Request,
     hippocampus: HippocampusClient = Depends(get_hippocampus_client),
     conversation_repo: ConversationRepository = Depends(get_conversation_repo),
 ) -> ConversationDetailOut:
     """Retrieves full conversation turn history for conversation_id from Hippocampus."""
-    data = await _fetch_hippocampus_turns(hippocampus, f"conversation:{conversation_id}", 100)
+    tenant_id = resolve_tenant_id(request)
+    data = await _fetch_hippocampus_turns(hippocampus, f"conversation:{conversation_id}", tenant_id, 100)
     row = conversation_repo.get(conversation_id, tenant_id=tenant_id)
 
     if not data:

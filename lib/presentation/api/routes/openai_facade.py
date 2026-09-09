@@ -6,9 +6,10 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from lib.core.tenant import resolve_tenant_id
 from lib.engine.executor import Executor, ExecutionResult, UnresolvedStrategyError
 from lib.engine.prompt_normalizer import PromptNormalizer
 from lib.engine.router import NoEligibleModelError, Router, RoutingRequest
@@ -43,6 +44,7 @@ def list_virtual_models() -> ModelList:
 @router.post("/chat/completions")
 async def chat_completions(
     payload: ChatCompletionRequest,
+    request: Request,
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
     prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
@@ -60,8 +62,10 @@ async def chat_completions(
         if not normalization.success:
             return JSONResponse(status_code=503, content=_openai_error("Local prompt normalizer is unavailable.", normalization.error_type or "normalizer_failed"))
         prompt = normalization.prompt
+    tenant_id = resolve_tenant_id(request, payload.tenant_id)
     routing_request = RoutingRequest(
         prompt=prompt,
+        tenant_id=tenant_id,
         tier=tier,
         force_strategy=force_strategy,
         thinking=payload.thinking,
@@ -87,7 +91,7 @@ async def chat_completions(
                 conversation_id=payload.conversation_id,
                 user_prompt=user_prompt,
                 assistant_response=result.response_text,
-                tenant_id=payload.tenant_id or "default",
+                tenant_id=tenant_id,
             )
         )
 
