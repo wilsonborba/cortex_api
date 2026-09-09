@@ -109,7 +109,7 @@ class _FakeHippocampus:
     def __init__(self, chunks: List[MemoryChunk]) -> None:
         self._chunks = chunks
 
-    async def search_memory(self, topic: str, query: str, limit: int = 5) -> List[MemoryChunk]:
+    async def search_memory(self, topic: str, query: str, limit: int = 5, tenant_id: Optional[str] = None) -> List[MemoryChunk]:
         return self._chunks
 
 
@@ -138,6 +138,7 @@ def _plan(
     return ExecutionPlan(
         tier=tier, task_type="general", strategy_id="general_t1_dynamic", prompt="explain sqlite",
         original_prompt="explain sqlite",
+        tenant_id="default",
         selections=selections, allow_multi_model=len(selections) > 1, retrieval_mode="none",
         needs_web=needs_web, use_memory=use_memory, memory_topic=memory_topic, require_verification=False,
         max_latency_seconds=max_latency_seconds, max_model_calls=max(1, len(selections)),

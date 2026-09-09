@@ -144,6 +144,7 @@ class HippocampusClient:
             "title": key,
             "tags": tags,
             "metadata": metadata,
+            "workspace_id": tenant_id,
         }
         if ttl_seconds is not None:
             body["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()

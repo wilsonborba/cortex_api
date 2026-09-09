@@ -257,6 +257,7 @@ class Executor:
                         topic=plan.memory_topic or plan.task_type,
                         key=f"attachment:{plan.attachments[0].filename}",
                         value=ingested.text_context,
+                        tenant_id=plan.tenant_id,
                     )
                 except Exception as exc:
                     logger.warning("failed to store attachment transcript in memory: %s", exc)
@@ -327,7 +328,7 @@ class Executor:
         if plan.use_memory and self._hippocampus is not None:
             try:
                 topic = plan.memory_topic or plan.task_type
-                chunks = await self._hippocampus.search_memory(topic, plan.prompt)
+                chunks = await self._hippocampus.search_memory(topic, plan.prompt, tenant_id=plan.tenant_id)
                 if chunks:
                     memory_items = [{"topic": c.topic, "content": c.content, "score": c.score} for c in chunks]
                     documents += len(chunks)

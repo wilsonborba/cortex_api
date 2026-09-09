@@ -38,6 +38,7 @@ class ExecutionPlan:
     strategy_id: str
     prompt: str
     original_prompt: str
+    tenant_id: str
     selections: List[ModelSelection]
     allow_multi_model: bool
     retrieval_mode: str
@@ -384,6 +385,7 @@ class Router:
             strategy_id=strategy_id,
             prompt=prompt,
             original_prompt=request.prompt,
+            tenant_id=request.tenant_id,
             selections=selections,
             allow_multi_model=allow_multi_model,
             retrieval_mode=envelope.retrieval_mode,
