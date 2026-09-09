@@ -4,8 +4,9 @@ import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from lib.core.logs import get_logger
 from lib.core.tenant import resolve_tenant_id
-from lib.dal.repositories.conversation_repository import ConversationRepository
+from lib.dal.repositories.conversation_repository import ConversationIdConflict, ConversationRepository
 from lib.engine.retrieval.hippocampus import HippocampusClient
 from lib.presentation.api.deps import get_conversation_repo, get_hippocampus_client
 from lib.presentation.api.schemas.conversations import (
@@ -17,6 +18,7 @@ from lib.presentation.api.schemas.conversations import (
 )
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+logger = get_logger(__name__)
 
 
 async def _fetch_hippocampus_turns(hippocampus: HippocampusClient, tag: str, workspace_id: str, limit: int) -> list:
@@ -84,9 +86,18 @@ async def list_conversations(
     local_rows = {c.id: c for c in conversation_repo.list_active(tenant_id=tenant_id)}
     for convo_id, derived in convo_map.items():
         if convo_id not in local_rows:
-            local_rows[convo_id] = conversation_repo.create(
-                conversation_id=convo_id, tenant_id=tenant_id, title=derived["title"]
-            )
+            try:
+                local_rows[convo_id] = conversation_repo.create(
+                    conversation_id=convo_id, tenant_id=tenant_id, title=derived["title"]
+                )
+            except ConversationIdConflict:
+                # This id collides with a *different* tenant's real
+                # conversation row (only possible if some client sent a
+                # colliding conversation_id to /execute or
+                # /v1/chat/completions). Skip adopting it locally rather
+                # than 500ing the whole listing; the derived stats for it
+                # are simply left out of `results` below.
+                logger.warning("conversation id %r collides with another tenant, skipping adoption", convo_id)
 
     results = []
     for convo_id, row in local_rows.items():
@@ -118,9 +129,12 @@ async def create_conversation(
     turn is recorded, this row is what makes it visible in the meantime."""
     tenant_id = resolve_tenant_id(request)
     conversation_id = payload.id or str(uuid.uuid4())
-    row = conversation_repo.create(
-        conversation_id=conversation_id, tenant_id=tenant_id, title=payload.title
-    )
+    try:
+        row = conversation_repo.create(
+            conversation_id=conversation_id, tenant_id=tenant_id, title=payload.title
+        )
+    except ConversationIdConflict:
+        raise HTTPException(status_code=409, detail=f"Conversation id {conversation_id!r} is already in use")
     return ConversationSummaryOut(
         id=row.id,
         title=row.title,
@@ -143,10 +157,13 @@ async def patch_conversation(
     metadata row on first write if it doesn't exist yet."""
     tenant_id = resolve_tenant_id(request)
     row = None
-    if payload.title is not None:
-        row = conversation_repo.rename(conversation_id, payload.title, tenant_id=tenant_id)
-    if payload.is_pinned is not None:
-        row = conversation_repo.set_pinned(conversation_id, payload.is_pinned, tenant_id=tenant_id)
+    try:
+        if payload.title is not None:
+            row = conversation_repo.rename(conversation_id, payload.title, tenant_id=tenant_id)
+        if payload.is_pinned is not None:
+            row = conversation_repo.set_pinned(conversation_id, payload.is_pinned, tenant_id=tenant_id)
+    except ConversationIdConflict:
+        raise HTTPException(status_code=409, detail=f"Conversation id {conversation_id!r} is already in use")
     if row is None:
         row = conversation_repo.get(conversation_id, tenant_id=tenant_id)
     if row is None:
@@ -226,11 +243,27 @@ async def get_conversation(
             messages.append(ConversationTurnOut(id=mem_id, role="user", content=content, created_at=created_at))
 
     if row is None:
-        row = conversation_repo.create(
-            conversation_id=conversation_id,
-            tenant_id=tenant_id,
-            title=first_turn.get("title") or f"Conversation {conversation_id}",
-        )
+        try:
+            row = conversation_repo.create(
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                title=first_turn.get("title") or f"Conversation {conversation_id}",
+            )
+        except ConversationIdConflict:
+            # Hippocampus already scoped `data` to this tenant's own
+            # workspace_id above, so reaching here would mean the id
+            # collides with a different tenant's *local* row specifically
+            # -- surface the messages without a persisted local row rather
+            # than fail the whole read.
+            logger.warning("conversation id %r collides with another tenant's local row", conversation_id)
+            return ConversationDetailOut(
+                id=conversation_id,
+                title=first_turn.get("title") or f"Conversation {conversation_id}",
+                created_at=first_turn.get("created_at") or "",
+                updated_at=last_turn.get("updated_at") or last_turn.get("created_at") or "",
+                messages=messages,
+                is_pinned=False,
+            )
 
     return ConversationDetailOut(
         id=conversation_id,

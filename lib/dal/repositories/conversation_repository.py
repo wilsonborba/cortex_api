@@ -9,9 +9,42 @@ from lib.dal.local.database import SessionLocal, session_scope
 from lib.dal.models import Conversation
 
 
+class ConversationIdConflict(Exception):
+    """Raised when `conversation_id` (client-suppliable on create, and
+    always taken as-is on rename/pin/delete) already belongs to a *different*
+    tenant. `id` is the table's global primary key, so it can never be
+    silently reused across tenants -- that would be exactly the IDOR this
+    repository's tenant-scoped lookups are meant to prevent. Callers should
+    turn this into a 409, not a fresh row and not a 500."""
+
+
 class ConversationRepository:
     def __init__(self, session_factory=SessionLocal) -> None:
         self._session_factory = session_factory
+
+    def _find(self, s: Session, conversation_id: str, tenant_id: str) -> Optional[Conversation]:
+        """Every existence check in this repository must go through this,
+        never a bare `s.get(Conversation, conversation_id)`: a plain
+        primary-key lookup ignores `tenant_id` entirely, and conversation
+        ids are timestamp+counter based (guessable), so that was a real
+        IDOR letting any tenant rename/pin/delete another tenant's
+        conversation row just by guessing/observing its id."""
+        stmt = select(Conversation).where(
+            Conversation.id == conversation_id, Conversation.tenant_id == tenant_id
+        )
+        return s.scalar(stmt)
+
+    def _reject_if_id_taken_by_another_tenant(
+        self, s: Session, conversation_id: str, tenant_id: str
+    ) -> None:
+        """Call right before inserting a new row under [conversation_id]:
+        a bare, deliberately *not* tenant-filtered PK lookup, used only to
+        detect a cross-tenant id collision before it hits the database as
+        a raw IntegrityError."""
+        if s.get(Conversation, conversation_id) is not None:
+            raise ConversationIdConflict(
+                f"conversation id {conversation_id!r} belongs to a different tenant"
+            )
 
     def create(
         self,
@@ -21,9 +54,10 @@ class ConversationRepository:
         session: Optional[Session] = None,
     ) -> Conversation:
         def _create(s: Session) -> Conversation:
-            existing = s.get(Conversation, conversation_id)
+            existing = self._find(s, conversation_id, tenant_id)
             if existing:
                 return existing
+            self._reject_if_id_taken_by_another_tenant(s, conversation_id, tenant_id)
             convo = Conversation(id=conversation_id, tenant_id=tenant_id, title=title)
             s.add(convo)
             s.flush()
@@ -39,16 +73,10 @@ class ConversationRepository:
     def get(
         self, conversation_id: str, tenant_id: str = "default", session: Optional[Session] = None
     ) -> Optional[Conversation]:
-        def _get(s: Session) -> Optional[Conversation]:
-            stmt = select(Conversation).where(
-                Conversation.id == conversation_id, Conversation.tenant_id == tenant_id
-            )
-            return s.scalar(stmt)
-
         if session:
-            return _get(session)
+            return self._find(session, conversation_id, tenant_id)
         with session_scope(self._session_factory) as s:
-            return _get(s)
+            return self._find(s, conversation_id, tenant_id)
 
     def list_active(
         self, tenant_id: str = "default", session: Optional[Session] = None
@@ -72,8 +100,9 @@ class ConversationRepository:
         session: Optional[Session] = None,
     ) -> Conversation:
         def _rename(s: Session) -> Conversation:
-            convo = s.get(Conversation, conversation_id)
+            convo = self._find(s, conversation_id, tenant_id)
             if convo is None:
+                self._reject_if_id_taken_by_another_tenant(s, conversation_id, tenant_id)
                 convo = Conversation(id=conversation_id, tenant_id=tenant_id, title=title)
                 s.add(convo)
             else:
@@ -97,8 +126,9 @@ class ConversationRepository:
         session: Optional[Session] = None,
     ) -> Conversation:
         def _set_pinned(s: Session) -> Conversation:
-            convo = s.get(Conversation, conversation_id)
+            convo = self._find(s, conversation_id, tenant_id)
             if convo is None:
+                self._reject_if_id_taken_by_another_tenant(s, conversation_id, tenant_id)
                 convo = Conversation(id=conversation_id, tenant_id=tenant_id, is_pinned=pinned)
                 s.add(convo)
             else:
@@ -117,14 +147,16 @@ class ConversationRepository:
     def soft_delete(
         self, conversation_id: str, tenant_id: str = "default", session: Optional[Session] = None
     ) -> None:
+        """No-op when [conversation_id] isn't (or isn't yet) one of this
+        tenant's conversations: unlike rename/pin, there is no reason to
+        fabricate a soft-deleted row for an id that was never this
+        tenant's to begin with (also avoids ever attempting an insert that
+        could collide with another tenant's real row sharing the id)."""
         def _delete(s: Session) -> None:
-            convo = s.get(Conversation, conversation_id)
-            now = datetime.now(timezone.utc)
+            convo = self._find(s, conversation_id, tenant_id)
             if convo is None:
-                convo = Conversation(id=conversation_id, tenant_id=tenant_id, deleted_at=now)
-                s.add(convo)
-            else:
-                convo.deleted_at = now
+                return
+            convo.deleted_at = datetime.now(timezone.utc)
             s.flush()
 
         if session:

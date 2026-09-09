@@ -151,3 +151,32 @@ def test_delete_conversation_hides_it_from_listing(test_app):
 
     listing = client.get("/conversations")
     assert all(c["id"] != "convo-crud-delete" for c in listing.json())
+
+
+def test_another_tenant_cannot_rename_pin_or_delete_a_conversation_by_guessing_its_id(test_app):
+    """Regression test for a real IDOR: rename/set_pinned/soft_delete used
+    to look a conversation up by bare id (ignoring tenant_id) before
+    deciding whether to update it, so a guessed/observed id from another
+    tenant would get silently mutated instead of being treated as
+    not-found and adopted fresh under the caller's own tenant."""
+    owner = TestClient(test_app, headers={"x-uuid": "user-a"})
+    intruder = TestClient(test_app, headers={"x-uuid": "user-b"})
+
+    created = owner.post("/conversations", json={"id": "convo-shared-id", "title": "Owner's chat"})
+    assert created.status_code == 200
+
+    # The intruder renames/pins/deletes the same id: must never touch the
+    # owner's row, only ever affect (or create) their own.
+    intruder.patch("/conversations/convo-shared-id", json={"title": "Hijacked"})
+    intruder.patch("/conversations/convo-shared-id", json={"is_pinned": True})
+    intruder.delete("/conversations/convo-shared-id")
+
+    owner_view = owner.get("/conversations/convo-shared-id")
+    assert owner_view.status_code == 200
+    assert owner_view.json()["title"] == "Owner's chat"
+    assert owner_view.json()["is_pinned"] is False
+
+    # The owner's conversation must still be listed (not soft-deleted by
+    # the intruder's delete call).
+    owner_listing = owner.get("/conversations")
+    assert any(c["id"] == "convo-shared-id" for c in owner_listing.json())
