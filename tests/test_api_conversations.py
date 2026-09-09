@@ -18,6 +18,7 @@ class FakeAsyncClient:
         # entirely, just used here to decide which items a `tag` query
         # param matches.
         self.tags_by_id = tags_by_id or {}
+        self.forget_calls = []
 
     async def __aenter__(self):
         return self
@@ -43,7 +44,7 @@ class FakeAsyncClient:
             filtered = [m for m in all_items if tag in self.tags_by_id.get(m.get("id"), [])]
         return FakeResponse({"data": filtered}, self.status_code)
 
-    async def post(self, url, json=None, headers=None):
+    async def post(self, url, params=None, json=None, headers=None):
         class FakeResponse:
             def __init__(self, d, s):
                 self.d = d
@@ -52,6 +53,8 @@ class FakeAsyncClient:
                 pass
             def json(self):
                 return self.d
+        if url.endswith("/forget"):
+            self.forget_calls.append({"url": url, "params": params, "json": json})
         return FakeResponse(self.data, self.status_code)
 
 
@@ -76,11 +79,13 @@ def test_app():
         ]
     }
     tags_by_id = {"mem-1": ["conversation:convo-123", "tenant:default"]}
-    client = HippocampusClient(
-        base_url="http://fake",
-        client_factory=lambda: FakeAsyncClient(fake_memories, tags_by_id=tags_by_id),
-    )
+    # A single shared fake instance (not one built fresh per call) so
+    # `forget_calls` accumulates across the whole request and tests can
+    # inspect it afterwards.
+    fake_client = FakeAsyncClient(fake_memories, tags_by_id=tags_by_id)
+    client = HippocampusClient(base_url="http://fake", client_factory=lambda: fake_client)
     app.dependency_overrides[get_hippocampus_client] = lambda: client
+    app.state.fake_hippocampus_client = fake_client
     return app
 
 
@@ -151,6 +156,22 @@ def test_delete_conversation_hides_it_from_listing(test_app):
 
     listing = client.get("/conversations")
     assert all(c["id"] != "convo-crud-delete" for c in listing.json())
+
+
+def test_delete_conversation_forgets_its_turns_in_hippocampus(test_app):
+    """`convo-123`'s one turn (`mem-1`) must actually be forgotten in
+    Hippocampus when its conversation is deleted, tenant-scoped -- "delete"/
+    "clear all" must remove the user's message content, not just this API's
+    own local bookkeeping of it."""
+    client = TestClient(test_app)
+    resp = client.delete("/conversations/convo-123")
+    assert resp.status_code == 204
+
+    fake = test_app.state.fake_hippocampus_client
+    assert len(fake.forget_calls) == 1
+    call = fake.forget_calls[0]
+    assert call["url"] == "http://fake/api/v1/memories/mem-1/forget"
+    assert call["params"] == {"workspace_id": "default"}
 
 
 def test_delete_conversation_is_not_resurrected_by_hippocampus_lazy_adoption(test_app):

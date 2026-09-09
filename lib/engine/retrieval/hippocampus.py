@@ -160,6 +160,29 @@ class HippocampusClient:
             return False
         return True
 
+    async def forget_memory(self, memory_id: str, workspace_id: Optional[str] = None, reason: Optional[str] = None) -> bool:
+        """Logically forgets a memory (`POST /memories/{id}/forget`):
+        provenance/history stay, only its status flips, same distinction
+        hippocampus itself draws between forget and hard-delete. `workspace_id`
+        is required in practice here (this is only ever called with the
+        caller's own already tenant-scoped memory ids, e.g. from
+        `delete_conversation`), and is enforced server-side the same
+        fail-closed way as every other workspace-scoped call this client
+        makes: a mismatched id degrades to "did nothing", not a leak."""
+        try:
+            async with self._client_factory() as client:
+                response = await client.post(
+                    f"{self._base_url}/api/v1/memories/{memory_id}/forget",
+                    params={"workspace_id": workspace_id} if workspace_id else None,
+                    json={"reason": reason},
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("hippocampus.forget_memory unavailable (memory_id=%r): %s", memory_id, exc)
+            return False
+        return True
+
     async def list_memories(
         self, workspace_id: str, limit: int = 60
     ) -> List[Dict[str, Any]]:

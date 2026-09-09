@@ -193,12 +193,26 @@ async def patch_conversation(
 async def delete_conversation(
     conversation_id: str,
     request: Request,
+    hippocampus: HippocampusClient = Depends(get_hippocampus_client),
     conversation_repo: ConversationRepository = Depends(get_conversation_repo),
 ) -> None:
-    """Soft-deletes a conversation: its metadata row is marked deleted and it
-    stops appearing in `list_conversations`. Message turns already recorded
-    in Hippocampus are left untouched (Hippocampus has no delete verb)."""
-    conversation_repo.soft_delete(conversation_id, tenant_id=resolve_tenant_id(request))
+    """Soft-deletes a conversation's local metadata row (stops appearing in
+    `list_conversations`, see its "never resurrect" lazy-adoption check) and
+    also forgets every turn this conversation has in Hippocampus, so
+    "delete"/"clear all" genuinely removes the user's message content, not
+    just this API's own bookkeeping of it. Forgetting is logical, not a hard
+    delete (matches Hippocampus's own forget/hard_delete distinction) --
+    provenance/history still exist for audit purposes, the memory just stops
+    being active/recallable. Each forget call is independently tenant-scoped
+    (`HippocampusClient.forget_memory`'s `workspace_id`), so even if this
+    lookup somehow returned a foreign id it could never forget it."""
+    tenant_id = resolve_tenant_id(request)
+    conversation_repo.soft_delete(conversation_id, tenant_id=tenant_id)
+    turns = await _fetch_hippocampus_turns(hippocampus, f"conversation:{conversation_id}", tenant_id, 500)
+    for turn in turns:
+        memory_id = turn.get("id")
+        if memory_id:
+            await hippocampus.forget_memory(memory_id, workspace_id=tenant_id, reason="conversation deleted")
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetailOut)
