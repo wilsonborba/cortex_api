@@ -130,12 +130,29 @@ class HippocampusClient:
         return chunks
 
     async def store_event(
-        self, topic: str, key: str, value: Any, ttl_seconds: Optional[int] = None, tenant_id: Optional[str] = None
+        self,
+        topic: str,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[int] = None,
+        tenant_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
     ) -> bool:
         content = value if isinstance(value, str) else json.dumps(value, default=str)
         tags = [topic] if topic else []
         if tenant_id:
             tags.append(f"tenant:{tenant_id}")
+        if conversation_id:
+            # The only thing that lets a conversation's attachments be found
+            # again alongside its turns: `_fetch_hippocampus_turns` (see
+            # `conversations.py`) filters by exactly this tag, and the
+            # memory-graph aggregation seeds/links nodes the same way (see
+            # `build_workspace_memory_graph`). Without it, an attachment's
+            # memory is workspace-scoped but otherwise orphaned -- it
+            # never resurfaces when a conversation is reloaded, and it
+            # never gets linked into that conversation's cluster in the
+            # graph either.
+            tags.append(f"conversation:{conversation_id}")
         metadata = {"key": key}
         if tenant_id:
             metadata["tenant_id"] = tenant_id

@@ -75,10 +75,20 @@ def test_app():
                 "content": "User: hello\n\nAssistant: hi there",
                 "created_at": "2026-09-09T00:00:00Z",
                 "updated_at": "2026-09-09T00:00:00Z",
-            }
+            },
+            {
+                "id": "mem-2",
+                "title": "attachment:report.pdf",
+                "content": "Extracted PDF text.",
+                "created_at": "2026-09-08T23:59:58Z",
+                "updated_at": "2026-09-08T23:59:58Z",
+            },
         ]
     }
-    tags_by_id = {"mem-1": ["conversation:convo-123", "tenant:default"]}
+    tags_by_id = {
+        "mem-1": ["conversation:convo-123", "tenant:default"],
+        "mem-2": ["conversation:convo-123", "tenant:default"],
+    }
     # A single shared fake instance (not one built fresh per call) so
     # `forget_calls` accumulates across the whole request and tests can
     # inspect it afterwards.
@@ -97,6 +107,22 @@ def test_list_conversations(test_app):
     assert len(data) == 1
     assert data[0]["id"] == "convo-123"
     assert data[0]["message_count"] == 2
+
+
+def test_get_conversation_detail_attaches_files_to_the_right_user_message(test_app):
+    """`mem-2` (an attachment memory tagged for the same conversation) must
+    surface as an attachment on the user turn it belongs to, not as its own
+    message and not dropped -- this is what lets the frontend keep showing
+    an attachment's icon/filename after a conversation is reloaded."""
+    client = TestClient(test_app)
+    resp = client.get("/conversations/convo-123")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["messages"]) == 2  # the attachment does not become a 3rd message
+    user_message = data["messages"][0]
+    assert user_message["role"] == "user"
+    assert user_message["attachments"] == [{"filename": "report.pdf"}]
+    assert data["messages"][1]["attachments"] == []
 
 
 def test_get_conversation_detail(test_app):

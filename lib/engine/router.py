@@ -39,6 +39,7 @@ class ExecutionPlan:
     prompt: str
     original_prompt: str
     tenant_id: str
+    conversation_id: Optional[str]
     selections: List[ModelSelection]
     allow_multi_model: bool
     retrieval_mode: str
@@ -58,6 +59,7 @@ class ExecutionPlan:
 class RoutingRequest:
     prompt: str
     tenant_id: str = "default"
+    conversation_id: Optional[str] = None
     tier: Optional[Union[int, str]] = None  # None or "auto" => resolved by classifier/directive
     task_type: str = "general"
     needs_web: bool = False
@@ -386,6 +388,7 @@ class Router:
             prompt=prompt,
             original_prompt=request.prompt,
             tenant_id=request.tenant_id,
+            conversation_id=request.conversation_id,
             selections=selections,
             allow_multi_model=allow_multi_model,
             retrieval_mode=envelope.retrieval_mode,

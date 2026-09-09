@@ -4,11 +4,16 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+class ConversationAttachmentOut(BaseModel):
+    filename: str
+
+
 class ConversationTurnOut(BaseModel):
     id: str
     role: str
     content: str
     created_at: str
+    attachments: List[ConversationAttachmentOut] = []
 
 
 class ConversationSummaryOut(BaseModel):

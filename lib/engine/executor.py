@@ -251,13 +251,25 @@ class Executor:
                     strategy_id=plan.strategy_id, task_type=plan.task_type, success=False,
                     response_text="; ".join(ingested.errors), error_type="attachment_error",
                 )
-            if ingested.text_context and self._hippocampus is not None and plan.use_memory:
+            if ingested.text_context and self._hippocampus is not None:
+                # Persisted whenever an attachment is actually sent, not
+                # gated on plan.use_memory: that flag controls whether
+                # *past* memories get retrieved to ground *this* reply, a
+                # different concern from "remember this attachment so its
+                # icon/name survive a conversation reload and it shows up
+                # in the memory graph" (both need it recorded regardless).
+                # NOTE: only attachments[0]'s filename becomes the title --
+                # a message with more than one attachment still stores one
+                # combined memory under the first file's name (pre-existing
+                # ingestion-layer limitation: AttachmentIngestor.ingest only
+                # returns one merged text_context, not per-file text).
                 try:
                     await self._hippocampus.store_event(
                         topic=plan.memory_topic or plan.task_type,
                         key=f"attachment:{plan.attachments[0].filename}",
                         value=ingested.text_context,
                         tenant_id=plan.tenant_id,
+                        conversation_id=plan.conversation_id,
                     )
                 except Exception as exc:
                     logger.warning("failed to store attachment transcript in memory: %s", exc)

@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from lib.dal.repositories.conversation_repository import ConversationRepository
 from lib.engine.retrieval.hippocampus import HippocampusClient
 
-_ATTACHMENT_TITLE_PREFIX = "attachment:"
+ATTACHMENT_TITLE_PREFIX = "attachment:"
 _CONVERSATION_TURN_TITLE_PREFIX = "Turn in "
 _TURN_LABEL_MAX = 60
 _CONVERSATION_TAG_PREFIX = "conversation:"
@@ -101,8 +101,8 @@ def _relabel_attachment_node(node: Dict[str, Any]) -> Dict[str, Any]:
     frontend can render/link it distinctly, instead of teaching hippocampus
     (which has no reason to know Cortex's attachment convention) about it."""
     label = node.get("label") or ""
-    if node.get("node_type") == "memory" and label.startswith(_ATTACHMENT_TITLE_PREFIX):
-        filename = label[len(_ATTACHMENT_TITLE_PREFIX):].strip() or label
+    if node.get("node_type") == "memory" and label.startswith(ATTACHMENT_TITLE_PREFIX):
+        filename = label[len(ATTACHMENT_TITLE_PREFIX):].strip() or label
         return {**node, "node_type": "attachment", "label": filename, "subtitle": "attachment"}
     return _clean_turn_label(node)
 
