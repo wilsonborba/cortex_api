@@ -5,6 +5,56 @@ from typing import Any, Dict, List
 from lib.engine.retrieval.hippocampus import HippocampusClient
 
 _ATTACHMENT_TITLE_PREFIX = "attachment:"
+_CONVERSATION_TURN_TITLE_PREFIX = "Turn in "
+_TURN_LABEL_MAX = 60
+# Pure bookkeeping tags this API writes on every conversation-turn memory
+# (see `record_conversation_turn`): never meaningful "topics" for a user to
+# explore in the graph, just plumbing this API's own routes use to filter/
+# group turns. `tag:{namespace}:...` node ids come from hippocampus's own
+# `f"tag:{tag.id}"`, but its *label* is the tag's canonical name -- match on
+# that instead of the opaque id.
+_NOISE_TAG_PREFIXES = ("tenant:", "conversation:", "type:conversation")
+
+
+def _is_noise_tag_node(node: Dict[str, Any]) -> bool:
+    if node.get("node_type") != "tag":
+        return False
+    label = node.get("label") or ""
+    return label.startswith(_NOISE_TAG_PREFIXES)
+
+
+def _clean_turn_label(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Every conversation-turn memory this API ever writes gets the exact
+    same generic title (`f"Turn in {conversation_id}"`, see
+    `record_conversation_turn`) -- needed so `list_conversations`/
+    `get_conversation` can recover `conversation_id` from it (hippocampus
+    never echoes tags/metadata back on read, title is the only channel that
+    reliably round-trips), but it means every one of these nodes' graph
+    label looks identical and tells the user nothing about what's actually
+    in it. Hippocampus's own node label always prefers that generic title
+    over the memory's real content (correctly, for callers with real
+    human-written titles), so it now also exposes a raw `content_preview`
+    in metadata (see `MemoryGraphService.build_graph`) this rebuilds a
+    useful label from instead, without touching the title contract
+    `list_conversations`/`get_conversation` depend on."""
+    label = node.get("label") or ""
+    if not label.startswith(_CONVERSATION_TURN_TITLE_PREFIX):
+        return node
+    preview = (node.get("metadata") or {}).get("content_preview")
+    if not preview:
+        return node
+    # `record_conversation_turn` always writes content as
+    # `f"User: {user_prompt}\n\nAssistant: {assistant_response}"`; the user's
+    # own words are the useful "keyword" for a label, the "User: " marker
+    # and the assistant's reply are just noise here.
+    text = preview
+    if text.startswith("User: "):
+        text = text[len("User: "):]
+    text = text.split("\n\nAssistant:", 1)[0].strip()
+    if not text:
+        return node
+    cleaned = text if len(text) <= _TURN_LABEL_MAX else text[: _TURN_LABEL_MAX - 1] + "…"
+    return {**node, "label": cleaned}
 
 
 def _relabel_attachment_node(node: Dict[str, Any]) -> Dict[str, Any]:
@@ -19,7 +69,7 @@ def _relabel_attachment_node(node: Dict[str, Any]) -> Dict[str, Any]:
     if node.get("node_type") == "memory" and label.startswith(_ATTACHMENT_TITLE_PREFIX):
         filename = label[len(_ATTACHMENT_TITLE_PREFIX):].strip() or label
         return {**node, "node_type": "attachment", "label": filename, "subtitle": "attachment"}
-    return node
+    return _clean_turn_label(node)
 
 
 async def build_workspace_memory_graph(
@@ -57,7 +107,7 @@ async def build_workspace_memory_graph(
         )
         for node in subgraph.get("nodes", []):
             node_id = node.get("id")
-            if not node_id or node_id in nodes_by_id:
+            if not node_id or node_id in nodes_by_id or _is_noise_tag_node(node):
                 continue
             if len(nodes_by_id) >= max_total_nodes:
                 truncated = True

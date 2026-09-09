@@ -21,6 +21,9 @@ class FakeAsyncClient:
             "tenant-b": [
                 {"id": "mem-b1", "title": "attachment:report.pdf", "content": "Quarterly report text."},
             ],
+            "tenant-c": [
+                {"id": "mem-c1", "title": "Turn in convo-999", "content": "User: what is sqlite\n\nAssistant: it's an embedded database."},
+            ],
         }
         self.graphs_by_memory = {
             "mem-a1": {
@@ -37,6 +40,24 @@ class FakeAsyncClient:
                     {"id": "mem-b1", "node_type": "memory", "label": "attachment:report.pdf"},
                 ],
                 "edges": [],
+            },
+            "mem-c1": {
+                "nodes": [
+                    {
+                        "id": "mem-c1",
+                        "node_type": "memory",
+                        "label": "Turn in convo-999",
+                        "metadata": {"content_preview": "User: what is sqlite\n\nAssistant: it's an embedded database."},
+                    },
+                    {"id": "tag:conversation:convo-999", "node_type": "tag", "label": "conversation:convo-999"},
+                    {"id": "tag:tenant:tenant-c", "node_type": "tag", "label": "tenant:tenant-c"},
+                    {"id": "tag:type:conversation-turn", "node_type": "tag", "label": "type:conversation-turn"},
+                ],
+                "edges": [
+                    {"source_id": "mem-c1", "target_id": "tag:conversation:convo-999", "edge_type": "tagged_with"},
+                    {"source_id": "mem-c1", "target_id": "tag:tenant:tenant-c", "edge_type": "tagged_with"},
+                    {"source_id": "mem-c1", "target_id": "tag:type:conversation-turn", "edge_type": "tagged_with"},
+                ],
             },
         }
 
@@ -65,19 +86,19 @@ class FakeAsyncClient:
             ws = params.get("workspace_id")
             return FakeResponse({"data": self.memories_by_workspace.get(ws, [])})
 
+        owners = {"mem-a1": "tenant-a", "mem-b1": "tenant-b", "mem-c1": "tenant-c"}
+
         if url.endswith("/graph"):
             memory_id = url.split("/api/v1/memories/")[1].split("/graph")[0]
             ws = params.get("workspace_id")
-            owner_ws = "tenant-a" if memory_id == "mem-a1" else "tenant-b" if memory_id == "mem-b1" else None
-            if owner_ws != ws:
+            if owners.get(memory_id) != ws:
                 return FakeResponse({"error": "not found"}, 404)
             return FakeResponse({"data": self.graphs_by_memory.get(memory_id, {"nodes": [], "edges": []})})
 
         # GET /api/v1/memories/{id}
         memory_id = url.rsplit("/", 1)[-1]
         ws = params.get("workspace_id")
-        owner_ws = "tenant-a" if memory_id == "mem-a1" else "tenant-b" if memory_id == "mem-b1" else None
-        if ws is not None and owner_ws != ws:
+        if ws is not None and owners.get(memory_id) != ws:
             return FakeResponse({"error": "not found"}, 404)
         for items in self.memories_by_workspace.values():
             for m in items:
@@ -127,6 +148,34 @@ def test_attachment_memory_is_relabeled_as_attachment_node(test_app):
     assert len(attachment_nodes) == 1
     assert attachment_nodes[0]["node_type"] == "attachment"
     assert attachment_nodes[0]["label"] == "report.pdf"
+
+
+def test_conversation_turn_label_is_rebuilt_from_content_preview(test_app):
+    """Regression test: every conversation-turn memory shares the exact same
+    generic title (`f"Turn in {conversation_id}"`), which used to leak
+    straight through as the node's label -- every one of these nodes looked
+    identical and told the user nothing. It must be rebuilt from the user's
+    own words in `content_preview` instead."""
+    client = TestClient(test_app, headers={"x-uuid": "tenant-c"})
+    resp = client.get("/memory-graph")
+    assert resp.status_code == 200
+    nodes = resp.json()["nodes"]
+    turn_nodes = [n for n in nodes if n["id"] == "mem-c1"]
+    assert len(turn_nodes) == 1
+    assert turn_nodes[0]["label"] == "what is sqlite"
+
+
+def test_bookkeeping_tenant_and_conversation_tags_are_filtered_out(test_app):
+    """`tenant:*`/`conversation:*`/`type:conversation-turn` tags are pure
+    plumbing this API writes on every turn for its own lookups, never a
+    meaningful topic -- they must not clutter the graph."""
+    client = TestClient(test_app, headers={"x-uuid": "tenant-c"})
+    resp = client.get("/memory-graph")
+    assert resp.status_code == 200
+    node_ids = {n["id"] for n in resp.json()["nodes"]}
+    assert "tag:conversation:convo-999" not in node_ids
+    assert "tag:tenant:tenant-c" not in node_ids
+    assert "tag:type:conversation-turn" not in node_ids
 
 
 def test_node_context_for_a_memory_id(test_app):
