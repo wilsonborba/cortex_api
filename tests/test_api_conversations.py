@@ -153,6 +153,24 @@ def test_delete_conversation_hides_it_from_listing(test_app):
     assert all(c["id"] != "convo-crud-delete" for c in listing.json())
 
 
+def test_delete_conversation_is_not_resurrected_by_hippocampus_lazy_adoption(test_app):
+    """Regression test: `convo-123` has a real turn in this fixture's fake
+    Hippocampus data, which never goes away (Hippocampus has no delete
+    verb). Deleting it used to come right back on the next `GET
+    /conversations` (and remain fetchable via `GET /conversations/{id}`)
+    because the lazy-adoption path re-created its local row without
+    checking whether it had just been soft-deleted."""
+    client = TestClient(test_app)
+    resp = client.delete("/conversations/convo-123")
+    assert resp.status_code == 204
+
+    listing = client.get("/conversations")
+    assert all(c["id"] != "convo-123" for c in listing.json())
+
+    detail = client.get("/conversations/convo-123")
+    assert detail.status_code == 404
+
+
 def test_another_tenant_cannot_rename_pin_or_delete_a_conversation_by_guessing_its_id(test_app):
     """Regression test for a real IDOR: rename/set_pinned/soft_delete used
     to look a conversation up by bare id (ignoring tenant_id) before

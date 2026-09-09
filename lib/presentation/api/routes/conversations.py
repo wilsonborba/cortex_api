@@ -82,22 +82,31 @@ async def list_conversations(
     # Any conversation with turns but no local metadata row yet (legacy
     # data, or a turn recorded before the conversation was ever created
     # through this API) is lazily adopted into the local store so it
-    # becomes rename/pin/delete-able going forward.
+    # becomes rename/pin/delete-able going forward. Hippocampus has no
+    # delete verb, so its turns for a soft-deleted conversation never go
+    # away -- `conversation_repo.get` (unlike `list_active`) returns a
+    # soft-deleted row too, so it's checked explicitly here to skip
+    # re-adopting one: without this, "delete"/"clear all" would silently
+    # resurrect on the very next listing, which used to actually happen.
     local_rows = {c.id: c for c in conversation_repo.list_active(tenant_id=tenant_id)}
     for convo_id, derived in convo_map.items():
-        if convo_id not in local_rows:
-            try:
-                local_rows[convo_id] = conversation_repo.create(
-                    conversation_id=convo_id, tenant_id=tenant_id, title=derived["title"]
-                )
-            except ConversationIdConflict:
-                # This id collides with a *different* tenant's real
-                # conversation row (only possible if some client sent a
-                # colliding conversation_id to /execute or
-                # /v1/chat/completions). Skip adopting it locally rather
-                # than 500ing the whole listing; the derived stats for it
-                # are simply left out of `results` below.
-                logger.warning("conversation id %r collides with another tenant, skipping adoption", convo_id)
+        if convo_id in local_rows:
+            continue
+        existing = conversation_repo.get(convo_id, tenant_id=tenant_id)
+        if existing is not None and existing.deleted_at is not None:
+            continue  # intentionally deleted; never resurrect it just because Hippocampus still has its turns
+        try:
+            local_rows[convo_id] = conversation_repo.create(
+                conversation_id=convo_id, tenant_id=tenant_id, title=derived["title"]
+            )
+        except ConversationIdConflict:
+            # This id collides with a *different* tenant's real
+            # conversation row (only possible if some client sent a
+            # colliding conversation_id to /execute or
+            # /v1/chat/completions). Skip adopting it locally rather
+            # than 500ing the whole listing; the derived stats for it
+            # are simply left out of `results` below.
+            logger.warning("conversation id %r collides with another tenant, skipping adoption", convo_id)
 
     results = []
     for convo_id, row in local_rows.items():
@@ -201,8 +210,15 @@ async def get_conversation(
 ) -> ConversationDetailOut:
     """Retrieves full conversation turn history for conversation_id from Hippocampus."""
     tenant_id = resolve_tenant_id(request)
-    data = await _fetch_hippocampus_turns(hippocampus, f"conversation:{conversation_id}", tenant_id, 100)
     row = conversation_repo.get(conversation_id, tenant_id=tenant_id)
+    if row is not None and row.deleted_at is not None:
+        # Same "never resurrect a deleted conversation" rule as
+        # `list_conversations`: Hippocampus's turns for it are still there
+        # (it has no delete verb), but that must not make a directly-fetched
+        # deleted conversation's detail come back either.
+        raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found")
+
+    data = await _fetch_hippocampus_turns(hippocampus, f"conversation:{conversation_id}", tenant_id, 100)
 
     if not data:
         if row is None:
