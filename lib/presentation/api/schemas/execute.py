@@ -29,6 +29,7 @@ class ExecuteRequest(BaseModel):
     needs_web: bool = False
     use_memory: bool = False
     capabilities: CapabilitySchema = Field(default_factory=CapabilitySchema)
+    conversation_id: Optional[str] = Field(default=None, description="Optional conversation id to tag and persist turn history in Hippocampus")
     auto_retrieval: bool = False
     memory_topic: Optional[str] = None
     force_model: Optional[str] = None

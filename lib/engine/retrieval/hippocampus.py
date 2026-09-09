@@ -131,11 +131,14 @@ class HippocampusClient:
         tags = [topic] if topic else []
         if tenant_id:
             tags.append(f"tenant:{tenant_id}")
+        metadata = {"key": key}
+        if tenant_id:
+            metadata["tenant_id"] = tenant_id
         body: Dict[str, Any] = {
             "content": content,
             "title": key,
             "tags": tags,
-            "metadata": {"key": key, "tenant_id": tenant_id},
+            "metadata": metadata,
         }
         if ttl_seconds is not None:
             body["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()

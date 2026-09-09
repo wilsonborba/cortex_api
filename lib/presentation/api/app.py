@@ -17,7 +17,7 @@ from lib.engine.registry_service import build_default_registry_service
 from lib.engine.router import NoEligibleModelError
 from lib.engine.tiers import TierService
 from lib.presentation.api.openapi_i18n import get_localized_openapi
-from lib.presentation.api.routes import execute, logs_stream, models, openai_facade, pins, quota, system, telemetry, tiers, video
+from lib.presentation.api.routes import conversations, execute, logs_stream, models, openai_facade, pins, quota, system, telemetry, tiers, video
 
 logger = get_logger(__name__)
 
@@ -40,6 +40,8 @@ def _build_lifespan(settings: Settings):
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         configure_logging(target=LogTarget.API, log_file=settings.log_file)
+        from lib.presentation.api.routes.system import _PROCESS_STARTED_AT
+        logger.info("cortex_api process started at %s (see GET /system/status)", _PROCESS_STARTED_AT)
 
         # Migrations no longer run automatically on startup: this was
         # causing the service to silently stop mid-startup (never reaching
@@ -270,6 +272,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return HTMLResponse(html)
 
     app.include_router(execute.router)
+    app.include_router(conversations.router)
     app.include_router(models.router)
     app.include_router(quota.router)
     app.include_router(tiers.router)

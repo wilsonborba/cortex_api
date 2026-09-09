@@ -25,6 +25,9 @@ class ChatCompletionRequest(BaseModel):
     use_memory: bool = False
     auto_retrieval: bool = False
     memory_topic: Optional[str] = None
+    conversation_id: Optional[str] = Field(default=None, description="Optional conversation id to tag and persist turn history in Hippocampus")
+    temporary: bool = Field(default=False, description="When true (e.g. incognito mode), do not persist conversation turn to Hippocampus")
+    tenant_id: Optional[str] = Field(default="default", description="Tenant namespace identifier")
 
 
 class ChatCompletionChoice(BaseModel):

@@ -435,13 +435,14 @@ class Executor:
                     sidecar_selection = ModelSelection(model_id=cli_model_id, provider=cli_provider, role="primary")
                     sidecar_step = await self._run_step(plan, sidecar_selection, context, deadline, images=images)
                     self._log_step(plan, request_id, sidecar_selection, sidecar_step, None, None)
-                    steps.append(sidecar_step)
                     if sidecar_step.success:
-                        return self._build_result(plan, request_id, steps, gathered=gathered if 'gathered' in locals() else None)
+                        gathered = context_retry.gathered if context_retry is not None else None
+                        return self._build_result(plan, request_id, steps, gathered=gathered)
                     else:
                         self._quota_tracker.enter_cooldown(cli_model_id, provider=cli_provider, reason=sidecar_step.error_message or sidecar_step.error_type)
                 break
 
+        gathered = context_retry.gathered if context_retry is not None else None
         return self._build_result(plan, request_id, steps, gathered=gathered)
 
     async def _execute_ordered_cascade(

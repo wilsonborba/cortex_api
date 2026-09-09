@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from lib.dal.repositories.conversation_repository import ConversationRepository
 from lib.dal.repositories.pin_repository import RoutingPinRepository
 from lib.dal.repositories.telemetry_repository import TelemetryRepository
 from lib.engine.executor import Executor, build_default_executor
@@ -37,6 +38,11 @@ def get_tier_service() -> TierService:
 @lru_cache(maxsize=1)
 def get_pin_repo() -> RoutingPinRepository:
     return RoutingPinRepository()
+
+
+@lru_cache(maxsize=1)
+def get_conversation_repo() -> ConversationRepository:
+    return ConversationRepository()
 
 
 @lru_cache(maxsize=1)
@@ -98,3 +104,10 @@ def _summarize_via_router(text: str) -> str:
 @lru_cache(maxsize=1)
 def get_video_ingestor() -> VideoIngestor:
     return VideoIngestor(text_summarizer=_summarize_via_router)
+
+
+@lru_cache(maxsize=1)
+def get_hippocampus_client():
+    from lib.engine.retrieval.hippocampus import build_default_hippocampus_client
+    return build_default_hippocampus_client()
+

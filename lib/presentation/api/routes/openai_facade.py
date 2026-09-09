@@ -12,8 +12,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from lib.engine.executor import Executor, ExecutionResult, UnresolvedStrategyError
 from lib.engine.prompt_normalizer import PromptNormalizer
 from lib.engine.router import NoEligibleModelError, Router, RoutingRequest
+from lib.engine.retrieval.hippocampus import HippocampusClient
+from lib.engine.retrieval.conversation_store import record_conversation_turn
 from lib.core.security import SecurityShield
-from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router, get_security_shield
+from lib.presentation.api.deps import get_executor, get_hippocampus_client, get_prompt_normalizer, get_router, get_security_shield
 from lib.presentation.api.schemas.openai_facade import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -45,6 +47,7 @@ async def chat_completions(
     executor: Executor = Depends(get_executor),
     prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
     security_shield: SecurityShield = Depends(get_security_shield),
+    hippocampus: HippocampusClient = Depends(get_hippocampus_client),
 ):
     tier, force_strategy = _translate_model(payload.model)
     prompt = _messages_to_prompt(payload.messages)
@@ -75,6 +78,18 @@ async def chat_completions(
         return JSONResponse(status_code=409, content=_openai_error(str(exc), "no_eligible_model"))
     except UnresolvedStrategyError as exc:
         return JSONResponse(status_code=501, content=_openai_error(str(exc), "unresolved_strategy"))
+
+    if result.success and payload.conversation_id and not payload.temporary:
+        user_prompt = payload.messages[-1].content if payload.messages else prompt
+        asyncio.create_task(
+            record_conversation_turn(
+                hippocampus=hippocampus,
+                conversation_id=payload.conversation_id,
+                user_prompt=user_prompt,
+                assistant_response=result.response_text,
+                tenant_id=payload.tenant_id or "default",
+            )
+        )
 
     if payload.stream:
         return StreamingResponse(_stream_response(payload.model, result), media_type="text/event-stream")

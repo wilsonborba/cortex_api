@@ -132,6 +132,22 @@ class SlidingWindowUsage(Base, TimestampMixin):
     )
 
 
+class Conversation(Base, TimestampMixin):
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default", index=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False, default="New Conversation")
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_conversation_lookup", "tenant_id", "deleted_at"),
+    )
+
+
 class RoutingPin(Base, TimestampMixin):
     __tablename__ = "routing_pins"
 
