@@ -9,6 +9,21 @@ from lib.engine.retrieval.base import ContentScraper, RetrievalError, ScrapedPag
 from lib.engine.retrieval.scraper import Crawl4AIScraper, TrafilaturaScraper
 from lib.engine.retrieval.search import DuckDuckGoHtmlProvider, DuckDuckGoSearchProvider, SearXNGSearchProvider
 
+# Matches a bare http(s) URL inside free-form text, stopping at whitespace
+# or a handful of characters that are almost never part of a URL but
+# commonly follow one in a sentence (closing paren/bracket, quote,
+# trailing punctuation) so "check out (https://x.com/y)." doesn't pull the
+# closing paren/period into the URL itself.
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'()\[\]]+[^\s<>\"'()\[\].,;:!?]")
+
+
+def extract_urls(text: str) -> List[str]:
+    """URLs a user pasted directly in their prompt: when present, gathering
+    context should fetch *that* page, not run a generic search for the
+    prompt's text (which would just search for the URL string itself,
+    never actually visit it)."""
+    return URL_PATTERN.findall(text)
+
 
 @dataclass(frozen=True)
 class WebContextResult:
@@ -71,6 +86,30 @@ class WebRetrievalService:
         if not sections:
             return WebContextResult(query=query, markdown="", sources=[], items=[])
 
+        markdown = "\n\n---\n\n".join(sections)
+        return WebContextResult(query=query, markdown=markdown, sources=sources, items=items)
+
+    def gather_context_from_urls(self, urls: List[str]) -> WebContextResult:
+        """Fetches each URL directly (no search step, no relevance
+        filtering) -- a URL the user pasted themselves is already exactly
+        what they want grounded, unlike a generic query where relevance
+        scoring earns its keep."""
+        sections: List[str] = []
+        sources: List[str] = []
+        items: List[Dict[str, Any]] = []
+        for url in urls:
+            page = self._scrape(url)
+            if page is None or not page.success or not page.markdown.strip():
+                continue
+            heading = page.title or url
+            body = page.markdown.strip()
+            sections.append(f"### {heading}\nSource: {url}\n\n{body}")
+            sources.append(url)
+            items.append({"title": heading, "url": url, "content": body})
+
+        query = " ".join(urls)
+        if not sections:
+            return WebContextResult(query=query, markdown="", sources=[], items=[])
         markdown = "\n\n---\n\n".join(sections)
         return WebContextResult(query=query, markdown=markdown, sources=sources, items=items)
 

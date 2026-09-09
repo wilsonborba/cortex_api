@@ -10,7 +10,7 @@ from duckduckgo_search.exceptions import DuckDuckGoSearchException
 from lib.engine.retrieval.base import RetrievalError, ScrapedPage, SearchResult
 from lib.engine.retrieval.scraper import Crawl4AIScraper, TrafilaturaScraper
 from lib.engine.retrieval.search import DuckDuckGoSearchProvider, SearXNGSearchProvider
-from lib.engine.retrieval.service import WebRetrievalService
+from lib.engine.retrieval.service import WebRetrievalService, extract_urls
 
 
 # --- DuckDuckGoSearchProvider --------------------------------------------------
@@ -304,3 +304,42 @@ def test_gather_context_deduplicates_near_identical_pages():
     context = service.gather_context("python sqlite")
 
     assert len(context.sources) == 1
+
+
+# --- extract_urls / gather_context_from_urls ------------------------------------
+
+
+def test_extract_urls_finds_a_pasted_link():
+    assert extract_urls("check this out: https://example.com/article please") == ["https://example.com/article"]
+
+
+def test_extract_urls_strips_trailing_sentence_punctuation():
+    assert extract_urls("see https://example.com/page.") == ["https://example.com/page"]
+
+
+def test_extract_urls_handles_a_link_in_parentheses():
+    assert extract_urls("read it (https://example.com/x) for details") == ["https://example.com/x"]
+
+
+def test_extract_urls_returns_empty_for_plain_text():
+    assert extract_urls("what is the capital of France?") == []
+
+
+def test_gather_context_from_urls_scrapes_directly_without_searching():
+    scraper = _StaticScraper(page=ScrapedPage(url="", title="Example Page", markdown="the page content", success=True))
+    service = WebRetrievalService(search_providers=[], scrapers=[scraper])
+
+    context = service.gather_context_from_urls(["https://example.com/article"])
+
+    assert "the page content" in context.markdown
+    assert context.sources == ["https://example.com/article"]
+
+
+def test_gather_context_from_urls_skips_urls_that_fail_to_scrape():
+    scraper = _StaticScraper(page=ScrapedPage(url="", title="", markdown="", success=False, error="blocked"))
+    service = WebRetrievalService(search_providers=[], scrapers=[scraper])
+
+    context = service.gather_context_from_urls(["https://example.com/blocked"])
+
+    assert context.sources == []
+    assert context.markdown == ""

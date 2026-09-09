@@ -37,7 +37,7 @@ from lib.engine.format import JSON, TOON, encode
 from lib.engine.quota import QuotaTracker
 from lib.engine.registry_service import ModelRegistryService, build_default_registry_service
 from lib.engine.retrieval.hippocampus import HippocampusClient, build_default_hippocampus_client
-from lib.engine.retrieval.service import WebRetrievalService, build_default_web_retrieval_service
+from lib.engine.retrieval.service import WebRetrievalService, build_default_web_retrieval_service, extract_urls
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError, Router, RoutingRequest, build_default_router
 from lib.engine.telemetry import TelemetryLogger
 from lib.core.text_sanitize import sanitize_text
@@ -318,7 +318,18 @@ class Executor:
         if plan.needs_web and self._web_retrieval is not None:
             try:
                 loop = asyncio.get_running_loop()
-                web_result = await loop.run_in_executor(None, self._web_retrieval.gather_context, plan.prompt)
+                # A URL the user pasted directly is already exactly what
+                # they want grounded -- fetch it directly instead of running
+                # a generic search for the prompt's text, which would just
+                # search for the URL string itself and never actually visit
+                # it (see `extract_urls`/`gather_context_from_urls`).
+                pasted_urls = extract_urls(plan.prompt)
+                if pasted_urls:
+                    web_result = await loop.run_in_executor(
+                        None, self._web_retrieval.gather_context_from_urls, pasted_urls
+                    )
+                else:
+                    web_result = await loop.run_in_executor(None, self._web_retrieval.gather_context, plan.prompt)
                 if web_result.items:
                     web_items = web_result.items
                     documents += len(web_result.sources)
