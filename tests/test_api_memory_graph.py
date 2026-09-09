@@ -165,17 +165,42 @@ def test_conversation_turn_label_is_rebuilt_from_content_preview(test_app):
     assert turn_nodes[0]["label"] == "what is sqlite"
 
 
-def test_bookkeeping_tenant_and_conversation_tags_are_filtered_out(test_app):
-    """`tenant:*`/`conversation:*`/`type:conversation-turn` tags are pure
-    plumbing this API writes on every turn for its own lookups, never a
-    meaningful topic -- they must not clutter the graph."""
+def test_bookkeeping_tenant_and_type_tags_are_filtered_out(test_app):
+    """`tenant:*`/`type:conversation-turn` tags are pure plumbing this API
+    writes on every turn for its own lookups, never a meaningful topic --
+    they must not clutter the graph."""
     client = TestClient(test_app, headers={"x-uuid": "tenant-c"})
     resp = client.get("/memory-graph")
     assert resp.status_code == 200
     node_ids = {n["id"] for n in resp.json()["nodes"]}
-    assert "tag:conversation:convo-999" not in node_ids
     assert "tag:tenant:tenant-c" not in node_ids
     assert "tag:type:conversation-turn" not in node_ids
+
+
+def test_conversation_tag_becomes_a_cluster_node_not_filtered_out(test_app):
+    """Unlike `tenant:*`/`type:*`, `conversation:*` is the only thing that
+    links a conversation's turns together in this graph (no memory-to-memory
+    relationships exist between them) -- dropping it entirely would leave
+    every turn as a fully disconnected card. It must survive as a `cluster`
+    node instead, with a readable label (no local conversation row exists
+    for "convo-999" in this test, so it falls back to a generic label
+    rather than a raw tag string) and its member memory ids in
+    `metadata.cluster_of`."""
+    client = TestClient(test_app, headers={"x-uuid": "tenant-c"})
+    resp = client.get("/memory-graph")
+    assert resp.status_code == 200
+    nodes = resp.json()["nodes"]
+    cluster_nodes = [n for n in nodes if n["id"] == "tag:conversation:convo-999"]
+    assert len(cluster_nodes) == 1
+    cluster = cluster_nodes[0]
+    assert cluster["node_type"] == "cluster"
+    assert "convo-999" in cluster["label"]
+    assert cluster["metadata"]["cluster_of"] == ["mem-c1"]
+
+    edges = resp.json()["edges"]
+    assert any(
+        e["source_id"] == "mem-c1" and e["target_id"] == "tag:conversation:convo-999" for e in edges
+    )
 
 
 def test_node_context_for_a_memory_id(test_app):

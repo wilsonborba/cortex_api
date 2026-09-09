@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from lib.core.logs import get_logger
 from lib.core.tenant import resolve_tenant_id
+from lib.dal.repositories.conversation_repository import ConversationRepository
 from lib.engine.memory_graph import build_workspace_memory_graph
 from lib.engine.retrieval.hippocampus import HippocampusClient
-from lib.presentation.api.deps import get_hippocampus_client
+from lib.presentation.api.deps import get_conversation_repo, get_hippocampus_client
 from lib.presentation.api.schemas.memory_graph import MemoryGraphOut, NodeContextOut
 
 router = APIRouter(prefix="/memory-graph", tags=["memory-graph"])
@@ -23,6 +24,7 @@ async def get_workspace_memory_graph(
     limit: int = Query(40, ge=1, le=150, description="how many of the tenant's own memories seed the graph"),
     depth: int = Query(1, ge=1, le=3),
     hippocampus: HippocampusClient = Depends(get_hippocampus_client),
+    conversation_repo: ConversationRepository = Depends(get_conversation_repo),
 ) -> MemoryGraphOut:
     """Whole-workspace "second brain" overview: memories, tags, entities,
     resources and conversation attachments belonging to *only* the
@@ -30,7 +32,9 @@ async def get_workspace_memory_graph(
     (see `build_workspace_memory_graph` for why this has to be aggregated
     client-side rather than requested in one call)."""
     tenant_id = resolve_tenant_id(request)
-    graph = await build_workspace_memory_graph(hippocampus, tenant_id, seed_limit=limit, depth=depth)
+    graph = await build_workspace_memory_graph(
+        hippocampus, tenant_id, seed_limit=limit, depth=depth, conversation_repo=conversation_repo
+    )
     return MemoryGraphOut.model_validate(graph)
 
 

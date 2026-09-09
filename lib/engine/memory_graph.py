@@ -1,19 +1,27 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from lib.dal.repositories.conversation_repository import ConversationRepository
 from lib.engine.retrieval.hippocampus import HippocampusClient
 
 _ATTACHMENT_TITLE_PREFIX = "attachment:"
 _CONVERSATION_TURN_TITLE_PREFIX = "Turn in "
 _TURN_LABEL_MAX = 60
+_CONVERSATION_TAG_PREFIX = "conversation:"
+_CONVERSATION_LABEL_ID_MAX = 18
 # Pure bookkeeping tags this API writes on every conversation-turn memory
-# (see `record_conversation_turn`): never meaningful "topics" for a user to
-# explore in the graph, just plumbing this API's own routes use to filter/
-# group turns. `tag:{namespace}:...` node ids come from hippocampus's own
-# `f"tag:{tag.id}"`, but its *label* is the tag's canonical name -- match on
-# that instead of the opaque id.
-_NOISE_TAG_PREFIXES = ("tenant:", "conversation:", "type:conversation")
+# (see `record_conversation_turn`) that carry no useful information at all:
+# `tenant:*` is the same single value for literally every node in a given
+# tenant's whole graph (a universal hub, not a topic), and
+# `type:conversation-turn` is shared by every turn regardless of which
+# conversation it's in. `conversation:*` is different -- unlike those two,
+# it genuinely varies per conversation and is the *only* thing that links a
+# conversation's turns together in this graph (no memory-to-memory
+# relationships exist between them), so it's turned into a proper cluster
+# node (see `_conversation_cluster_node`) instead of being dropped: without
+# it, the graph was just a field of fully disconnected cards.
+_NOISE_TAG_PREFIXES = ("tenant:", "type:conversation")
 
 
 def _is_noise_tag_node(node: Dict[str, Any]) -> bool:
@@ -21,6 +29,33 @@ def _is_noise_tag_node(node: Dict[str, Any]) -> bool:
         return False
     label = node.get("label") or ""
     return label.startswith(_NOISE_TAG_PREFIXES)
+
+
+def _is_conversation_tag_node(node: Dict[str, Any]) -> bool:
+    return node.get("node_type") == "tag" and (node.get("label") or "").startswith(_CONVERSATION_TAG_PREFIX)
+
+
+def _conversation_cluster_node(
+    node: Dict[str, Any], tenant_id: str, conversation_repo: Optional[ConversationRepository]
+) -> Dict[str, Any]:
+    """Turns a `conversation:{id}` tag node into a `cluster` node labeled
+    with that conversation's real (possibly user-renamed) title when this
+    API has a local metadata row for it, so the hub a conversation's turns
+    all connect to reads as "TESTEEEE1234124" or "pdf", not a raw,
+    guess-what-this-is conversation id."""
+    conversation_id = (node.get("label") or "")[len(_CONVERSATION_TAG_PREFIX):]
+    title = None
+    if conversation_repo is not None and conversation_id:
+        row = conversation_repo.get(conversation_id, tenant_id=tenant_id)
+        if row is not None:
+            title = row.title
+    if not title:
+        short_id = (
+            conversation_id if len(conversation_id) <= _CONVERSATION_LABEL_ID_MAX
+            else conversation_id[:_CONVERSATION_LABEL_ID_MAX] + "…"
+        )
+        title = f"Conversation {short_id}"
+    return {**node, "node_type": "cluster", "label": title, "subtitle": "conversation"}
 
 
 def _clean_turn_label(node: Dict[str, Any]) -> Dict[str, Any]:
@@ -78,6 +113,7 @@ async def build_workspace_memory_graph(
     seed_limit: int = 40,
     depth: int = 1,
     max_total_nodes: int = 400,
+    conversation_repo: Optional[ConversationRepository] = None,
 ) -> Dict[str, Any]:
     """Assembles a whole-workspace memory graph for the "second brain"
     overview screen by seeding from the tenant's most relevant memories and
@@ -89,7 +125,10 @@ async def build_workspace_memory_graph(
     `get_memory_subgraph`), so a seed or a neighbor belonging to another
     tenant can never enter `nodes`/`edges` here -- this function only
     merges/dedupes what those calls already returned, it does not itself
-    do any cross-tenant filtering.
+    do any cross-tenant filtering. [conversation_repo] is only used to look
+    up a conversation cluster node's real (possibly user-renamed) title --
+    entirely optional, a missing/None repo just falls back to a generic
+    "Conversation {id}" label.
     """
     seeds = await hippocampus.list_memories(tenant_id, limit=seed_limit)
     seed_ids = [m.get("id") for m in seeds if m.get("id")]
@@ -112,7 +151,10 @@ async def build_workspace_memory_graph(
             if len(nodes_by_id) >= max_total_nodes:
                 truncated = True
                 break
-            nodes_by_id[node_id] = _relabel_attachment_node(node)
+            if _is_conversation_tag_node(node):
+                nodes_by_id[node_id] = _conversation_cluster_node(node, tenant_id, conversation_repo)
+            else:
+                nodes_by_id[node_id] = _relabel_attachment_node(node)
         for edge in subgraph.get("edges", []):
             key = (edge.get("source_id"), edge.get("target_id"), edge.get("edge_type"))
             if all(key) and key not in edges_by_key:
@@ -123,8 +165,22 @@ async def build_workspace_memory_graph(
         if e.get("source_id") in nodes_by_id and e.get("target_id") in nodes_by_id
     ]
 
+    # Give each conversation cluster its member ids (frontend shows a count
+    # and, when expanded, the members themselves), computed from the edges
+    # that point at it rather than trusted from hippocampus's own payload.
+    cluster_members: Dict[str, List[str]] = {}
+    for e in edges:
+        target = e.get("target_id")
+        if target in nodes_by_id and nodes_by_id[target].get("node_type") == "cluster":
+            cluster_members.setdefault(target, []).append(e.get("source_id"))
+    nodes = [
+        {**n, "metadata": {**(n.get("metadata") or {}), "cluster_of": cluster_members[node_id]}}
+        if node_id in cluster_members else n
+        for node_id, n in nodes_by_id.items()
+    ]
+
     return {
-        "nodes": list(nodes_by_id.values()),
+        "nodes": nodes,
         "edges": edges,
         "root_ids": seed_ids,
         "truncated": truncated,
