@@ -17,7 +17,7 @@ from lib.engine.registry_service import build_default_registry_service
 from lib.engine.router import NoEligibleModelError
 from lib.engine.tiers import TierService
 from lib.presentation.api.openapi_i18n import get_localized_openapi
-from lib.presentation.api.routes import conversations, execute, logs_stream, models, openai_facade, pins, quota, system, telemetry, tiers, video
+from lib.presentation.api.routes import conversations, execute, logs_stream, memory_graph, models, openai_facade, pins, quota, system, telemetry, tiers, video
 
 logger = get_logger(__name__)
 
@@ -273,6 +273,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     app.include_router(execute.router)
     app.include_router(conversations.router)
+    app.include_router(memory_graph.router)
     app.include_router(models.router)
     app.include_router(quota.router)
     app.include_router(tiers.router)
