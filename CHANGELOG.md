@@ -16,17 +16,14 @@
 
 - Merge #65 add Rust project skeleton
 
+- Add response structure and process numbers (#66)
 
-## Unreleased
+- Merge #66 add response structure and process numbers
 
 
-### Chores
+### Features
 
-- Merge v1.0.0 back to release
-
-- Merge v1.0.0 back to development
-
-- Merge v1.0.0 back to feature/main
+- Redis-foundation (#99)
 
 
 ## v1.0.0 - 2026-11-09
@@ -53,6 +50,17 @@
 - Turn conversation tags into cluster nodes instead of dropping them
 
 - Filter the meaningless general:general topic tag from the graph
+
+
+### Chores
+
+- Prepare v1.0.0 (#64)
+
+- Consolidate v1.0.0
+
+- Prepare development for v1.0.0
+
+- Release v1.0.0
 
 
 ### Features
