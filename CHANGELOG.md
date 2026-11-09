@@ -20,10 +20,14 @@
 
 - Merge #66 add response structure and process numbers
 
+- Merge #99 redis-foundation
+
 
 ### Features
 
 - Redis-foundation (#99)
+
+- Postgres-storage (#92)
 
 
 ## v1.0.0 - 2026-11-09
