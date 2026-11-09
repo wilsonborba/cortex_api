@@ -269,3 +269,26 @@ The storage integration test uses a unique schema in cortex_api_test. It
 checks each table, scope refusal, one output per input, UUID v7, scalar
 columns and cascading delete. It reverses all migrations, runs them again,
 then removes that test schema.
+
+## Rust run records
+
+CouchDB holds only run records, in cortex_runs. Each document id is its
+output_id. The public write method accepts only RunRecord. The root and
+nested serde structs reject unknown fields. They contain ids, app and user,
+mode, timings, stages, model-call counts and file/web/audio counts. They have
+no prompt, answer or file content, no schema_version and no registry.
+Future shape changes must add only optional fields with a default.
+
+Startup creates the database, the user/created and created indexes, and the
+coded stats design document. Setup is safe to repeat. A store failure writes
+a fixed warning. Credentials and records are not logged.
+
+The stats view groups by web_mode and thinking. Its fixed numeric values are
+latency, input tokens, output tokens, total tokens and success. The built-in
+_stats reduce returns each metric's count, sum, min, max and sum of squares.
+See the [CouchDB reduce reference](https://docs.couchdb.org/en/stable/ddocs/ddocs.html#stats).
+Telemetry routes and retention are implemented in their area 12 issue.
+
+The real document test uses cortex_runs_test. It checks startup setup,
+indexes, repeat writes, typed reads, grouped statistics and fixture removal.
+Primary setup creates only the database, indexes and design document.
