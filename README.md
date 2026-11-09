@@ -227,3 +227,21 @@ To cleanly stop all background services, remove firewall rules, virtual environm
   ```
 * **Provider Cooldowns & Rate Limits:**
   Cortex automatically clears cooldowns after the cooldown interval (default 15 minutes). You can trigger an immediate probe with `cortex models sync` or `POST /models/sync`.
+
+## Rust Redis foundation
+
+Cortex uses Redis directly through `dal::remote::cache::RedisCache`.
+`CORTEX_REDIS_URL` is a secret in the shared .env file. Key constructors
+always use cortex: for history, temporary chats, output events, hourly usage
+and timing. A write requires a positive Lifetime. SET and PX run as one
+command, so a written key always has an expiry. There is no permanent write
+method. Values and connection secrets are not logged.
+
+The operation timeout is in core/config.rs. A missing, down or stalled store
+returns CacheError::Unavailable. Consumer issues apply the aligned fallback:
+arrival order, direct stream, PostgreSQL history, or a temporary-chat error.
+Run-record writes remain independent of Redis. Issue #99 stays open until
+those consumers and their outage tests are complete.
+
+The real Valkey test writes only unique fixture keys and checks the prefix
+and PTTL of every written key. It removes the fixtures and checks expiry.
