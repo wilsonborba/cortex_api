@@ -22,7 +22,10 @@ class CuratedCandidate:
 # execution order, not a score to be re-sorted at request time.
 CURATED_TIER_CATALOG: Final[dict[int, tuple[CuratedCandidate, ...]]] = {
     0: (
-        CuratedCandidate("ollama/qwen2.5vl:7b", "Configured local general-purpose fallback."),
+        CuratedCandidate(
+            "ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0",
+            "Configured local text-only model for low-cost work.",
+        ),
     ),
     1: (
         CuratedCandidate("requesty/deepinfra/Qwen/Qwen3.5-2B", "2B lightweight generation model."),

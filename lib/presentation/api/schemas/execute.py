@@ -21,11 +21,15 @@ class ExecuteRequest(BaseModel):
     tenant_id: Optional[str] = Field(default="default", description="Hard tenant/application namespace identifier")
     tier: Optional[Union[int, str]] = Field(default=None, description="0-5, 'auto', or omitted for auto")
     task_type: str = "general"
-    normalize_prompt: bool = True
+    normalize_prompt: bool = Field(
+        default=True,
+        description="Rewrite the user prompt with the local text normalizer; false forwards it unchanged after security evaluation.",
+    )
     thinking: bool = False
     needs_web: bool = False
     use_memory: bool = False
     capabilities: CapabilitySchema = Field(default_factory=CapabilitySchema)
+    conversation_id: Optional[str] = Field(default=None, description="Optional conversation id to tag and persist turn history in Hippocampus")
     auto_retrieval: bool = False
     memory_topic: Optional[str] = None
     force_model: Optional[str] = None
@@ -40,6 +44,10 @@ class ExecuteRequest(BaseModel):
     )
     timeout: Optional[float] = Field(
         default=None, description="Optional driver timeout in seconds for this execution (overrides default)"
+    )
+    skip_security: bool = Field(
+        default=False,
+        description="Bypass local SecurityShield verification for trusted internal service generation (e.g. Certifications pipeline).",
     )
 
 

@@ -97,6 +97,17 @@ def test_configure_model_updates_tier_eligibility_and_enabled(client, model_repo
     assert body["access_status"] == AccessStatus.DISABLED_MANUALLY.value  # ModelRegistryService side effect
 
 
+def test_configure_model_sets_explicit_vision_capability(client, model_repo_):
+    _seed_model(model_repo_, id="api-test-provider/api-vision-model", capabilities={"vision": True})
+
+    response = client.patch(
+        "/models/api-test-provider/api-vision-model", json={"is_vision_capable": False}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["capabilities"]["vision"] is False
+
+
 def test_configure_model_404_when_missing(client):
     response = client.patch("/models/api-test-provider/does-not-exist", json={"is_enabled": False})
     assert response.status_code == 404

@@ -14,6 +14,7 @@ from lib.dal.repositories.telemetry_repository import TelemetryRepository
 from lib.dal.repositories.tier_policy_repository import TierPolicyRepository
 from lib.engine.quota import QuotaTracker
 from lib.engine.registry_service import ModelRegistryService
+from lib.engine.attachments import Attachment
 from lib.engine.router import NoEligibleModelError, Router, RoutingRequest
 from lib.engine.scoring import ModelScorer, ScoringWeights
 from lib.engine.tiers import TierService
@@ -158,14 +159,14 @@ def test_curated_tier_one_preserves_order_then_adds_local_ollama_fallback(
             tier_eligibility=[1], capabilities={"general": 0.99 - index / 100},
         )
     _seed_model(
-        model_repo_, id="ollama/qwen2.5vl:7b", provider="ollama", is_local=True,
+        model_repo_, id="ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0", provider="ollama", is_local=True,
         tier_eligibility=[0, 1], capabilities={"general": 0.1},
     )
     tier_service_.set_models(1, curated)
 
     plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=1))
 
-    assert [selection.model_id for selection in plan.selections] == curated + ["ollama/qwen2.5vl:7b"]
+    assert [selection.model_id for selection in plan.selections] == curated + ["ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0"]
     assert [selection.role for selection in plan.selections] == ["primary"] + ["fallback"] * 5
 
 
@@ -177,13 +178,16 @@ def test_curated_tier_two_does_not_admit_a_model_reserved_for_tier_three(
     for index, model_id in enumerate(curated):
         _seed_model(model_repo_, id=model_id, provider=f"remote{index}", is_local=False, tier_eligibility=[2])
     _seed_model(model_repo_, id="mistral/reserved-t3", provider="mistral", is_local=False, tier_eligibility=[3])
-    _seed_model(model_repo_, id="ollama/qwen2.5vl:7b", provider="ollama", is_local=True, tier_eligibility=[0, 1])
+    _seed_model(
+        model_repo_, id="ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0",
+        provider="ollama", is_local=True, tier_eligibility=[0, 1],
+    )
     tier_service_.set_models(2, curated)
 
     plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=2))
 
     assert "mistral/reserved-t3" not in [selection.model_id for selection in plan.selections]
-    assert [selection.model_id for selection in plan.selections] == curated + ["ollama/qwen2.5vl:7b"]
+    assert [selection.model_id for selection in plan.selections] == curated + ["ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0"]
     assert plan.selections[0].role == "primary"
 
 
@@ -198,20 +202,58 @@ def test_dynamic_routing_respects_tier_eligibility(
         router_.build_execution_plan(RoutingRequest(prompt="hi", tier=3, task_type="general"))
 
 
-def test_dynamic_routing_excludes_external_models_at_tier_zero(
+def test_tier_zero_text_uses_configured_local_text_role(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
     _dynamic(pin_repo_, 0, "general")
     _seed_model(
-        model_repo_, id="claude/router-external", provider="claude", is_local=False, tier_eligibility=[0, 1, 2, 3],
+        model_repo_, id="ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0",
+        provider="ollama", is_local=True, tier_eligibility=[0], capabilities={"vision": False},
     )
-    _seed_model(model_repo_, id="ollama/router-local", provider="ollama", is_local=True, tier_eligibility=[0, 1, 2])
-    _restrict(tier_service_, 0, ["claude/router-external", "ollama/router-local"])
 
     plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=0, task_type="general"))
 
-    assert plan.source == "dynamic"
-    assert plan.selections[0].model_id == "ollama/router-local"  # T0 envelope: allow_external=False
+    assert plan.source == "local-role-policy"
+    assert plan.selections[0].model_id == "ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0"
+
+
+def test_image_attachment_uses_configured_vision_role_even_with_text_override(
+    router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
+):
+    _dynamic(pin_repo_, 0, "general")
+    _seed_model(
+        model_repo_, id="ollama/qwen2.5vl:7b", tier_eligibility=[0], capabilities={"vision": True},
+    )
+    _seed_model(
+        model_repo_, id="ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0",
+        tier_eligibility=[0], capabilities={"vision": False},
+    )
+
+    plan = router_.build_execution_plan(
+        RoutingRequest(
+            prompt="describe this", tier=0,
+            force_model="ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0",
+            attachments=[Attachment(filename="sample.png", mime_type="image/png", data_base64="aGVsbG8=")],
+        )
+    )
+
+    assert plan.source == "local-role-policy"
+    assert plan.selections[0].model_id == "ollama/qwen2.5vl:7b"
+
+
+def test_image_attachment_fails_when_vision_role_is_not_explicitly_marked_capable(
+    router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
+):
+    _dynamic(pin_repo_, 0, "general")
+    _seed_model(model_repo_, id="ollama/qwen2.5vl:7b", tier_eligibility=[0], capabilities={"vision": False})
+
+    with pytest.raises(NoEligibleModelError, match="marked vision-capable"):
+        router_.build_execution_plan(
+            RoutingRequest(
+                prompt="describe this", tier=0,
+                attachments=[Attachment(filename="sample.png", mime_type="image/png", data_base64="aGVsbG8=")],
+            )
+        )
 
 
 def test_dynamic_routing_respects_persistent_allowed_models_layer(
@@ -309,12 +351,12 @@ def test_strategy_pin_takes_precedence_over_dynamic_scoring(
 def test_model_pin_takes_precedence_over_dynamic_scoring(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
-    _seed_model(model_repo_, id="ollama/router-pinned", tier_eligibility=[0])
-    _seed_model(model_repo_, id="ollama/router-would-win", tier_eligibility=[0], capabilities={"general": 0.99})
-    _restrict(tier_service_, 0, ["ollama/router-pinned", "ollama/router-would-win"])
-    pin_repo_.set_pin(tier=0, model_id="ollama/router-pinned", pinned_by="benchmark")
+    _seed_model(model_repo_, id="ollama/router-pinned", tier_eligibility=[1])
+    _seed_model(model_repo_, id="ollama/router-would-win", tier_eligibility=[1], capabilities={"general": 0.99})
+    _restrict(tier_service_, 1, ["ollama/router-pinned", "ollama/router-would-win"])
+    pin_repo_.set_pin(tier=1, model_id="ollama/router-pinned", pinned_by="benchmark")
 
-    plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=0, task_type="general"))
+    plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=1, task_type="general"))
 
     assert plan.source == "pin"
     assert plan.selections[0].model_id == "ollama/router-pinned"
@@ -323,13 +365,13 @@ def test_model_pin_takes_precedence_over_dynamic_scoring(
 def test_force_model_overrides_an_active_pin(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
-    _seed_model(model_repo_, id="ollama/router-pinned-2", tier_eligibility=[0])
-    _seed_model(model_repo_, id="ollama/router-forced", tier_eligibility=[0])
-    _restrict(tier_service_, 0, ["ollama/router-pinned-2", "ollama/router-forced"])
-    pin_repo_.set_pin(tier=0, model_id="ollama/router-pinned-2", pinned_by="benchmark")
+    _seed_model(model_repo_, id="ollama/router-pinned-2", tier_eligibility=[1])
+    _seed_model(model_repo_, id="ollama/router-forced", tier_eligibility=[1])
+    _restrict(tier_service_, 1, ["ollama/router-pinned-2", "ollama/router-forced"])
+    pin_repo_.set_pin(tier=1, model_id="ollama/router-pinned-2", pinned_by="benchmark")
 
     plan = router_.build_execution_plan(
-        RoutingRequest(prompt="hi", tier=0, task_type="general", force_model="ollama/router-forced")
+        RoutingRequest(prompt="hi", tier=1, task_type="general", force_model="ollama/router-forced")
     )
 
     assert plan.source == "override"
@@ -339,29 +381,29 @@ def test_force_model_overrides_an_active_pin(
 def test_force_strategy_produces_an_empty_selection_plan(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
-    _dynamic(pin_repo_, 0, "general")
-    _seed_model(model_repo_, id="ollama/router-unused", tier_eligibility=[0])
-    _restrict(tier_service_, 0, ["ollama/router-unused"])
+    _dynamic(pin_repo_, 1, "general")
+    _seed_model(model_repo_, id="ollama/router-unused", tier_eligibility=[1])
+    _restrict(tier_service_, 1, ["ollama/router-unused"])
 
     plan = router_.build_execution_plan(
-        RoutingRequest(prompt="hi", tier=0, force_strategy="coding_t0_custom_v1")
+        RoutingRequest(prompt="hi", tier=1, force_strategy="coding_t1_custom_v1")
     )
 
     assert plan.source == "override"
-    assert plan.strategy_id == "coding_t0_custom_v1"
+    assert plan.strategy_id == "coding_t1_custom_v1"
     assert plan.selections == []
 
 
 def test_force_model_raises_when_it_does_not_match_any_candidate(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
-    _dynamic(pin_repo_, 0, "general")
-    _seed_model(model_repo_, id="ollama/router-exists", tier_eligibility=[0])
-    _restrict(tier_service_, 0, ["ollama/router-exists"])
+    _dynamic(pin_repo_, 1, "general")
+    _seed_model(model_repo_, id="ollama/router-exists", tier_eligibility=[1])
+    _restrict(tier_service_, 1, ["ollama/router-exists"])
 
     with pytest.raises(NoEligibleModelError):
         router_.build_execution_plan(
-            RoutingRequest(prompt="hi", tier=0, force_model="ollama/router-does-not-exist")
+            RoutingRequest(prompt="hi", tier=1, force_model="ollama/router-does-not-exist")
         )
 
 
@@ -392,13 +434,13 @@ def test_tier_zero_never_assigns_extra_roles(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
     _dynamic(pin_repo_, 0, "general")
-    _seed_model(model_repo_, id="ollama/router-t0-a", tier_eligibility=[0])
-    _seed_model(model_repo_, id="ollama/router-t0-b", tier_eligibility=[0])
-    _restrict(tier_service_, 0, ["ollama/router-t0-a", "ollama/router-t0-b"])
+    _seed_model(
+        model_repo_, id="ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0", tier_eligibility=[0]
+    )
 
     plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=0, task_type="general"))
 
-    assert plan.source == "dynamic"
+    assert plan.source == "local-role-policy"
     assert [s.role for s in plan.selections] == ["primary"]
 
 
@@ -453,11 +495,12 @@ def test_low_tiers_respect_explicit_web_request(
     router_: Router, model_repo_: ModelRepository, tier_service_: TierService, pin_repo_: RoutingPinRepository
 ):
     _dynamic(pin_repo_, 0, "general")
-    _seed_model(model_repo_, id="ollama/router-t0-web", tier_eligibility=[0])
-    _restrict(tier_service_, 0, ["ollama/router-t0-web"])
+    _seed_model(
+        model_repo_, id="ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0", tier_eligibility=[0]
+    )
 
     plan = router_.build_execution_plan(RoutingRequest(prompt="hi", tier=0, needs_web=True))
 
-    assert plan.source == "dynamic"
+    assert plan.source == "local-role-policy"
     assert plan.needs_web is True  # explicit request, not tier-driven
     assert plan.use_memory is False

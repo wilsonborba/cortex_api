@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 
 import pytest
 
@@ -119,3 +120,111 @@ def test_unsupported_mime_type_is_rejected_explicitly():
 
     assert not result.ok
     assert "unsupported attachment mime type" in result.errors[0]
+
+
+def _pdf_attachment(text: str | None = "Hello from a real PDF", filename: str = "doc.pdf") -> Attachment:
+    import pymupdf
+
+    document = pymupdf.open()
+    page = document.new_page(width=200, height=200)
+    if text:
+        page.insert_text((20, 40), text)
+    pdf_bytes = document.tobytes()
+    document.close()
+    return Attachment(filename=filename, mime_type="application/pdf", data_base64=base64.b64encode(pdf_bytes).decode())
+
+
+def test_pdf_attachment_with_real_text_is_extracted():
+    ingestor = AttachmentIngestor(settings=Settings())
+
+    result = ingestor.ingest([_pdf_attachment("Hello from a real PDF")])
+
+    assert result.ok
+    assert "Hello from a real PDF" in result.text_context
+
+
+def test_pdf_attachment_with_no_extractable_text_errors_explicitly():
+    ingestor = AttachmentIngestor(settings=Settings())
+
+    result = ingestor.ingest([_pdf_attachment(text=None)])
+
+    assert not result.ok
+    assert "no extractable text" in result.errors[0]
+
+
+def test_pdf_attachment_invalid_bytes_errors_explicitly():
+    ingestor = AttachmentIngestor(settings=Settings())
+    attachment = Attachment(
+        filename="broken.pdf", mime_type="application/pdf", data_base64=base64.b64encode(b"not a pdf").decode()
+    )
+
+    result = ingestor.ingest([attachment])
+
+    assert not result.ok
+    assert "could not read PDF" in result.errors[0]
+
+
+def test_plain_text_attachment_is_decoded_and_included():
+    ingestor = AttachmentIngestor(settings=Settings())
+    attachment = Attachment(
+        filename="notes.txt", mime_type="text/plain", data_base64=base64.b64encode(b"Meeting notes here").decode()
+    )
+
+    result = ingestor.ingest([attachment])
+
+    assert result.ok
+    assert "Meeting notes here" in result.text_context
+
+
+def test_non_utf8_text_attachment_errors_explicitly():
+    ingestor = AttachmentIngestor(settings=Settings())
+    attachment = Attachment(
+        filename="bad.txt", mime_type="text/plain", data_base64=base64.b64encode(b"\xff\xfe\x00").decode()
+    )
+
+    result = ingestor.ingest([attachment])
+
+    assert not result.ok
+    assert "not valid UTF-8" in result.errors[0]
+
+
+_DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _docx_attachment(text: str | None = "Hello from a Word document", filename: str = "doc.docx") -> Attachment:
+    import docx
+
+    document = docx.Document()
+    if text:
+        document.add_paragraph(text)
+    buf = io.BytesIO()
+    document.save(buf)
+    return Attachment(filename=filename, mime_type=_DOCX_MIME, data_base64=base64.b64encode(buf.getvalue()).decode())
+
+
+def test_docx_attachment_with_real_text_is_extracted():
+    ingestor = AttachmentIngestor(settings=Settings())
+
+    result = ingestor.ingest([_docx_attachment("Hello from a Word document")])
+
+    assert result.ok
+    assert "Hello from a Word document" in result.text_context
+
+
+def test_docx_attachment_with_no_text_errors_explicitly():
+    ingestor = AttachmentIngestor(settings=Settings())
+
+    result = ingestor.ingest([_docx_attachment(text=None)])
+
+    assert not result.ok
+    assert "no text content" in result.errors[0]
+
+
+def test_docx_attachment_invalid_bytes_errors_explicitly():
+    ingestor = AttachmentIngestor(settings=Settings())
+    attachment = Attachment(filename="broken.docx", mime_type=_DOCX_MIME, data_base64=base64.b64encode(b"not a docx").decode())
+
+    result = ingestor.ingest([attachment])
+
+    assert not result.ok
+    assert "could not read Word document" in result.errors[0]

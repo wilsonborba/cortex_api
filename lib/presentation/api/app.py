@@ -11,14 +11,13 @@ from fastapi.responses import JSONResponse
 
 from lib.core.logs import LogTarget, configure_logging, get_logger
 from lib.core.settings import Settings, get_settings
-from lib.dal.migrations import upgrade_db
 from lib.engine.executor import UnresolvedStrategyError
 from lib.engine.quota import QuotaTracker, refresh_and_resync
 from lib.engine.registry_service import build_default_registry_service
 from lib.engine.router import NoEligibleModelError
 from lib.engine.tiers import TierService
 from lib.presentation.api.openapi_i18n import get_localized_openapi
-from lib.presentation.api.routes import execute, logs_stream, models, openai_facade, pins, quota, system, telemetry, tiers, video
+from lib.presentation.api.routes import conversations, execute, logs_stream, memory_graph, models, openai_facade, pins, quota, system, telemetry, tiers, video
 
 logger = get_logger(__name__)
 
@@ -41,11 +40,15 @@ def _build_lifespan(settings: Settings):
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         configure_logging(target=LogTarget.API, log_file=settings.log_file)
+        from lib.presentation.api.routes.system import _PROCESS_STARTED_AT
+        logger.info("cortex_api process started at %s (see GET /system/status)", _PROCESS_STARTED_AT)
 
-        try:
-            upgrade_db(settings.database_url)
-        except Exception:
-            logger.warning("DB migration check failed on startup", exc_info=True)
+        # Migrations no longer run automatically on startup: this was
+        # causing the service to silently stop mid-startup (never reaching
+        # "application startup complete") and get endlessly restarted by
+        # systemd (Restart=always). Run migrations explicitly and separately
+        # via the CLI (`lib/presentation/cli/main.py`'s upgrade_db call)
+        # before starting the service instead.
 
         try:
             TierService().ensure_seeded()
@@ -269,6 +272,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return HTMLResponse(html)
 
     app.include_router(execute.router)
+    app.include_router(conversations.router)
+    app.include_router(memory_graph.router)
     app.include_router(models.router)
     app.include_router(quota.router)
     app.include_router(tiers.router)

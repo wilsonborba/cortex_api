@@ -97,7 +97,12 @@ class HippocampusClient:
             async with self._client_factory() as client:
                 response = await client.post(
                     f"{self._base_url}/api/v1/recall",
-                    json={"query": query, "tags": tags, "limit": limit},
+                    # `workspace_id` (not just the `tenant:` tag) is what
+                    # Hippocampus actually enforces at the repository level
+                    # (see MemoryRepository.list/get); pass both so recall
+                    # is scoped by the real, enforced field, tags stay for
+                    # the topic filter only.
+                    json={"query": query, "tags": tags, "workspace_id": tenant_id, "limit": limit},
                     headers=self._headers(),
                 )
                 response.raise_for_status()
@@ -125,17 +130,38 @@ class HippocampusClient:
         return chunks
 
     async def store_event(
-        self, topic: str, key: str, value: Any, ttl_seconds: Optional[int] = None, tenant_id: Optional[str] = None
+        self,
+        topic: str,
+        key: str,
+        value: Any,
+        ttl_seconds: Optional[int] = None,
+        tenant_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
     ) -> bool:
         content = value if isinstance(value, str) else json.dumps(value, default=str)
         tags = [topic] if topic else []
         if tenant_id:
             tags.append(f"tenant:{tenant_id}")
+        if conversation_id:
+            # The only thing that lets a conversation's attachments be found
+            # again alongside its turns: `_fetch_hippocampus_turns` (see
+            # `conversations.py`) filters by exactly this tag, and the
+            # memory-graph aggregation seeds/links nodes the same way (see
+            # `build_workspace_memory_graph`). Without it, an attachment's
+            # memory is workspace-scoped but otherwise orphaned -- it
+            # never resurfaces when a conversation is reloaded, and it
+            # never gets linked into that conversation's cluster in the
+            # graph either.
+            tags.append(f"conversation:{conversation_id}")
+        metadata = {"key": key}
+        if tenant_id:
+            metadata["tenant_id"] = tenant_id
         body: Dict[str, Any] = {
             "content": content,
             "title": key,
             "tags": tags,
-            "metadata": {"key": key, "tenant_id": tenant_id},
+            "metadata": metadata,
+            "workspace_id": tenant_id,
         }
         if ttl_seconds is not None:
             body["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
@@ -151,18 +177,104 @@ class HippocampusClient:
             return False
         return True
 
-    async def resolve_document_context(self, document_id: str) -> DocumentContext:
+    async def forget_memory(self, memory_id: str, workspace_id: Optional[str] = None, reason: Optional[str] = None) -> bool:
+        """Logically forgets a memory (`POST /memories/{id}/forget`):
+        provenance/history stay, only its status flips, same distinction
+        hippocampus itself draws between forget and hard-delete. `workspace_id`
+        is required in practice here (this is only ever called with the
+        caller's own already tenant-scoped memory ids, e.g. from
+        `delete_conversation`), and is enforced server-side the same
+        fail-closed way as every other workspace-scoped call this client
+        makes: a mismatched id degrades to "did nothing", not a leak."""
+        try:
+            async with self._client_factory() as client:
+                response = await client.post(
+                    f"{self._base_url}/api/v1/memories/{memory_id}/forget",
+                    params={"workspace_id": workspace_id} if workspace_id else None,
+                    json={"reason": reason},
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("hippocampus.forget_memory unavailable (memory_id=%r): %s", memory_id, exc)
+            return False
+        return True
+
+    async def list_memories(
+        self, workspace_id: str, limit: int = 60
+    ) -> List[Dict[str, Any]]:
+        """Lists the most relevant memories in a tenant's own workspace, used
+        to seed the roots of the memory-graph overview (`GET
+        /api/v1/memories?workspace_id=...`, already workspace-scoped at the
+        repository level -- see hippocampus's `MemoryService.search`)."""
+        try:
+            async with self._client_factory() as client:
+                response = await client.get(
+                    f"{self._base_url}/api/v1/memories",
+                    params={"workspace_id": workspace_id, "limit": limit},
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("hippocampus.list_memories unavailable (workspace_id=%r): %s", workspace_id, exc)
+            return []
+        return payload.get("data", []) if isinstance(payload, dict) else []
+
+    async def get_memory_subgraph(
+        self,
+        memory_id: str,
+        workspace_id: str,
+        depth: int = 1,
+        max_nodes: int = 60,
+    ) -> Dict[str, Any]:
+        """Fetches one root's bounded neighborhood (`GET
+        /api/v1/memories/{id}/graph`, already workspace-scoped -- see
+        hippocampus's `MemoryGraphService.build_graph`). The route only
+        accepts a single root per call, so the workspace-wide overview graph
+        is assembled by calling this once per seed memory and merging the
+        results client-side (see `build_workspace_memory_graph`)."""
+        try:
+            async with self._client_factory() as client:
+                response = await client.get(
+                    f"{self._base_url}/api/v1/memories/{memory_id}/graph",
+                    params={
+                        "workspace_id": workspace_id,
+                        "depth": depth,
+                        "max_nodes": max_nodes,
+                        "include_entities": True,
+                        "include_tags": True,
+                        "include_resources": True,
+                    },
+                    headers=self._headers(),
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("hippocampus.get_memory_subgraph unavailable (memory_id=%r): %s", memory_id, exc)
+            return {"nodes": [], "edges": []}
+        data = payload.get("data") if isinstance(payload, dict) else None
+        return data if isinstance(data, dict) else {"nodes": [], "edges": []}
+
+    async def resolve_document_context(
+        self, document_id: str, workspace_id: Optional[str] = None
+    ) -> DocumentContext:
         """`document_id` is actually a *memory* id -- hippocampus's real
         addressable unit -- kept as this parameter's existing name for
         Executor-side compatibility (#7). Fetches the memory itself
         (`GET /api/v1/memories/{id}`) and, best-effort, its linked source
         document (`GET /api/v1/memories/{id}/document`); the memory's own
         content is the fallback when there's no separate linked document.
-        """
+        [workspace_id], when given, scopes the memory lookup to that tenant
+        (fails closed to "not found" like the rest of this client's
+        workspace-scoped calls) -- required by the memory-graph node-context
+        endpoint, which must never let one tenant read another's memory
+        content just by knowing/guessing its id."""
         try:
             async with self._client_factory() as client:
+                params = {"workspace_id": workspace_id} if workspace_id else None
                 memory_response = await client.get(
-                    f"{self._base_url}/api/v1/memories/{document_id}", headers=self._headers()
+                    f"{self._base_url}/api/v1/memories/{document_id}", params=params, headers=self._headers()
                 )
                 memory_response.raise_for_status()
                 memory = memory_response.json().get("data") or {}

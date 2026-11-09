@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChatMessage(BaseModel):
@@ -16,12 +16,18 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     stream: bool = False
-    normalize_prompt: bool = True
+    normalize_prompt: bool = Field(
+        default=True,
+        description="Rewrite the flattened message prompt with the local text normalizer; false forwards it unchanged after security evaluation.",
+    )
     thinking: bool = False
     needs_web: bool = False
     use_memory: bool = False
     auto_retrieval: bool = False
     memory_topic: Optional[str] = None
+    conversation_id: Optional[str] = Field(default=None, description="Optional conversation id to tag and persist turn history in Hippocampus")
+    temporary: bool = Field(default=False, description="When true (e.g. incognito mode), do not persist conversation turn to Hippocampus")
+    tenant_id: Optional[str] = Field(default="default", description="Tenant namespace identifier")
 
 
 class ChatCompletionChoice(BaseModel):

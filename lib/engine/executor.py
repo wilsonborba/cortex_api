@@ -37,7 +37,7 @@ from lib.engine.format import JSON, TOON, encode
 from lib.engine.quota import QuotaTracker
 from lib.engine.registry_service import ModelRegistryService, build_default_registry_service
 from lib.engine.retrieval.hippocampus import HippocampusClient, build_default_hippocampus_client
-from lib.engine.retrieval.service import WebRetrievalService, build_default_web_retrieval_service
+from lib.engine.retrieval.service import WebRetrievalService, build_default_web_retrieval_service, extract_urls
 from lib.engine.router import ExecutionPlan, ModelSelection, NoEligibleModelError, Router, RoutingRequest, build_default_router
 from lib.engine.telemetry import TelemetryLogger
 from lib.core.text_sanitize import sanitize_text
@@ -251,12 +251,25 @@ class Executor:
                     strategy_id=plan.strategy_id, task_type=plan.task_type, success=False,
                     response_text="; ".join(ingested.errors), error_type="attachment_error",
                 )
-            if ingested.text_context and self._hippocampus is not None and plan.use_memory:
+            if ingested.text_context and self._hippocampus is not None:
+                # Persisted whenever an attachment is actually sent, not
+                # gated on plan.use_memory: that flag controls whether
+                # *past* memories get retrieved to ground *this* reply, a
+                # different concern from "remember this attachment so its
+                # icon/name survive a conversation reload and it shows up
+                # in the memory graph" (both need it recorded regardless).
+                # NOTE: only attachments[0]'s filename becomes the title --
+                # a message with more than one attachment still stores one
+                # combined memory under the first file's name (pre-existing
+                # ingestion-layer limitation: AttachmentIngestor.ingest only
+                # returns one merged text_context, not per-file text).
                 try:
                     await self._hippocampus.store_event(
                         topic=plan.memory_topic or plan.task_type,
                         key=f"attachment:{plan.attachments[0].filename}",
                         value=ingested.text_context,
+                        tenant_id=plan.tenant_id,
+                        conversation_id=plan.conversation_id,
                     )
                 except Exception as exc:
                     logger.warning("failed to store attachment transcript in memory: %s", exc)
@@ -305,18 +318,40 @@ class Executor:
         if plan.needs_web and self._web_retrieval is not None:
             try:
                 loop = asyncio.get_running_loop()
-                web_result = await loop.run_in_executor(None, self._web_retrieval.gather_context, plan.prompt)
+                # A URL the user pasted directly is already exactly what
+                # they want grounded -- fetch it directly instead of running
+                # a generic search for the prompt's text, which would just
+                # search for the URL string itself and never actually visit
+                # it (see `extract_urls`/`gather_context_from_urls`).
+                pasted_urls = extract_urls(plan.prompt)
+                if pasted_urls:
+                    web_result = await loop.run_in_executor(
+                        None, self._web_retrieval.gather_context_from_urls, pasted_urls
+                    )
+                else:
+                    web_result = await loop.run_in_executor(None, self._web_retrieval.gather_context, plan.prompt)
                 if web_result.items:
                     web_items = web_result.items
                     documents += len(web_result.sources)
                     used_web = True
+                # Unambiguous, request-scoped signal for exactly what happened -
+                # this codebase's background health-check/registry-sync loop
+                # also hits duckduckgo.com on its own schedule, which makes the
+                # DEBUG-level HTTP client traces alone impossible to attribute
+                # to a specific /execute call after the fact.
+                logger.info(
+                    "web retrieval for query %r: %d item(s), sources=%s",
+                    plan.prompt[:80], len(web_items), [item.get("url") for item in web_items],
+                )
             except Exception as exc:
                 logger.warning("web retrieval failed for this request: %s", exc)
+        elif plan.needs_web and self._web_retrieval is None:
+            logger.warning("needs_web=True but no web retrieval service is configured")
 
         if plan.use_memory and self._hippocampus is not None:
             try:
                 topic = plan.memory_topic or plan.task_type
-                chunks = await self._hippocampus.search_memory(topic, plan.prompt)
+                chunks = await self._hippocampus.search_memory(topic, plan.prompt, tenant_id=plan.tenant_id)
                 if chunks:
                     memory_items = [{"topic": c.topic, "content": c.content, "score": c.score} for c in chunks]
                     documents += len(chunks)
@@ -424,13 +459,14 @@ class Executor:
                     sidecar_selection = ModelSelection(model_id=cli_model_id, provider=cli_provider, role="primary")
                     sidecar_step = await self._run_step(plan, sidecar_selection, context, deadline, images=images)
                     self._log_step(plan, request_id, sidecar_selection, sidecar_step, None, None)
-                    steps.append(sidecar_step)
                     if sidecar_step.success:
-                        return self._build_result(plan, request_id, steps, gathered=gathered if 'gathered' in locals() else None)
+                        gathered = context_retry.gathered if context_retry is not None else None
+                        return self._build_result(plan, request_id, steps, gathered=gathered)
                     else:
                         self._quota_tracker.enter_cooldown(cli_model_id, provider=cli_provider, reason=sidecar_step.error_message or sidecar_step.error_type)
                 break
 
+        gathered = context_retry.gathered if context_retry is not None else None
         return self._build_result(plan, request_id, steps, gathered=gathered)
 
     async def _execute_ordered_cascade(

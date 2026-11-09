@@ -44,6 +44,10 @@ class ModelOut(BaseModel):
 class ModelConfigRequest(BaseModel):
     tier_eligibility: Optional[List[int]] = None
     is_enabled: Optional[bool] = None
+    is_vision_capable: Optional[bool] = Field(
+        default=None,
+        description="Explicitly mark whether this model accepts image input; omit to leave unchanged.",
+    )
     context_format_pin: Optional[str] = Field(
         default=None,
         description="'toon' or 'json' to set/replace the pin, 'none' to clear it, omit to leave untouched",

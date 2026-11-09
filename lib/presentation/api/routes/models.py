@@ -44,6 +44,7 @@ def configure_model(
             model_id,
             tier_eligibility=payload.tier_eligibility,
             is_enabled=payload.is_enabled,
+            is_vision_capable=payload.is_vision_capable,
             context_format_pin=payload.context_format_pin,
             context_format_pin_ttl_seconds=payload.context_format_pin_ttl_seconds,
         )

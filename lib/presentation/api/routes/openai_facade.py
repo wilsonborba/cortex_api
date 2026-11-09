@@ -6,14 +6,17 @@ import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from lib.core.tenant import resolve_tenant_id
 from lib.engine.executor import Executor, ExecutionResult, UnresolvedStrategyError
 from lib.engine.prompt_normalizer import PromptNormalizer
 from lib.engine.router import NoEligibleModelError, Router, RoutingRequest
+from lib.engine.retrieval.hippocampus import HippocampusClient
+from lib.engine.retrieval.conversation_store import record_conversation_turn
 from lib.core.security import SecurityShield
-from lib.presentation.api.deps import get_executor, get_prompt_normalizer, get_router, get_security_shield
+from lib.presentation.api.deps import get_executor, get_hippocampus_client, get_prompt_normalizer, get_router, get_security_shield
 from lib.presentation.api.schemas.openai_facade import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -41,10 +44,12 @@ def list_virtual_models() -> ModelList:
 @router.post("/chat/completions")
 async def chat_completions(
     payload: ChatCompletionRequest,
+    request: Request,
     router_: Router = Depends(get_router),
     executor: Executor = Depends(get_executor),
     prompt_normalizer: PromptNormalizer = Depends(get_prompt_normalizer),
     security_shield: SecurityShield = Depends(get_security_shield),
+    hippocampus: HippocampusClient = Depends(get_hippocampus_client),
 ):
     tier, force_strategy = _translate_model(payload.model)
     prompt = _messages_to_prompt(payload.messages)
@@ -52,12 +57,16 @@ async def chat_completions(
     if security_eval.is_blocked:
         message = "Are you kidding me, clown?" if security_eval.error_type == "security_policy_violation" else (security_eval.reason or "Blocked by Security Shield")
         return JSONResponse(status_code=403, content=_openai_error(message, security_eval.error_type or "security_policy_violation"))
-    normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
-    if not normalization.success:
-        return JSONResponse(status_code=503, content=_openai_error("Local prompt normalizer is unavailable.", normalization.error_type or "normalizer_failed"))
-    prompt = normalization.prompt
+    if payload.normalize_prompt:
+        normalization = await asyncio.to_thread(prompt_normalizer.normalize, prompt)
+        if not normalization.success:
+            return JSONResponse(status_code=503, content=_openai_error("Local prompt normalizer is unavailable.", normalization.error_type or "normalizer_failed"))
+        prompt = normalization.prompt
+    tenant_id = resolve_tenant_id(request, payload.tenant_id)
     routing_request = RoutingRequest(
         prompt=prompt,
+        tenant_id=tenant_id,
+        conversation_id=payload.conversation_id,
         tier=tier,
         force_strategy=force_strategy,
         thinking=payload.thinking,
@@ -74,6 +83,18 @@ async def chat_completions(
         return JSONResponse(status_code=409, content=_openai_error(str(exc), "no_eligible_model"))
     except UnresolvedStrategyError as exc:
         return JSONResponse(status_code=501, content=_openai_error(str(exc), "unresolved_strategy"))
+
+    if result.success and payload.conversation_id and not payload.temporary:
+        user_prompt = payload.messages[-1].content if payload.messages else prompt
+        asyncio.create_task(
+            record_conversation_turn(
+                hippocampus=hippocampus,
+                conversation_id=payload.conversation_id,
+                user_prompt=user_prompt,
+                assistant_response=result.response_text,
+                tenant_id=tenant_id,
+            )
+        )
 
     if payload.stream:
         return StreamingResponse(_stream_response(payload.model, result), media_type="text/event-stream")

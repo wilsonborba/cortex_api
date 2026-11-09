@@ -32,12 +32,16 @@ def test_default_settings(monkeypatch):
     assert settings.api_host == "0.0.0.0"
     assert settings.api_port == 8003
     assert settings.sliding_window_hours == 5
+    assert settings.local_text_model_id == "ollama/hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0"
+    assert settings.local_vision_model_id == "ollama/qwen2.5vl:7b"
 
 
 def test_settings_environment_overrides(monkeypatch):
     monkeypatch.setenv("CORTEX_ENVIRONMENT", "production")
     monkeypatch.setenv("CORTEX_DATABASE_URL", "postgresql+psycopg://user:pass@localhost:5432/cortex_prod")
     monkeypatch.setenv("CORTEX_OLLAMA_BASE_URL", "http://ollama-host:11434")
+    monkeypatch.setenv("CORTEX_LOCAL_TEXT_MODEL", "ollama/local-text")
+    monkeypatch.setenv("CORTEX_LOCAL_VISION_MODEL", "ollama/local-vision")
     monkeypatch.setenv("CORTEX_HIPPOCAMPUS_URL", "http://hippocampus-host:8001")
     monkeypatch.setenv("CORTEX_LOG_LEVEL", "DEBUG")
     monkeypatch.setenv("CORTEX_LOG_FILE", "var/custom.log")
@@ -49,6 +53,8 @@ def test_settings_environment_overrides(monkeypatch):
     assert settings.environment == "production"
     assert settings.database_url == "postgresql+psycopg://user:pass@localhost:5432/cortex_prod"
     assert settings.ollama_base_url == "http://ollama-host:11434"
+    assert settings.local_text_model_id == "ollama/local-text"
+    assert settings.local_vision_model_id == "ollama/local-vision"
     assert settings.hippocampus_url == "http://hippocampus-host:8001"
     assert settings.log_level == "DEBUG"
     assert settings.log_file == Path("var/custom.log")

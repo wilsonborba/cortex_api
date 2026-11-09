@@ -54,6 +54,10 @@ def models_config(
     model_id: str,
     tiers: Optional[str] = typer.Option(None, "--tiers", help="comma-separated tier ints, e.g. 0,1,2"),
     enable: Optional[bool] = typer.Option(None, "--enable/--disable"),
+    vision_capable: Optional[bool] = typer.Option(
+        None, "--vision-capable/--no-vision-capable",
+        help="Explicitly set whether this model accepts image input",
+    ),
     context_format: Optional[str] = typer.Option(
         None, "--context-format",
         help="Pin internal communication format: 'toon', 'json', or 'none' to clear the pin (issue #17)",
@@ -66,6 +70,7 @@ def models_config(
     try:
         updated = get_registry().update_config(
             model_id, tier_eligibility=tier_eligibility, is_enabled=enable,
+            is_vision_capable=vision_capable,
             context_format_pin=context_format, context_format_pin_ttl_seconds=context_format_ttl,
         )
     except ValueError as exc:
