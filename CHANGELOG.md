@@ -1,6 +1,18 @@
 # Changelog
 
 
+## Unreleased
+
+
+### Chores
+
+- Merge v1.0.0 back to release
+
+- Merge v1.0.0 back to development
+
+- Merge v1.0.0 back to feature/main
+
+
 ## v1.0.0 - 2026-11-09
 
 
