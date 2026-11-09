@@ -12,6 +12,22 @@
 
 - Merge v1.0.0 back to feature/main
 
+- Add Rust project skeleton (#65)
+
+- Merge #65 add Rust project skeleton
+
+
+## Unreleased
+
+
+### Chores
+
+- Merge v1.0.0 back to release
+
+- Merge v1.0.0 back to development
+
+- Merge v1.0.0 back to feature/main
+
 
 ## v1.0.0 - 2026-11-09
 

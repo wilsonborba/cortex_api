@@ -7,6 +7,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::default();
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address = %config.listen, "Development server started");
-    axum::serve(listener, axum::Router::new()).await?;
+    axum::serve(
+        listener,
+        cortex_api::presentation::with_response_contract(axum::Router::new()),
+    )
+    .await?;
     Ok(())
 }
