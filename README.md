@@ -245,3 +245,27 @@ those consumers and their outage tests are complete.
 
 The real Valkey test writes only unique fixture keys and checks the prefix
 and PTTL of every written key. It removes the fixtures and checks expiry.
+
+## Rust chat storage
+
+The approved PostgreSQL role is cortex_api_app. It owns cortex_api and
+cortex_api_test and has no superuser, createdb or createrole rights.
+CORTEX_DATABASE_URL and CORTEX_TEST_DATABASE_URL are private .env keys.
+The development worktree uses the canonical .env symlink.
+
+Run `cargo run --bin migrate -- test` for the test database. Run
+`cargo run --bin migrate -- cortex` for the new Cortex database. The tool
+checks the database name and role. It does not import v1 data or start an app.
+
+The six tables are chats, chat_inputs, chat_input_files, chat_outputs,
+chat_output_sources and chat_output_memories. List entries use rows with
+positions. There are no JSONB or array columns. Session ids are UUID v7.
+Foreign keys keep each output with its input and chat. Cascading deletes
+remove chat rows in one transaction after the domain cleanup succeeds.
+Temporary chats have no rows here.
+
+Repository methods check app and user scope for child writes and all reads.
+The storage integration test uses a unique schema in cortex_api_test. It
+checks each table, scope refusal, one output per input, UUID v7, scalar
+columns and cascading delete. It reverses all migrations, runs them again,
+then removes that test schema.
