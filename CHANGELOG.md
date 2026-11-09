@@ -1,7 +1,74 @@
 # Changelog
 
 
-## Unreleased
+## v1.0.0 - 2026-11-09
+
+
+### Bug Fixes
+
+- Honor prompt normalization controls
+
+- Refine retrieval and execution settings
+
+- Stop running DB migrations automatically on API startup
+
+- Scope Hippocampus reads/writes to the real authenticated user
+
+- IDOR in ConversationRepository mutations + id-collision crash
+
+- Thread tenant_id through ExecutionPlan into Hippocampus calls
+
+- Stop lazy-adoption from resurrecting deleted conversations
+
+- Rebuild memory-graph labels for generic conversation-turn titles
+
+- Turn conversation tags into cluster nodes instead of dropping them
+
+- Filter the meaningless general:general topic tag from the graph
+
+
+### Features
+
+- Enforce local text and vision roles
+
+- Support skip_security flag for internal services
+
+- Conversation CRUD, PDF/DOCX attachment ingestion, web search fix
+
+- Add tenant-scoped memory-graph endpoint
+
+- Actually forget a conversation's memories in Hippocampus on delete
+
+- Link conversation attachments to their turn and tag them for the graph
+
+- Fetch a pasted URL directly instead of searching for it
+
+
+### merge
+
+- Local Ollama routing policy
+
+- Prompt normalization controls
+
+
+## v0.1.2 - 2026-08-22
+
+
+### Bug Fixes
+
+- Run local Whisper transcription on CUDA
+
+
+### Chores
+
+- Prepare v0.1.2
+
+
+### release
+
+- Merge v0.1.2 GPU local inference fix
+
+- Promote v0.1.2
 
 
 ## v0.1.1 - 2026-08-22
@@ -20,9 +87,18 @@
 - Curate ordered tier cascades
 
 
+### Chores
+
+- Prepare v0.1.1
+
+
 ### Documentation
 
 - Update changelog for runtime contract fix
+
+- Update changelog for telemetry audit
+
+- Update changelog for curated tier catalog
 
 
 ### Features
@@ -69,6 +145,16 @@
 ### merge
 
 - Integrate runtime contract fix (#57)
+
+- Integrate structured telemetry audit (#37)
+
+- Integrate curated tier catalog (#58)
+
+- Promote curated runtime fixes to development
+
+- Promote development to release main
+
+- Release v0.1.1
 
 
 ### security
@@ -283,3 +369,5 @@
 - Finalize generic judge command lists in release/main
 
 - Issues #33 #34 #35 full calibration sweep into release/main
+
+
