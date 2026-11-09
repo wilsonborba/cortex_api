@@ -66,6 +66,7 @@ async def chat_completions(
     routing_request = RoutingRequest(
         prompt=prompt,
         tenant_id=tenant_id,
+        conversation_id=payload.conversation_id,
         tier=tier,
         force_strategy=force_strategy,
         thinking=payload.thinking,

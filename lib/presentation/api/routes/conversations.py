@@ -7,9 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from lib.core.logs import get_logger
 from lib.core.tenant import resolve_tenant_id
 from lib.dal.repositories.conversation_repository import ConversationIdConflict, ConversationRepository
+from lib.engine.memory_graph import ATTACHMENT_TITLE_PREFIX
 from lib.engine.retrieval.hippocampus import HippocampusClient
 from lib.presentation.api.deps import get_conversation_repo, get_hippocampus_client
 from lib.presentation.api.schemas.conversations import (
+    ConversationAttachmentOut,
     ConversationCreateIn,
     ConversationDetailOut,
     ConversationPatchIn,
@@ -246,8 +248,28 @@ async def get_conversation(
             is_pinned=row.is_pinned,
         )
 
+    # `data` mixes turn memories (title "Turn in {id}") with any attachment
+    # memories tagged for this conversation (title "attachment:{filename}",
+    # see `Executor`'s `store_event` call) -- split them apart before
+    # building `messages` from the turns; attachments get matched onto a
+    # turn afterwards (see below), not treated as turns themselves.
+    turn_memories = [m for m in data if not (m.get("title") or "").startswith(ATTACHMENT_TITLE_PREFIX)]
+    attachment_memories = [m for m in data if (m.get("title") or "").startswith(ATTACHMENT_TITLE_PREFIX)]
+
+    if not turn_memories:
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Conversation {conversation_id} not found")
+        return ConversationDetailOut(
+            id=row.id,
+            title=row.title,
+            created_at=row.created_at.isoformat(),
+            updated_at=row.updated_at.isoformat(),
+            messages=[],
+            is_pinned=row.is_pinned,
+        )
+
     # Sort turns chronologically
-    sorted_turns = sorted(data, key=lambda m: m.get("created_at") or "")
+    sorted_turns = sorted(turn_memories, key=lambda m: m.get("created_at") or "")
     first_turn = sorted_turns[0]
     last_turn = sorted_turns[-1]
 
@@ -271,6 +293,29 @@ async def get_conversation(
             messages.append(ConversationTurnOut(id=f"{mem_id}-a", role="assistant", content=assistant_text, created_at=created_at))
         else:
             messages.append(ConversationTurnOut(id=mem_id, role="user", content=content, created_at=created_at))
+
+    # Attach each attachment memory to the user message of the turn that was
+    # recorded right after it: `Executor` always ingests/stores an
+    # attachment's memory *before* the reply is generated and
+    # `record_conversation_turn` is called for that same send, so an
+    # attachment's `created_at` is always slightly earlier than (never
+    # after) its own turn's -- the earliest turn at-or-after the attachment
+    # is therefore always its own, not some later, unrelated turn's.
+    user_messages_by_created_at = sorted(
+        (msg for msg in messages if msg.role == "user"), key=lambda msg: msg.created_at
+    )
+    for attachment_memory in attachment_memories:
+        attachment_created_at = attachment_memory.get("created_at") or ""
+        filename = (attachment_memory.get("title") or "")[len(ATTACHMENT_TITLE_PREFIX):].strip()
+        if not filename:
+            continue
+        target = next(
+            (msg for msg in user_messages_by_created_at if msg.created_at >= attachment_created_at), None
+        )
+        if target is None and user_messages_by_created_at:
+            target = user_messages_by_created_at[-1]  # fallback: newest turn, better than silently dropping it
+        if target is not None:
+            target.attachments.append(ConversationAttachmentOut(filename=filename))
 
     if row is None:
         try:

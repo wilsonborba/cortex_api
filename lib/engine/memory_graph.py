@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from lib.dal.repositories.conversation_repository import ConversationRepository
 from lib.engine.retrieval.hippocampus import HippocampusClient
 
-_ATTACHMENT_TITLE_PREFIX = "attachment:"
+ATTACHMENT_TITLE_PREFIX = "attachment:"
 _CONVERSATION_TURN_TITLE_PREFIX = "Turn in "
 _TURN_LABEL_MAX = 60
 _CONVERSATION_TAG_PREFIX = "conversation:"
@@ -22,13 +22,26 @@ _CONVERSATION_LABEL_ID_MAX = 18
 # node (see `_conversation_cluster_node`) instead of being dropped: without
 # it, the graph was just a field of fully disconnected cards.
 _NOISE_TAG_PREFIXES = ("tenant:", "type:conversation")
+# `Executor`'s attachment `store_event` call tags with
+# `plan.memory_topic or plan.task_type` (see `executor.py`) so an attachment
+# retrieved later can be filtered by topic -- but `task_type` defaults to
+# the literal string "general" for any request that never set a real
+# `task_type`/`memory_topic`, which is the overwhelming majority of chat
+# messages. That default has no topical meaning at all, unlike a real
+# memory_topic a caller deliberately set, so it always canonicalizes to the
+# same exact tag (`general:general`, see hippocampus's
+# `canonicalize_tag_filter`: no ":" in a tag falls back to the "general"
+# namespace) shared by every such attachment regardless of what it's
+# actually about -- a floating, meaningless node with no real link to
+# anything, reported as "uma tag solta sem link chamada general:general".
+_NOISE_TAG_EXACT = frozenset({"general:general"})
 
 
 def _is_noise_tag_node(node: Dict[str, Any]) -> bool:
     if node.get("node_type") != "tag":
         return False
     label = node.get("label") or ""
-    return label.startswith(_NOISE_TAG_PREFIXES)
+    return label.startswith(_NOISE_TAG_PREFIXES) or label in _NOISE_TAG_EXACT
 
 
 def _is_conversation_tag_node(node: Dict[str, Any]) -> bool:
@@ -101,8 +114,8 @@ def _relabel_attachment_node(node: Dict[str, Any]) -> Dict[str, Any]:
     frontend can render/link it distinctly, instead of teaching hippocampus
     (which has no reason to know Cortex's attachment convention) about it."""
     label = node.get("label") or ""
-    if node.get("node_type") == "memory" and label.startswith(_ATTACHMENT_TITLE_PREFIX):
-        filename = label[len(_ATTACHMENT_TITLE_PREFIX):].strip() or label
+    if node.get("node_type") == "memory" and label.startswith(ATTACHMENT_TITLE_PREFIX):
+        filename = label[len(ATTACHMENT_TITLE_PREFIX):].strip() or label
         return {**node, "node_type": "attachment", "label": filename, "subtitle": "attachment"}
     return _clean_turn_label(node)
 

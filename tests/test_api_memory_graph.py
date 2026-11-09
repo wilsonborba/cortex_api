@@ -52,11 +52,13 @@ class FakeAsyncClient:
                     {"id": "tag:conversation:convo-999", "node_type": "tag", "label": "conversation:convo-999"},
                     {"id": "tag:tenant:tenant-c", "node_type": "tag", "label": "tenant:tenant-c"},
                     {"id": "tag:type:conversation-turn", "node_type": "tag", "label": "type:conversation-turn"},
+                    {"id": "tag:general:general", "node_type": "tag", "label": "general:general"},
                 ],
                 "edges": [
                     {"source_id": "mem-c1", "target_id": "tag:conversation:convo-999", "edge_type": "tagged_with"},
                     {"source_id": "mem-c1", "target_id": "tag:tenant:tenant-c", "edge_type": "tagged_with"},
                     {"source_id": "mem-c1", "target_id": "tag:type:conversation-turn", "edge_type": "tagged_with"},
+                    {"source_id": "mem-c1", "target_id": "tag:general:general", "edge_type": "tagged_with"},
                 ],
             },
         }
@@ -175,6 +177,20 @@ def test_bookkeeping_tenant_and_type_tags_are_filtered_out(test_app):
     node_ids = {n["id"] for n in resp.json()["nodes"]}
     assert "tag:tenant:tenant-c" not in node_ids
     assert "tag:type:conversation-turn" not in node_ids
+
+
+def test_general_general_default_topic_tag_is_filtered_out(test_app):
+    """`general:general` is what `task_type`'s default value canonicalizes
+    to as a tag (see hippocampus's `canonicalize_tag_filter`) whenever a
+    caller never set a real `memory_topic`/`task_type` -- every such
+    attachment/turn shares the exact same meaningless tag, a floating node
+    with no real link to anything ("uma tag solta sem link chamada
+    general:general")."""
+    client = TestClient(test_app, headers={"x-uuid": "tenant-c"})
+    resp = client.get("/memory-graph")
+    assert resp.status_code == 200
+    node_ids = {n["id"] for n in resp.json()["nodes"]}
+    assert "tag:general:general" not in node_ids
 
 
 def test_conversation_tag_becomes_a_cluster_node_not_filtered_out(test_app):

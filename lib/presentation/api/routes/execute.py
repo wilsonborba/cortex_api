@@ -85,6 +85,7 @@ async def execute(
     routing_request = RoutingRequest(
         prompt=prompt,
         tenant_id=tenant_id,
+        conversation_id=payload.conversation_id,
         tier=payload.tier,
         task_type=payload.task_type,
         thinking=payload.capabilities.thinking or payload.thinking,
