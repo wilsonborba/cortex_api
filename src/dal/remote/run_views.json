@@ -1,0 +1,9 @@
+{
+  "language": "javascript",
+  "views": {
+    "stats": {
+      "map": "function(doc) { if (!doc.output_id || !doc.mode || !doc.calls || !doc.stages) return; var input = 0, output = 0, success = 1; doc.calls.forEach(function(c) { input += c.input_tokens; output += c.output_tokens; }); doc.stages.forEach(function(s) { if (s.error_number !== null && s.error_number !== undefined || s.status === 'failed' || s.status === 'cancelled') success = 0; }); emit([doc.mode.web_mode, doc.mode.thinking], [doc.total_ms, input, output, input + output, success]); }",
+      "reduce": "_stats"
+    }
+  }
+}

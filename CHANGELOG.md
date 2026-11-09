@@ -22,12 +22,16 @@
 
 - Merge #99 redis-foundation
 
+- Merge #92 postgres-storage
+
 
 ### Features
 
 - Redis-foundation (#99)
 
 - Postgres-storage (#92)
+
+- Run-records (#101)
 
 
 ## v1.0.0 - 2026-11-09
