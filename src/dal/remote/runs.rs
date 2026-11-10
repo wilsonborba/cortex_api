@@ -18,11 +18,31 @@ pub struct RunStore {
     password: String,
 }
 impl RunStore {
+    pub fn new(
+        config: &Config,
+        database_url: reqwest::Url,
+        user: String,
+        password: String,
+    ) -> Result<Self, RunStoreError> {
+        if !matches!(database_url.scheme(), "http" | "https") || database_url.host_str().is_none() {
+            return Err(RunStoreError::Unavailable);
+        }
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .timeout(config.document_timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|_| RunStoreError::Unavailable)?,
+            base: database_url,
+            user,
+            password,
+        })
+    }
     pub fn from_environment(database: RunDatabase) -> Result<Self, RunStoreError> {
         let config = Config::default();
         let name = match database {
-            RunDatabase::Primary => config.run_database,
-            RunDatabase::Test => config.run_test_database,
+            RunDatabase::Primary => config.run_database.clone(),
+            RunDatabase::Test => config.run_test_database.clone(),
         };
         let mut base = reqwest::Url::parse(
             &std::env::var("CORTEX_COUCHDB_URL").map_err(|_| RunStoreError::Unavailable)?,
@@ -32,17 +52,12 @@ impl RunStore {
             .map_err(|_| RunStoreError::Unavailable)?
             .pop_if_empty()
             .push(&name);
-        Ok(Self {
-            client: reqwest::Client::builder()
-                .timeout(config.document_timeout)
-                .build()
-                .map_err(|_| RunStoreError::Unavailable)?,
+        Self::new(
+            &config,
             base,
-            user: std::env::var("CORTEX_COUCHDB_USERNAME")
-                .map_err(|_| RunStoreError::Unavailable)?,
-            password: std::env::var("CORTEX_COUCHDB_PASSWORD")
-                .map_err(|_| RunStoreError::Unavailable)?,
-        })
+            std::env::var("CORTEX_COUCHDB_USERNAME").map_err(|_| RunStoreError::Unavailable)?,
+            std::env::var("CORTEX_COUCHDB_PASSWORD").map_err(|_| RunStoreError::Unavailable)?,
+        )
     }
     fn url(&self, path: &[&str]) -> reqwest::Url {
         let mut url = self.base.clone();
@@ -189,6 +204,79 @@ impl RunStore {
 }
 
 impl RunStore {
+    pub async fn purge_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize, RunStoreError> {
+        let config = Config::default();
+        let candidate = (cutoff + chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut bookmark = String::new();
+        let mut selected = vec![];
+        // Read all pages before deleting. Compare typed UTC times at the boundary.
+        loop {
+            let body = json!({"selector":{"created_at":{"$lt":candidate}},"limit":config.run_read_batch,"bookmark":bookmark});
+            let response = self
+                .request(reqwest::Method::POST, &["_find"], Some(&body))
+                .await?;
+            if !response.status().is_success() {
+                return Err(RunStoreError::Unavailable);
+            }
+            let page: Value = response
+                .json()
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+            let docs = page["docs"]
+                .as_array()
+                .ok_or(RunStoreError::InvalidRecord)?;
+            for raw in docs {
+                let mut value = raw.clone();
+                let object = value.as_object_mut().ok_or(RunStoreError::InvalidRecord)?;
+                let id = object.remove("_id").ok_or(RunStoreError::InvalidRecord)?;
+                let revision = object.remove("_rev").ok_or(RunStoreError::InvalidRecord)?;
+                let run: RunRecord =
+                    serde_json::from_value(value).map_err(|_| RunStoreError::InvalidRecord)?;
+                if id.as_str() != Some(run.output_id.to_string().as_str()) {
+                    return Err(RunStoreError::InvalidRecord);
+                }
+                if run.created_at < cutoff {
+                    selected.push((
+                        run.output_id,
+                        revision
+                            .as_str()
+                            .ok_or(RunStoreError::InvalidRecord)?
+                            .to_owned(),
+                    ));
+                }
+            }
+            let next = page["bookmark"].as_str().unwrap_or("");
+            if docs.len() < config.run_read_batch || next.is_empty() || next == bookmark {
+                break;
+            }
+            bookmark = next.to_owned();
+        }
+        let mut deleted = 0;
+        for (id, revision) in selected {
+            let mut url = self.url(&[&id.to_string()]);
+            url.query_pairs_mut().append_pair("rev", &revision);
+            let response = self
+                .client
+                .delete(url)
+                .basic_auth(&self.user, Some(&self.password))
+                .send()
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+            if response.status().is_success() {
+                deleted += 1;
+            } else if !matches!(
+                response.status(),
+                reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::CONFLICT
+            ) {
+                return Err(RunStoreError::Unavailable);
+            }
+        }
+        Ok(deleted)
+    }
     pub async fn records_since(
         &self,
         since: chrono::DateTime<chrono::Utc>,
