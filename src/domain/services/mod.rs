@@ -14,3 +14,5 @@ pub mod chat_session;
 pub mod history;
 
 pub mod chat_history;
+
+pub mod exchange_memory;

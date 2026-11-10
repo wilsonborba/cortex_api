@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub hippocampus_url: String,
+    pub hippocampus_timeout: std::time::Duration,
     pub history_page_default: u32,
     pub history_cache_exchanges: usize,
     pub history_cache_ttl: std::time::Duration,
@@ -57,6 +59,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            hippocampus_url:"http://127.0.0.1:18001".into(),
+            hippocampus_timeout:std::time::Duration::from_secs(5),
             history_page_default:20,
             history_cache_exchanges:20,
             history_cache_ttl:std::time::Duration::from_secs(3600),

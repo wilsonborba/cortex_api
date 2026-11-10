@@ -84,6 +84,10 @@ pub const OUTPUT_NOT_FOUND: ProcessNumber = ProcessNumber {
     number: 1018,
     message: "The output was not found",
 };
+pub const MEMORY_SAVE_FAILED: ProcessNumber = ProcessNumber {
+    number: 1019,
+    message: "The exchange memory could not be saved",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -104,6 +108,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     CHAT_NOT_FOUND,
     HISTORY_FAILED,
     OUTPUT_NOT_FOUND,
+    MEMORY_SAVE_FAILED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {
