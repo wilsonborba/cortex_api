@@ -65,7 +65,7 @@ async fn measure_8192_context_through_the_real_queue() {
                 "Write the numbers from 1 to 32, separated by spaces.".into()
             },
             images: if vision {
-                vec!["iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1cAAAAASUVORK5CYII=".into()]
+                vec!["iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC".into()]
             } else {
                 vec![]
             },
