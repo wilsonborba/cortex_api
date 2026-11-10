@@ -24,3 +24,7 @@ pub mod chunks;
 pub mod web;
 
 pub mod queries;
+
+pub mod robots;
+
+pub mod crawler;

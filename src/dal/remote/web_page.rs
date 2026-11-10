@@ -183,3 +183,48 @@ pub fn extract(config: &Config, url: &str, html: &str) -> Result<WebPage, PageFa
         links,
     })
 }
+
+impl PageReader {
+    /// One bounded robots GET, using the same connection policy and global slots.
+    pub async fn robots(&self, target: &str) -> Result<(u16, Vec<u8>), PageFailure> {
+        let url = page_url(target)?
+            .join("/robots.txt")
+            .map_err(|_| PageFailure::Unavailable)?;
+        let _permit = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| PageFailure::Unavailable)?;
+        tokio::time::timeout(self.config.web_page_timeout, async {
+            let response = self
+                .client
+                .get(url)
+                .send()
+                .await
+                .map_err(|_| PageFailure::Unavailable)?;
+            let status = response.status().as_u16();
+            if !(200..300).contains(&status) {
+                return Ok((status, vec![]));
+            }
+            if response
+                .content_length()
+                .is_some_and(|n| n > self.config.web_robots_bytes as u64)
+            {
+                return Err(PageFailure::TooLarge);
+            }
+            let mut bytes = vec![];
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|_| PageFailure::Unavailable)?;
+                if chunk.len() > self.config.web_robots_bytes.saturating_sub(bytes.len()) {
+                    return Err(PageFailure::TooLarge);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok((status, bytes))
+        })
+        .await
+        .unwrap_or(Err(PageFailure::Timeout))
+    }
+}

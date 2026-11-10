@@ -1,4 +1,7 @@
-use crate::domain::models::{pipeline::*, run_record::StageRecord};
+use crate::{
+    core::process_numbers,
+    domain::models::{pipeline::*, run_record::StageRecord},
+};
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
@@ -109,12 +112,23 @@ pub async fn run<T: PipelineData>(
     );
     let mut notices = vec![];
     let mut cancelled = false;
+    let mut fatal = None;
     for (label, value) in [
         ("files", &mut files),
         ("memory", &mut memory),
         ("web", &mut web),
     ] {
         match value.status {
+            StageStatus::Failed(process)
+                if [
+                    process_numbers::HEAVY_LOAD.number,
+                    process_numbers::QUEUE_FAULT.number,
+                    process_numbers::OLLAMA_FAILED.number,
+                ]
+                .contains(&process.number) =>
+            {
+                fatal.get_or_insert(process);
+            }
             StageStatus::Failed(process) | StageStatus::Notice(process) => {
                 value.output.notices.push(SourceNotice {
                     process,
@@ -127,7 +141,9 @@ pub async fn run<T: PipelineData>(
         }
         notices.append(&mut value.output.notices);
     }
-    let status = if cancelled {
+    let status = if let Some(process) = fatal {
+        StageStatus::Failed(process)
+    } else if cancelled {
         StageStatus::Cancelled
     } else if let Some(notice) = notices.first() {
         StageStatus::Notice(notice.process)

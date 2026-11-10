@@ -71,6 +71,8 @@
 
 - Merge #74 fast-web-gather
 
+- Merge #75 bounded-query-rewrite
+
 
 ### Features
 
@@ -115,6 +117,8 @@
 - Fast-web-gather (#74)
 
 - Bounded-query-rewrite (#75)
+
+- Bounded-web-traversal (#76)
 
 
 ## v1.0.0 - 2026-11-09

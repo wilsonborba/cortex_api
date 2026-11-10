@@ -219,3 +219,68 @@ async fn failed_or_cancelled_answer_still_saves() {
     check(false, Some("answer"), false).await;
     check(false, None, true).await;
 }
+
+struct FatalServices(Services);
+impl StageServices<Data> for FatalServices {
+    fn accept<'a>(&'a self, data: Data) -> Pending<'a, StageValue<Data>> {
+        self.0.accept(data)
+    }
+    fn files<'a>(&'a self, p: &'a StageResult<Data>) -> Pending<'a, StageValue<Data>> {
+        self.0.files(p)
+    }
+    fn memory<'a>(&'a self, p: &'a StageResult<Data>) -> Pending<'a, StageValue<Data>> {
+        self.0.memory(p)
+    }
+    fn web<'a>(&'a self, p: &'a StageResult<Data>) -> Pending<'a, StageValue<Data>> {
+        Box::pin(async move {
+            let mut value = self.0.web(p).await;
+            value.status = StageStatus::Failed(numbers::HEAVY_LOAD);
+            value
+        })
+    }
+    fn assemble<'a>(&'a self, p: &'a StageResult<Data>) -> Pending<'a, StageValue<Data>> {
+        self.0.assemble(p)
+    }
+    fn think<'a>(&'a self, p: &'a StageResult<Data>) -> Pending<'a, StageValue<Data>> {
+        self.0.think(p)
+    }
+    fn answer<'a>(&'a self, p: &'a StageResult<Data>) -> Pending<'a, StageValue<Data>> {
+        self.0.answer(p)
+    }
+    fn save<'a>(&'a self, p: &'a StageResult<Data>) -> Pending<'a, StageValue<Data>> {
+        Box::pin(async move {
+            assert_eq!(p.stage, StageName::Gather);
+            self.0.value("save", p.output.data.clone())
+        })
+    }
+}
+#[tokio::test]
+async fn global_model_queue_failure_stops_gather_before_answer_and_still_saves() {
+    let services = FatalServices(Services {
+        barrier: Arc::new(Barrier::new(3)),
+        seen: Default::default(),
+        fail: None,
+        cancel: false,
+    });
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let reporter = StageReporter::new(tx);
+    let result = run(
+        Data {
+            thinking: false,
+            trace: vec![],
+        },
+        &services,
+        &reporter,
+    )
+    .await;
+    assert_eq!(result.error().unwrap().number, numbers::HEAVY_LOAD.number);
+    assert_eq!(
+        result
+            .stages
+            .iter()
+            .map(|s| s.stage.name())
+            .collect::<Vec<_>>(),
+        ["accept", "gather", "save"]
+    );
+    assert!(!services.0.seen.lock().unwrap().contains(&"answer"));
+}
