@@ -86,3 +86,48 @@ impl RedisCache {
         Ok(())
     }
 }
+
+impl RedisCache {
+    pub async fn get_many(&self, keys: &[CacheKey]) -> Result<Vec<Option<Value>>, CacheError> {
+        if keys.is_empty() {
+            return Ok(vec![]);
+        }
+        let values: Vec<Option<Vec<u8>>> = self
+            .execute(redis::cmd("MGET").arg(keys.iter().map(CacheKey::name).collect::<Vec<_>>()))
+            .await?;
+        values
+            .into_iter()
+            .map(|v| {
+                v.map(|v| serde_json::from_slice(&v).map_err(|_| CacheError::Unavailable))
+                    .transpose()
+            })
+            .collect()
+    }
+    pub async fn add_usage(
+        &self,
+        actor: &str,
+        hour: i64,
+        usage: crate::domain::models::usage::Usage,
+        lifetime: Lifetime,
+    ) -> Result<(), CacheError> {
+        let key = CacheKey::Usage {
+            user: actor.into(),
+            hour: hour.to_string(),
+        };
+        let script = "local raw=redis.call('GET',KEYS[1]); local v={input=0,output=0,images=0,audio=0}; if raw then v=cjson.decode(raw) end; v.input=v.input+tonumber(ARGV[2]); v.output=v.output+tonumber(ARGV[3]); v.images=v.images+tonumber(ARGV[4]); v.audio=v.audio+tonumber(ARGV[5]); redis.call('SET',KEYS[1],cjson.encode(v),'PX',ARGV[1]); return 1";
+        let _: i64 = self
+            .execute(
+                redis::cmd("EVAL")
+                    .arg(script)
+                    .arg(1)
+                    .arg(key.name())
+                    .arg(lifetime.milliseconds())
+                    .arg(usage.input)
+                    .arg(usage.output)
+                    .arg(usage.images)
+                    .arg(usage.audio),
+            )
+            .await?;
+        Ok(())
+    }
+}

@@ -312,3 +312,32 @@ no user database sync, client secret or app proof header.
 
 Issue #102 stays open until the chat, file, graph and persona handlers use
 this layer and their integration checks pass.
+
+## Rust usage queue
+
+The scheduler gives one local GPU job a permit. Each call acquires a new
+permit, so a long output rejoins the queue between calls. Pending users are
+ordered by tokens divided by weight, with arrival order for ties. There is
+no usage quota or admin exception. Missing Redis uses arrival order. A call
+can wait 300 seconds; process 1010 is heavy load and 1011 is a queue fault.
+Cancelled waiters cannot keep a permit.
+
+Redis keeps 24 UTC hour buckets, the base weight snapshot and a wait-queue
+snapshot. The window advances each hour. It includes the current hour and
+the previous 23 hours, as required by the hour-bucket design. Each bucket
+expires when its hour is 24 hours old. Every queue and snapshot key also has
+a TTL. Atomic Lua updates keep token and item increments with their expiry.
+
+On missing buckets, the ledger reads the CouchDB run records and rebuilds
+the window. Calls not yet saved by the output remain in bounded local memory
+for that rebuild. Saved output ids prevent double counting those calls.
+A failed cache write marks the actor for repair. This adds no permanent store.
+Image and audio counts are optional defaulted call fields, so older run
+records still read. Supabase loyalty is blocked; runtime weight is 1.
+
+Tests cover three users, weighted order, per-call requeue, no overlap,
+Redis-down FIFO, cancelled waiters and a simulated five-minute wait. The
+real Redis/CouchDB test checks full and partial cache loss, pending calls,
+no double count after Save, more than 200 source records, and prefix/TTL for
+every fixture key. It removes its own records and keys. Issue #67 remains
+open for the Ollama driver and Save-stage integration.

@@ -26,6 +26,8 @@
 
 - Merge #101 run-records
 
+- Merge #102 app-user-attribution
+
 
 ### Features
 
@@ -36,6 +38,8 @@
 - Run-records (#101)
 
 - App-user-attribution (#102)
+
+- Usage-balancer (#67)
 
 
 ## v1.0.0 - 2026-11-09

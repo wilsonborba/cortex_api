@@ -187,3 +187,51 @@ impl RunStore {
         Ok(())
     }
 }
+
+impl RunStore {
+    pub async fn records_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<RunRecord>, RunStoreError> {
+        let config = Config::default();
+        let mut bookmark = String::new();
+        let mut out = vec![];
+        // Include the prior second in the index range, then compare typed UTC
+        // timestamps. This handles RFC3339 fractional-second representations.
+        let candidate = (since - chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        loop {
+            let body = json!({"selector":{"created_at":{"$gte":candidate}},"limit":config.run_read_batch,"bookmark":bookmark});
+            let response = self
+                .request(reqwest::Method::POST, &["_find"], Some(&body))
+                .await?;
+            if !response.status().is_success() {
+                return Err(RunStoreError::Unavailable);
+            }
+            let page: Value = response
+                .json()
+                .await
+                .map_err(|_| RunStoreError::Unavailable)?;
+            let docs = page["docs"]
+                .as_array()
+                .ok_or(RunStoreError::InvalidRecord)?;
+            for raw in docs {
+                let mut value = raw.clone();
+                let object = value.as_object_mut().ok_or(RunStoreError::InvalidRecord)?;
+                object.remove("_id");
+                object.remove("_rev");
+                let run: RunRecord =
+                    serde_json::from_value(value).map_err(|_| RunStoreError::InvalidRecord)?;
+                if run.created_at >= since {
+                    out.push(run);
+                }
+            }
+            let next = page["bookmark"].as_str().unwrap_or("");
+            if docs.len() < config.run_read_batch || next.is_empty() || next == bookmark {
+                break;
+            }
+            bookmark = next.to_owned();
+        }
+        Ok(out)
+    }
+}
