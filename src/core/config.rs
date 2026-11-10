@@ -3,6 +3,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub medium_web_timeout: std::time::Duration,
+    pub deep_web_timeout: std::time::Duration,
+    pub medium_web_depth: usize,
+    pub deep_web_depth: usize,
+    pub web_pages_per_level: usize,
+    pub web_robots_bytes: usize,
+    pub web_file_extensions: Vec<&'static str>,
     pub medium_query_count: usize,
     pub deep_query_count: usize,
     pub query_output_tokens: u32,
@@ -77,6 +84,13 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            medium_web_timeout:std::time::Duration::from_secs(30),
+            deep_web_timeout:std::time::Duration::from_secs(60),
+            medium_web_depth:1,
+            deep_web_depth:2,
+            web_pages_per_level:5,
+            web_robots_bytes:500_000,
+            web_file_extensions:vec!["pdf","jpg","jpeg","png","gif","webp","svg","ico","bmp","tif","tiff","avif","zip","rar","7z","tar","gz","bz2","xz","exe","dmg","iso","mp3","wav","ogg","mp4","mov","webm","doc","docx","xls","xlsx","ppt","pptx","csv","json","xml","txt"],
             medium_query_count:3,
             deep_query_count:4,
             query_output_tokens:256,

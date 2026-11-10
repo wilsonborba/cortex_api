@@ -84,3 +84,39 @@ impl WebSearch {
         }
     }
 }
+
+impl WebSearch {
+    /// Sum the existing per-engine rank contributions across unique queries.
+    /// Re-ranking the already merged ranks would lose those contributions.
+    pub async fn search_many(&self, queries: &[String]) -> SearchResults {
+        let mut seen = HashSet::new();
+        let queries: Vec<_> = queries.iter().filter(|q| seen.insert(q.as_str())).collect();
+        let results =
+            futures_util::future::join_all(queries.iter().map(|query| self.search(query))).await;
+        let all_failed = results.is_empty() || results.iter().all(|r| r.notice.is_some());
+        let mut values = HashMap::<String, (SearchHit, f64, usize)>::new();
+        let mut order = 0;
+        for result in results {
+            for hit in result.hits {
+                let value = values.entry(hit.hit.url.clone()).or_insert_with(|| {
+                    order += 1;
+                    (hit.hit, 0.0, order)
+                });
+                value.1 += hit.score;
+            }
+        }
+        let mut values: Vec<_> = values.into_values().collect();
+        values.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.2.cmp(&b.2)));
+        SearchResults {
+            hits: values
+                .into_iter()
+                .map(|(hit, score, _)| RankedHit { hit, score })
+                .collect(),
+            notice: if all_failed {
+                Some(process_numbers::WEB_SEARCH_FAILED)
+            } else {
+                None
+            },
+        }
+    }
+}

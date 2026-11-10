@@ -120,6 +120,10 @@ pub const WEB_PAGE_LIMIT: ProcessNumber = ProcessNumber {
     number: 1027,
     message: "The web page limit was reached",
 };
+pub const WEB_ROBOTS_FAILED: ProcessNumber = ProcessNumber {
+    number: 1028,
+    message: "The web crawl rules could not be loaded",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -149,6 +153,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     WEB_PAGE_TEXT,
     WEB_TIME_LIMIT,
     WEB_PAGE_LIMIT,
+    WEB_ROBOTS_FAILED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

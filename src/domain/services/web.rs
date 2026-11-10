@@ -37,7 +37,7 @@ pub struct FastWeb {
     shield: Arc<SecurityShield>,
     config: Config,
 }
-fn notice(output: &mut GatheredWeb, process: ProcessNumber, source: Option<String>) {
+pub(crate) fn notice(output: &mut GatheredWeb, process: ProcessNumber, source: Option<String>) {
     // The stage reporter emits these once with the final Gather result.
     output.notices.push(SourceNotice {
         process,
@@ -149,58 +149,77 @@ impl FastWeb {
         // Dropping pending page futures stops HTTP work at the global deadline.
         drop(pages);
         drop(search);
-        let chunks: Vec<_> = collected
-            .iter_mut()
-            .flat_map(|(_, page)| std::mem::take(&mut page.chunks))
-            .collect();
-        let candidates = chunks.len();
-        let ranked = if Instant::now() < deadline && !chunks.is_empty() {
-            let question = question.to_owned();
-            let input = chunks.clone();
-            let task = tokio::task::spawn_blocking(move || rank(&question, input));
-            match tokio::time::timeout_at(deadline, task).await {
-                Ok(Ok(ranked)) => ranked.into_iter().map(|r| r.chunk).collect(),
-                _ => {
-                    if !output
-                        .notices
-                        .iter()
-                        .any(|n| n.process.number == process_numbers::WEB_TIME_LIMIT.number)
-                    {
-                        notice(&mut output, process_numbers::WEB_TIME_LIMIT, None);
-                    }
-                    chunks
-                }
-            }
-        } else {
-            chunks
-        };
-        let mut per_page = HashMap::<Option<String>, usize>::new();
-        for chunk in ranked {
-            if output.texts.len() == self.config.context_chunk_count {
-                break;
-            }
-            let count = per_page.entry(chunk.source.clone()).or_default();
-            if *count < self.config.chunks_per_page {
-                *count += 1;
-                output.texts.push(chunk);
-            }
-        }
-        output.sources = collected
-            .into_iter()
-            .map(|(_, p)| p.source)
-            .filter(|source| {
-                output
-                    .texts
-                    .iter()
-                    .any(|t| t.source.as_deref() == Some(source.url.as_str()))
-            })
-            .collect();
-        if candidates > 0 {
-            let mut step = StepProgress::new(StageName::Gather, StepName::ChunksSelected);
-            step.progress = Some([output.texts.len() as u64, candidates as u64]);
-            events.send(NativeEvent::Step(step));
-            events.send(NativeEvent::Sources(output.sources.clone()));
-        }
+        select(
+            &self.config,
+            question,
+            deadline,
+            collected.into_iter().map(|(_, page)| page).collect(),
+            &mut output,
+            events,
+        )
+        .await;
         output
+    }
+}
+
+pub(crate) async fn select(
+    config: &Config,
+    question: &str,
+    deadline: Instant,
+    mut collected: Vec<WebPage>,
+    output: &mut GatheredWeb,
+    events: &EventSink,
+) {
+    let chunks: Vec<_> = collected
+        .iter_mut()
+        .flat_map(|page| std::mem::take(&mut page.chunks))
+        .collect();
+    let candidates = chunks.len();
+    let ranked = if Instant::now() < deadline && !chunks.is_empty() {
+        let question = question.to_owned();
+        let input = chunks.clone();
+        let task = tokio::task::spawn_blocking(move || rank(&question, input));
+        match tokio::time::timeout_at(deadline, task).await {
+            Ok(Ok(ranked)) => ranked.into_iter().map(|r| r.chunk).collect(),
+            _ => {
+                if !output
+                    .notices
+                    .iter()
+                    .any(|n| n.process.number == process_numbers::WEB_TIME_LIMIT.number)
+                {
+                    notice(output, process_numbers::WEB_TIME_LIMIT, None);
+                }
+                chunks
+            }
+        }
+    } else {
+        chunks
+    };
+    let mut per_page = HashMap::<Option<String>, usize>::new();
+    for chunk in ranked {
+        if output.texts.len() == config.context_chunk_count {
+            break;
+        }
+        let count = per_page.entry(chunk.source.clone()).or_default();
+        if *count < config.chunks_per_page {
+            *count += 1;
+            output.texts.push(chunk);
+        }
+    }
+    output.sources = collected
+        .into_iter()
+        .map(|p| p.source)
+        .filter(|source| {
+            output
+                .texts
+                .iter()
+                .any(|t| t.source.as_deref() == Some(source.url.as_str()))
+        })
+        .collect();
+    if candidates > 0 {
+        let mut step = StepProgress::new(StageName::Gather, StepName::ChunksSelected);
+        step.progress = Some([output.texts.len() as u64, candidates as u64]);
+        events.send(NativeEvent::Step(step));
+        events.send(NativeEvent::Sources(output.sources.clone()));
     }
 }

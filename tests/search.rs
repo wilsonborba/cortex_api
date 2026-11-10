@@ -188,3 +188,29 @@ async fn real_http_adapters_send_fixed_agent_and_the_query_to_both() {
     drop(recorded);
     task.abort();
 }
+
+struct QueryRanks;
+impl SearchAdapter for QueryRanks {
+    fn name(&self) -> &'static str {
+        "query-ranks"
+    }
+    fn search<'a>(&'a self, query: &'a str) -> Pending<'a, Result<Vec<SearchHit>, SearchFailure>> {
+        Box::pin(async move {
+            Ok(if query == "one" {
+                vec![hit("https://example.org/a"), hit("https://example.org/b")]
+            } else {
+                vec![hit("https://example.org/b"), hit("https://example.org/c")]
+            })
+        })
+    }
+}
+#[tokio::test]
+async fn multiple_queries_preserve_all_engine_rank_contributions() {
+    let search = WebSearch::with_adapters(&Config::default(), vec![Arc::new(QueryRanks)]);
+    let found = search
+        .search_many(&["one".into(), "two".into(), "one".into()])
+        .await;
+    assert_eq!(found.hits[0].hit.url, "https://example.org/b");
+    assert!((found.hits[0].score - (1.0 / 61.0 + 1.0 / 62.0)).abs() < 1e-12);
+    assert_eq!(found.hits.len(), 3);
+}

@@ -29,6 +29,7 @@ url = "2.5.8"
 dom_smoothie = "0.18"
 text-splitter = "0.27"
 bm25 = { version = "2.3.2", features = ["language_detection"] }
+texting_robots = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
