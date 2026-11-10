@@ -44,7 +44,10 @@ impl RedisCache {
         *saved = Some(connection.clone());
         Ok(connection)
     }
-    async fn execute<T: FromRedisValue>(&self, command: &redis::Cmd) -> Result<T, CacheError> {
+    pub(crate) async fn execute<T: FromRedisValue>(
+        &self,
+        command: &redis::Cmd,
+    ) -> Result<T, CacheError> {
         let result = tokio::time::timeout(self.timeout, async {
             let mut connection = self.connection().await?;
             command

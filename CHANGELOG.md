@@ -53,6 +53,8 @@
 
 - Merge #84 security-shield
 
+- Merge #86 native-sse-events
+
 
 ### Features
 
@@ -79,6 +81,8 @@
 - Security-shield (#84)
 
 - Native-sse-events (#86)
+
+- Redis-event-journal (#87)
 
 
 ## v1.0.0 - 2026-11-09
