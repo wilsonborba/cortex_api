@@ -25,7 +25,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     let hippocampus = cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
         .map_err(|_| "The Hippocampus URL is not valid")?;
+    let runtime = {
+        use cortex_api::{
+            dal::{
+                local::{
+                    chats::Chats,
+                    prompt_guard::{MissingClassifier, PromptGuard},
+                },
+                remote::{
+                    cache::RedisCache, event_journal::EventJournal, ollama::Ollama,
+                    web_page::PageReader,
+                },
+            },
+            domain::{
+                models::security::InjectionClassifier,
+                services::{
+                    balancer::Scheduler, chat_runtime::ChatRuntime, crawler::WebRetriever,
+                    exchange_memory::ExchangeMemories, extraction::DocumentExtractor,
+                    files::FileProxy, history::History, recall::MemoryRecall,
+                    run_evidence::RunEvidence, search::WebSearch, security::SecurityShield,
+                    temporary::TemporaryChats, thinking::Thinking,
+                },
+            },
+        };
+        let classifier: std::sync::Arc<dyn InjectionClassifier> = match PromptGuard::load(&config) {
+            Ok(guard) => std::sync::Arc::new(guard),
+            Err(_) => {
+                tracing::warn!("Prompt Guard is not available; every input is refused");
+                std::sync::Arc::new(MissingClassifier)
+            }
+        };
+        let shield = std::sync::Arc::new(
+            SecurityShield::new(&config, classifier)
+                .map_err(|_| "The shield config is not valid")?,
+        );
+        let driver: std::sync::Arc<dyn cortex_api::domain::models::driver::ModelDriver> =
+            std::sync::Arc::new(Ollama::new(config.clone(), Scheduler::new(ledger.clone())));
+        let chats = Chats {
+            pool: chat_pool.clone(),
+        };
+        let temporary = TemporaryChats::new(&config, RedisCache::from_environment());
+        std::sync::Arc::new(ChatRuntime {
+            history: History::new(chats.clone(), RedisCache::from_environment(), &config)
+                .map_err(|_| "The history cache config is not valid")?,
+            files: FileProxy {
+                hippocampus: hippocampus.clone(),
+                extractor: DocumentExtractor::new(&config),
+                temporary: temporary.clone(),
+                config: config.clone(),
+            },
+            temporary,
+            recall: MemoryRecall::new(&config, hippocampus.clone(), shield.clone()),
+            web: WebRetriever::new(
+                &config,
+                WebSearch::new(&config).map_err(|_| "The web search config is not valid")?,
+                PageReader::new(&config).map_err(|_| "The web page reader is not valid")?,
+                shield.clone(),
+                driver.clone(),
+            ),
+            thinking: Thinking::new(&config, driver),
+            memories: ExchangeMemories {
+                repo: chats.clone(),
+                hippocampus: hippocampus.clone(),
+            },
+            runs: RunEvidence::new(store.clone()),
+            telemetry: cortex_api::domain::services::telemetry_reads::TelemetryReads {
+                store: store.clone(),
+                timing: cortex_api::dal::remote::timing::TimingStore::new(
+                    &config,
+                    RedisCache::from_environment(),
+                ),
+                config: config.clone(),
+            },
+            journal: EventJournal::new(RedisCache::from_environment(), &config)
+                .map_err(|_| "The event journal config is not valid")?,
+            shield,
+            chats,
+            config: config.clone(),
+        })
+    };
     let routes = cortex_api::presentation::models::router(config.clone())
+        .merge(cortex_api::presentation::chat_inputs::router(runtime))
         .merge(cortex_api::presentation::telemetry_reads::router(
             cortex_api::domain::services::telemetry_reads::TelemetryReads {
                 store,

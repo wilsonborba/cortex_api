@@ -1,8 +1,11 @@
 use crate::{
     core::config::Config,
     domain::models::{
-        extraction::DocumentFile, files::FileContent, memory_graph::GraphError,
-        recall::RecalledMemory, storage::AppUser,
+        extraction::DocumentFile,
+        files::{FileContent, FileMemory},
+        memory_graph::GraphError,
+        recall::RecalledMemory,
+        storage::AppUser,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -253,25 +256,39 @@ impl Hippocampus {
             .map(str::to_owned)
             .ok_or(HippoUnavailable)
     }
-    /// The file memory id comes from the scoped graph node `resource:{file_id}`.
-    pub async fn file_memory(&self, scope: &AppUser, file_id: &str) -> Result<String, GraphError> {
+    /// The file memory comes from the scoped graph node `resource:{file_id}`.
+    /// Its content is the text extracted once at upload (8.5).
+    pub async fn file_memory(
+        &self,
+        scope: &AppUser,
+        file_id: &str,
+    ) -> Result<FileMemory, GraphError> {
         let node = format!("resource:{file_id}");
         let graph = self.graph(scope, Some(&node), None, Some(0)).await?;
-        graph["edges"]
+        let nodes = graph["nodes"].as_array().ok_or(GraphError::Unavailable)?;
+        let memory = graph["edges"]
             .as_array()
             .into_iter()
             .flatten()
             .filter(|e| e["target_id"] == node.as_str())
             .filter_map(|e| e["source_id"].as_str())
-            .find(|id| {
-                graph["nodes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|n| n["id"] == *id && n["node_type"] == "memory")
+            .find_map(|id| {
+                nodes
+                    .iter()
+                    .find(|n| n["id"] == id && n["node_type"] == "memory")
             })
-            .map(str::to_owned)
-            .ok_or(GraphError::Unavailable)
+            .ok_or(GraphError::Unavailable)?;
+        Ok(FileMemory {
+            memory_id: memory["id"].as_str().unwrap_or_default().to_owned(),
+            name: graph["node"]["label"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            text: memory["metadata"]["content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        })
     }
     pub async fn file_content(
         &self,

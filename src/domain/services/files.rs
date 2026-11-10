@@ -8,7 +8,7 @@ use crate::{
         models::{
             context::ContextText,
             extraction::DocumentFile,
-            files::{FileContent, Upload},
+            files::{FileContent, FileMemory, Upload},
             identity::Caller,
             memory_graph::GraphError,
             temporary::TemporaryFile,
@@ -79,7 +79,7 @@ impl FileProxy {
         )
     }
     /// The Hippocampus file memory of a file inside the caller's scope.
-    pub async fn memory_id(&self, caller: &Caller, file_id: &str) -> Result<String, ProcessNumber> {
+    pub async fn file(&self, caller: &Caller, file_id: &str) -> Result<FileMemory, ProcessNumber> {
         self.hippocampus
             .file_memory(&caller.storage_scope(), file_id)
             .await
@@ -91,7 +91,7 @@ impl FileProxy {
         caller: &Caller,
         file_id: &str,
     ) -> Result<FileContent, ProcessNumber> {
-        self.memory_id(caller, file_id).await?;
+        self.file(caller, file_id).await?;
         self.hippocampus
             .file_content(&caller.storage_scope(), file_id)
             .await

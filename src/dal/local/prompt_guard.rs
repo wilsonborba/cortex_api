@@ -124,3 +124,10 @@ impl InjectionClassifier for PromptGuard {
         Ok(probability)
     }
 }
+/// Used when the Prompt Guard files cannot load. Every check fails closed (9.5).
+pub struct MissingClassifier;
+impl InjectionClassifier for MissingClassifier {
+    fn probability(&self, _: &str) -> Result<f32, ClassifierUnavailable> {
+        Err(ClassifierUnavailable)
+    }
+}

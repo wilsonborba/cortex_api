@@ -52,6 +52,19 @@ impl TemporaryChats {
         }
         Ok(snapshot)
     }
+    /// The app of a temporary chat comes from the chat, like a permanent chat.
+    pub async fn app_of(&self, user: &str, id: Uuid) -> Result<String, ProcessNumber> {
+        let snapshot = self
+            .store
+            .get(id)
+            .await
+            .map_err(|_| process_numbers::TEMPORARY_UNAVAILABLE)?
+            .ok_or(process_numbers::CHAT_NOT_FOUND)?;
+        if snapshot.data.user_id != user || snapshot.data.chat.is_none() {
+            return Err(process_numbers::CHAT_NOT_FOUND);
+        }
+        Ok(snapshot.data.app_id)
+    }
     pub async fn file(&self, caller: &Caller, id: Uuid) -> Result<TemporaryFile, ProcessNumber> {
         self.data(caller, id)
             .await?

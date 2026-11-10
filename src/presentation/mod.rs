@@ -59,6 +59,7 @@ pub mod telemetry;
 
 pub mod events;
 
+pub mod chat_inputs;
 pub mod chats;
 pub mod files;
 pub mod logs;
