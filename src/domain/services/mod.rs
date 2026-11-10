@@ -20,3 +20,5 @@ pub mod exchange_memory;
 pub mod search;
 
 pub mod chunks;
+
+pub mod web;
