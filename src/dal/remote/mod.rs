@@ -8,3 +8,5 @@ pub mod event_journal;
 pub mod hippocampus;
 
 pub mod search;
+
+pub mod web_page;
