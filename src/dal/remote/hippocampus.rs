@@ -362,4 +362,37 @@ impl Hippocampus {
             Err(HippoUnavailable)
         }
     }
+    /// One persona call. The scope always goes in the query; a body adds it
+    /// again, because the Hippocampus write routes read it there.
+    pub async fn persona_call(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+        scope: &AppUser,
+        query: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+    ) -> Result<(u16, serde_json::Value), HippoUnavailable> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|_| HippoUnavailable)?
+            .pop_if_empty()
+            .extend(["api", "v1"])
+            .extend(segments);
+        self.scope_query(&mut url, scope);
+        url.query_pairs_mut().extend_pairs(query);
+        let mut request = self.client.request(method, url);
+        if let Some(mut body) = body {
+            body["workspace_id"] = self.workspace.clone().into();
+            body["app_id"] = scope.app_id.clone().into();
+            body["user_id"] = scope.user_id.clone().into();
+            request = request.json(&body);
+        }
+        let response = request.send().await.map_err(|_| HippoUnavailable)?;
+        let status = response.status().as_u16();
+        let value = response.json().await.unwrap_or(serde_json::Value::Null);
+        Ok((status, value))
+    }
+    pub fn workspace(&self) -> &str {
+        &self.workspace
+    }
 }

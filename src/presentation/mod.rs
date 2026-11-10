@@ -65,4 +65,5 @@ pub mod chats;
 pub mod files;
 pub mod logs;
 pub mod memory_graph;
+pub mod personas;
 pub mod telemetry_reads;

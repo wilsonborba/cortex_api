@@ -97,6 +97,8 @@
 
 - Merge #87 #88 reconnect-cancel-stop-thinking
 
+- Merge #100 chat-delete
+
 
 ### Features
 
@@ -167,6 +169,8 @@
 - Reconnect-cancel-stop-thinking (#87, #88)
 
 - Chat-delete (#100)
+
+- Persona-routes (#104)
 
 
 ## v1.0.0 - 2026-11-09

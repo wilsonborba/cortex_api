@@ -4,6 +4,7 @@ pub mod identity;
 pub mod input_guard;
 pub mod memory_graph;
 pub mod output_controls;
+pub mod personas;
 pub mod pipeline;
 
 pub mod context;
