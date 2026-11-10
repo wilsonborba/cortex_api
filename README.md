@@ -372,12 +372,16 @@ The measurement report stays in ignored docs/ollama-8192-night.md.
 ## Rust input limit and models route
 
 GET /models returns one active T0 entry, max_input_tokens and estimate_rule.
-The estimate is UTF-8 bytes divided by bytes_per_token, rounded up. The
-current value is 1 byte per estimated token. This conservative rule works
+The input estimate is UTF-8 bytes divided by bytes_per_token, rounded up,
+then multiplied by copies. The
+current rule uses 1 byte per estimated token and two question copies, as
+required by area 6.8. This conservative rule works
 with the same UTF-8 encoding on Flutter web and the API.
 
-Config computes the limit once from 8192 minus the system text estimate,
-chat-template reserve, 1024 answer tokens and 1024 thinking-note tokens.
+Config computes the limit once from 8192 minus the 1024-token system and
+chat-template allowance, 1024 answer tokens and 1024 thinking-note tokens.
+The system allowance is at least the configured instruction estimate plus
+the chat-template reserve.
 The same safe limit applies with thinking on or off. Only user text enters
 the guard. Inputs above it return error_number 1201. Extra files, memories
 and web text are trimmed by Assemble; they do not reject a valid input.

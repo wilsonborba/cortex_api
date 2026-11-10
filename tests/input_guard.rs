@@ -42,14 +42,14 @@ async fn route_and_server_use_the_same_limit_and_rule() {
     assert_eq!(body["data"]["max_input_tokens"], limit);
     assert_eq!(
         body["data"]["estimate_rule"],
-        json!({"unit":"utf8_bytes","bytes_per_token":1})
+        json!({"unit":"utf8_bytes","bytes_per_token":1,"copies":2})
     );
     assert_eq!(body["data"]["models"].as_array().unwrap().len(), 1);
     assert_eq!(body["data"]["models"][0]["tier"], "t0");
     for (text, status) in [
-        ("x".repeat(limit as usize), StatusCode::OK),
-        ("x".repeat(limit as usize + 1), StatusCode::BAD_REQUEST),
-        ("ก".repeat(limit as usize / 3 + 1), StatusCode::BAD_REQUEST),
+        ("x".repeat(limit as usize / 2), StatusCode::OK),
+        ("x".repeat(limit as usize / 2 + 1), StatusCode::BAD_REQUEST),
+        ("ก".repeat(limit as usize / 6 + 1), StatusCode::BAD_REQUEST),
     ] {
         let response = app
             .clone()
@@ -74,11 +74,11 @@ async fn route_and_server_use_the_same_limit_and_rule() {
 fn unicode_estimate_and_shared_reserves() {
     let config = Config::default();
     assert_eq!(config.estimate_tokens("Aก💡"), 8);
+    assert_eq!(config.estimate_input_tokens("Aก💡"), 16);
     assert_eq!(
         config.model_context_tokens,
         config.max_input_tokens()
-            + config.estimate_tokens(&config.system_instruction)
-            + config.chat_template_token_reserve
+            + config.system_budget_tokens()
             + config.answer_token_reserve
             + config.thinking_notes_token_reserve
     );
