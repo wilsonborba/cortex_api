@@ -92,6 +92,26 @@ pub const WEB_SEARCH_FAILED: ProcessNumber = ProcessNumber {
     number: 1020,
     message: "Web search is not available",
 };
+pub const WEB_PAGE_TIMEOUT: ProcessNumber = ProcessNumber {
+    number: 1021,
+    message: "The web page timed out",
+};
+pub const WEB_PAGE_TOO_LARGE: ProcessNumber = ProcessNumber {
+    number: 1022,
+    message: "The web page is over the size limit",
+};
+pub const WEB_PAGE_TYPE: ProcessNumber = ProcessNumber {
+    number: 1023,
+    message: "The web page is not HTML",
+};
+pub const WEB_PAGE_FAILED: ProcessNumber = ProcessNumber {
+    number: 1024,
+    message: "The web page could not be read",
+};
+pub const WEB_PAGE_TEXT: ProcessNumber = ProcessNumber {
+    number: 1025,
+    message: "The web page has no readable main text",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -114,6 +134,11 @@ pub const REGISTRY: &[ProcessNumber] = &[
     OUTPUT_NOT_FOUND,
     MEMORY_SAVE_FAILED,
     WEB_SEARCH_FAILED,
+    WEB_PAGE_TIMEOUT,
+    WEB_PAGE_TOO_LARGE,
+    WEB_PAGE_TYPE,
+    WEB_PAGE_FAILED,
+    WEB_PAGE_TEXT,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

@@ -65,6 +65,8 @@
 
 - Merge #95 exchange-memory-save
 
+- Merge #72 key-free-search-adapters
+
 
 ### Features
 
@@ -103,6 +105,8 @@
 - Exchange-memory-save (#95)
 
 - Key-free-search-adapters (#72)
+
+- Bounded-page-reader (#73)
 
 
 ## v1.0.0 - 2026-11-09

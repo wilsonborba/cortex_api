@@ -3,6 +3,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub web_page_timeout: std::time::Duration,
+    pub web_parallel_pages: usize,
+    pub web_chunk_tokens: usize,
     pub search_adapters: Vec<SearchEngine>,
     pub duckduckgo_html_url: String,
     pub wikipedia_api_url: String,
@@ -67,6 +70,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            web_page_timeout:std::time::Duration::from_secs(8),
+            web_parallel_pages:5,
+            web_chunk_tokens:500,
             search_adapters:vec![SearchEngine::DuckDuckGo,SearchEngine::Wikipedia],
             duckduckgo_html_url:"https://html.duckduckgo.com/html/".into(),
             wikipedia_api_url:"https://en.wikipedia.org/w/api.php".into(),
@@ -74,7 +80,7 @@ impl Default for Config {
             web_search_timeout:std::time::Duration::from_secs(8),
             search_results_per_adapter:10,
             search_rrf_k:60,
-            web_html_bytes:2*1024*1024,
+            web_html_bytes:2_000_000,
             hippocampus_url:"http://127.0.0.1:18001".into(),
             hippocampus_timeout:std::time::Duration::from_secs(5),
             history_page_default:20,
@@ -198,3 +204,6 @@ pub enum SearchEngine {
     DuckDuckGo,
     Wikipedia,
 }
+
+// Owner night-run rule: no connection to Pong, including from web URLs.
+pub const FORBIDDEN_WEB_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 168, 1, 104);

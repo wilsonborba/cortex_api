@@ -18,3 +18,5 @@ pub mod chat_history;
 pub mod exchange_memory;
 
 pub mod search;
+
+pub mod chunks;
