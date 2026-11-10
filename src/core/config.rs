@@ -3,6 +3,14 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub search_adapters: Vec<SearchEngine>,
+    pub duckduckgo_html_url: String,
+    pub wikipedia_api_url: String,
+    pub web_user_agent: String,
+    pub web_search_timeout: std::time::Duration,
+    pub search_results_per_adapter: usize,
+    pub search_rrf_k: u32,
+    pub web_html_bytes: usize,
     pub hippocampus_url: String,
     pub hippocampus_timeout: std::time::Duration,
     pub history_page_default: u32,
@@ -59,6 +67,14 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            search_adapters:vec![SearchEngine::DuckDuckGo,SearchEngine::Wikipedia],
+            duckduckgo_html_url:"https://html.duckduckgo.com/html/".into(),
+            wikipedia_api_url:"https://en.wikipedia.org/w/api.php".into(),
+            web_user_agent:"AsodyaCortex/2".into(),
+            web_search_timeout:std::time::Duration::from_secs(8),
+            search_results_per_adapter:10,
+            search_rrf_k:60,
+            web_html_bytes:2*1024*1024,
             hippocampus_url:"http://127.0.0.1:18001".into(),
             hippocampus_timeout:std::time::Duration::from_secs(5),
             history_page_default:20,
@@ -175,4 +191,10 @@ impl Config {
 pub enum ContextFormat {
     Json,
     Toon,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SearchEngine {
+    DuckDuckGo,
+    Wikipedia,
 }

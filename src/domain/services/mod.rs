@@ -16,3 +16,5 @@ pub mod history;
 pub mod chat_history;
 
 pub mod exchange_memory;
+
+pub mod search;

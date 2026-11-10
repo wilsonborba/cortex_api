@@ -88,6 +88,10 @@ pub const MEMORY_SAVE_FAILED: ProcessNumber = ProcessNumber {
     number: 1019,
     message: "The exchange memory could not be saved",
 };
+pub const WEB_SEARCH_FAILED: ProcessNumber = ProcessNumber {
+    number: 1020,
+    message: "Web search is not available",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -109,6 +113,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     HISTORY_FAILED,
     OUTPUT_NOT_FOUND,
     MEMORY_SAVE_FAILED,
+    WEB_SEARCH_FAILED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {
