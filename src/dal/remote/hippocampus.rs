@@ -1,5 +1,8 @@
-use crate::{core::config::Config, domain::models::storage::AppUser};
-use serde::Serialize;
+use crate::{
+    core::config::Config,
+    domain::models::{recall::RecalledMemory, storage::AppUser},
+};
+use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct Hippocampus {
     client: reqwest::Client,
@@ -16,7 +19,76 @@ struct ExchangeMemory<'a> {
     title: &'a str,
     content: String,
 }
+#[derive(Serialize)]
+struct Search<'a> {
+    workspace_id: &'a str,
+    app_id: &'a str,
+    user_id: Option<&'a str>,
+    text: &'a str,
+    tags: Vec<&'a str>,
+    expand: u8,
+    limit: usize,
+}
+#[derive(Deserialize)]
+struct SearchResult {
+    memory: RecalledMemory,
+}
+#[derive(Deserialize)]
+struct SearchResponse {
+    data: Vec<SearchResult>,
+}
 impl Hippocampus {
+    pub async fn search(
+        &self,
+        scope: &AppUser,
+        text: &str,
+        topic: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RecalledMemory>, HippoUnavailable> {
+        let body = Search {
+            workspace_id: &self.workspace,
+            app_id: &scope.app_id,
+            user_id: if scope.user_id.is_empty() {
+                None
+            } else {
+                Some(&scope.user_id)
+            },
+            text,
+            tags: topic.into_iter().collect(),
+            expand: 0,
+            limit,
+        };
+        let url = self
+            .base
+            .join("api/v1/search")
+            .map_err(|_| HippoUnavailable)?;
+        let response = self
+            .client
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| HippoUnavailable)?;
+        if !response.status().is_success() {
+            return Err(HippoUnavailable);
+        }
+        let response: SearchResponse = response.json().await.map_err(|_| HippoUnavailable)?;
+        // Do not trust a malformed or wrong-scope response, even from a LAN peer.
+        if response.data.iter().any(|r| {
+            r.memory.workspace_id != self.workspace
+                || r.memory.app_id != scope.app_id
+                || r.memory.user_id.as_deref() != body.user_id
+                || r.memory.id.is_empty()
+        }) {
+            return Err(HippoUnavailable);
+        }
+        Ok(response
+            .data
+            .into_iter()
+            .take(limit)
+            .map(|r| r.memory)
+            .collect())
+    }
     pub fn new(config: &Config) -> Result<Self, HippoUnavailable> {
         let base = reqwest::Url::parse(&format!(
             "{}/",

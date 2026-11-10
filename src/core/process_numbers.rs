@@ -124,6 +124,10 @@ pub const WEB_ROBOTS_FAILED: ProcessNumber = ProcessNumber {
     number: 1028,
     message: "The web crawl rules could not be loaded",
 };
+pub const MEMORY_LOAD_FAILED: ProcessNumber = ProcessNumber {
+    number: 1029,
+    message: "Memory could not be loaded",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -154,6 +158,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     WEB_TIME_LIMIT,
     WEB_PAGE_LIMIT,
     WEB_ROBOTS_FAILED,
+    MEMORY_LOAD_FAILED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

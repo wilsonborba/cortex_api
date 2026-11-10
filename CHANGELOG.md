@@ -73,6 +73,8 @@
 
 - Merge #75 bounded-query-rewrite
 
+- Merge #76 bounded-web-traversal
+
 
 ### Features
 
@@ -119,6 +121,8 @@
 - Bounded-query-rewrite (#75)
 
 - Bounded-web-traversal (#76)
+
+- Scoped-memory-recall (#77)
 
 
 ## v1.0.0 - 2026-11-09
