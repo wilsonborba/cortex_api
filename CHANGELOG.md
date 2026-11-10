@@ -4,6 +4,11 @@
 ## Unreleased
 
 
+### Bug Fixes
+
+- Measurement-image (#70)
+
+
 ### Chores
 
 - Merge v1.0.0 back to release
@@ -29,6 +34,8 @@
 - Merge #102 app-user-attribution
 
 - Merge #67 usage-balancer
+
+- Merge #70 ollama-driver
 
 
 ### Features
