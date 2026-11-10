@@ -167,8 +167,14 @@ impl Run {
                 .with_persona(chat.persona_id.clone()));
         }
         let mut files = vec![];
+        let mut images = vec![];
         for id in file_ids {
             let file = rt.files.file(caller, id).await?;
+            if file.content_type.to_ascii_lowercase().starts_with("image/") {
+                use base64::Engine;
+                let bytes = rt.files.download(caller, id).await?.bytes;
+                images.push(base64::engine::general_purpose::STANDARD.encode(bytes));
+            }
             files.push(SessionFile {
                 file_id: id.clone(),
                 memory_id: file.memory_id,
@@ -217,7 +223,8 @@ impl Run {
                 history,
                 vec![],
             )
-            .with_persona(persona_id))
+            .with_persona(persona_id)
+            .with_images(caller, images))
     }
     fn accepted(
         &self,
@@ -239,6 +246,7 @@ impl Run {
             memory_topic: input.memory_topic.clone(),
             thinking: input.thinking,
             persona_id: None,
+            images: vec![],
             history,
             temporary_files,
         }
@@ -473,7 +481,7 @@ impl StageServices<Turn> for Run {
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
-                        images: vec![],
+                        images: accepted.images.clone(),
                     },
                     &self.events,
                     self.stop.clone(),
@@ -507,7 +515,7 @@ impl StageServices<Turn> for Run {
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
-                        images: vec![],
+                        images: accepted.images.clone(),
                     },
                     thinking.as_deref().unwrap_or(&empty),
                     &self.events,

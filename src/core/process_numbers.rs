@@ -200,6 +200,14 @@ pub const PERSONA_UNAVAILABLE: ProcessNumber = ProcessNumber {
     number: 1047,
     message: "Personas could not be loaded or changed",
 };
+pub const AUDIO_LIMIT: ProcessNumber = ProcessNumber {
+    number: 1048,
+    message: "The audio is over the 10 minute limit",
+};
+pub const AUDIO_FAILED: ProcessNumber = ProcessNumber {
+    number: 1049,
+    message: "The audio could not be transcribed",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -249,6 +257,8 @@ pub const REGISTRY: &[ProcessNumber] = &[
     PERSONA_NOT_FOUND,
     PERSONA_INVALID,
     PERSONA_UNAVAILABLE,
+    AUDIO_LIMIT,
+    AUDIO_FAILED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

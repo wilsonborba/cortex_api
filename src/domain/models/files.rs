@@ -9,6 +9,7 @@ pub struct FileMemory {
     pub memory_id: String,
     pub name: String,
     pub text: String,
+    pub content_type: String,
 }
 /// File bytes read through Hippocampus for `GET /files/{file_id}/content`.
 pub struct FileContent {

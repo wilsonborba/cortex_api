@@ -112,10 +112,33 @@ async fn server() -> (Double, Config) {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (double, config)
 }
+/// Transcriber double: "spoken text" when the audio bytes start with "ok", failure otherwise.
+struct Speech;
+impl cortex_api::domain::services::transcription::AudioTranscriber for Speech {
+    fn transcribe<'a>(
+        &'a self,
+        _: &'a cortex_api::domain::models::identity::Caller,
+        _: &'a str,
+        bytes: Arc<Vec<u8>>,
+        _: &'a cortex_api::domain::services::events::EventSink,
+    ) -> cortex_api::domain::models::usage::Pending<
+        'a,
+        Result<String, cortex_api::core::process_numbers::ProcessNumber>,
+    > {
+        Box::pin(async move {
+            if bytes.starts_with(b"ok") {
+                Ok("spoken text".into())
+            } else {
+                Err(cortex_api::core::process_numbers::AUDIO_FAILED)
+            }
+        })
+    }
+}
 fn app(config: &Config, cache: RedisCache) -> Router {
     with_response_contract(router(FileProxy {
         hippocampus: Hippocampus::new(config).unwrap(),
         extractor: DocumentExtractor::new(config),
+        transcriber: Arc::new(Speech),
         temporary: TemporaryChats::new(config, cache),
         config: config.clone(),
     }))
@@ -368,4 +391,25 @@ async fn temporary_upload_stays_in_redis() {
         .query_async(&mut redis)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn audio_is_transcribed_and_a_failure_still_saves_the_file() {
+    let (double, config) = server().await;
+    for (bytes, expected) in [("ok audio", "spoken text"), ("broken", "")] {
+        let (status, body) = upload(
+            app(&config, no_redis()),
+            Some("alice"),
+            &[
+                ("app_id", None, "cortex"),
+                ("file", Some("audio/ogg"), bytes),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            double.calls.lock().unwrap().last().unwrap().1["extracted_text"],
+            expected
+        );
+    }
 }

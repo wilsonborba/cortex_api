@@ -40,3 +40,4 @@ pub mod run_evidence;
 pub mod telemetry_reads;
 pub mod temporary;
 pub mod thinking;
+pub mod transcription;

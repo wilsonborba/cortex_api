@@ -59,8 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             SecurityShield::new(&config, classifier)
                 .map_err(|_| "The shield config is not valid")?,
         );
+        let queue = Scheduler::new(ledger.clone());
+        let ollama = std::sync::Arc::new(Ollama::new(config.clone(), queue.clone()));
         let driver: std::sync::Arc<dyn cortex_api::domain::models::driver::ModelDriver> =
-            std::sync::Arc::new(Ollama::new(config.clone(), Scheduler::new(ledger.clone())));
+            ollama.clone();
         let chats = Chats {
             pool: chat_pool.clone(),
         };
@@ -75,6 +77,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             files: FileProxy {
                 hippocampus: hippocampus.clone(),
                 extractor: DocumentExtractor::new(&config),
+                transcriber: std::sync::Arc::new(
+                    cortex_api::domain::services::transcription::LocalTranscriber {
+                        queue: queue.clone(),
+                        ollama: ollama.clone(),
+                        config: config.clone(),
+                    },
+                ),
                 temporary: temporary.clone(),
                 config: config.clone(),
             },
@@ -111,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         (runtime, personas)
     };
+    let files = runtime.files.clone();
     let routes = cortex_api::presentation::models::router(config.clone())
         .merge(cortex_api::presentation::chat_inputs::router(runtime))
         .merge(cortex_api::presentation::personas::router(personas))
@@ -141,19 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config: config.clone(),
             },
         ))
-        .merge(cortex_api::presentation::files::router(
-            cortex_api::domain::services::files::FileProxy {
-                hippocampus,
-                extractor: cortex_api::domain::services::extraction::DocumentExtractor::new(
-                    &config,
-                ),
-                temporary: cortex_api::domain::services::temporary::TemporaryChats::new(
-                    &config,
-                    cortex_api::dal::remote::cache::RedisCache::from_environment(),
-                ),
-                config: config.clone(),
-            },
-        ))
+        .merge(cortex_api::presentation::files::router(files))
         .merge(cortex_api::presentation::logs::router(logs))
         .merge(cortex_api::presentation::telemetry::router(ledger, &config))
         .merge(cortex_api::presentation::chats::router(

@@ -26,6 +26,8 @@ pub struct AcceptedTurn {
     pub thinking: bool,
     /// The chat bot persona (23.5). Temporary chats use it but never change it.
     pub persona_id: Option<String>,
+    /// Base64 images of this input; they select the vision model (2.6).
+    pub images: Vec<String>,
     pub model: OutputModel,
     pub history: Vec<Exchange>,
     /// Temporary chat files. Permanent chat files are read in Gather.
@@ -34,6 +36,13 @@ pub struct AcceptedTurn {
 impl AcceptedTurn {
     pub fn with_persona(self, persona_id: Option<String>) -> Self {
         Self { persona_id, ..self }
+    }
+    pub fn with_images(self, caller: &Caller, images: Vec<String>) -> Self {
+        Self {
+            model: OutputModel::new(caller, self.ids.output_id, !images.is_empty()),
+            images,
+            ..self
+        }
     }
 }
 /// Data carried between stages. Full text never goes to logs or run records.

@@ -44,6 +44,18 @@ use tokio::sync::{mpsc, watch};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+struct NoAudio;
+impl cortex_api::domain::services::transcription::AudioTranscriber for NoAudio {
+    fn transcribe<'a>(
+        &'a self,
+        _: &'a cortex_api::domain::models::identity::Caller,
+        _: &'a str,
+        _: Arc<Vec<u8>>,
+        _: &'a cortex_api::domain::services::events::EventSink,
+    ) -> Pending<'a, Result<String, cortex_api::core::process_numbers::ProcessNumber>> {
+        Box::pin(async { Err(cortex_api::core::process_numbers::AUDIO_FAILED) })
+    }
+}
 struct Clean;
 impl InjectionClassifier for Clean {
     fn probability(&self, _: &str) -> Result<f32, ClassifierUnavailable> {
@@ -54,6 +66,8 @@ impl InjectionClassifier for Clean {
 #[derive(Default)]
 struct Model {
     prompts: Mutex<Vec<String>>,
+    /// (image count, model name) per call.
+    images: Mutex<Vec<(usize, String)>>,
 }
 impl ModelDriver for Model {
     fn call<'a>(
@@ -68,6 +82,10 @@ impl ModelDriver for Model {
                 .lock()
                 .unwrap()
                 .push(format!("{}\n{}", input.system, input.prompt));
+            self.images.lock().unwrap().push((
+                input.images.len(),
+                output.name(&Config::default()).to_owned(),
+            ));
             let started = chrono::Utc::now();
             let slow = input.prompt.contains("slow");
             let mut error = None;
@@ -140,6 +158,13 @@ async fn remote() -> (Log, String) {
             "/api/v1/graph/nodes/{id}",
             get(|State(log): State<Log>, Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
                 log.lock().unwrap().push((format!("node {id}"), json!(q)));
+                if id == "resource:r-img" && q["user_id"] == "alice" {
+                    return Json(json!({"data":{"nodes":[
+                        {"id":"m-img","node_type":"memory","label":"photo.png","metadata":{"workspace_id":"cortex","app_id":"cortex","user_id":"alice","content":""}},
+                        {"id":"resource:r-img","node_type":"file","label":"photo.png","metadata":{"content_type":"image/png"}}],
+                        "edges":[{"source_id":"m-img","target_id":"resource:r-img","edge_type":"attachment"}],
+                        "truncated":false,"node":{"id":"resource:r-img","label":"photo.png","metadata":{"content_type":"image/png"}}}})).into_response();
+                }
                 if id != "resource:r-a" || q["user_id"] != "alice" {
                     return (StatusCode::NOT_FOUND, Json(json!({}))).into_response();
                 }
@@ -201,7 +226,9 @@ async fn remote() -> (Log, String) {
         .route(
             "/api/v1/resources/{id}/content",
             get(|Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
-                if id == "r-a" && q.get("user_id").map(String::as_str) == Some("alice") {
+                if id == "r-img" && q.get("user_id").map(String::as_str) == Some("alice") {
+                    ([(axum::http::header::CONTENT_TYPE, "image/png")], "png bytes").into_response()
+                } else if id == "r-a" && q.get("user_id").map(String::as_str) == Some("alice") {
                     "file bytes".into_response()
                 } else {
                     (StatusCode::NOT_FOUND, Json(json!({}))).into_response()
@@ -256,6 +283,7 @@ fn runtime(
         files: FileProxy {
             hippocampus: hippocampus.clone(),
             extractor: DocumentExtractor::new(&config),
+            transcriber: Arc::new(NoAudio),
             temporary: temporary.clone(),
             config: config.clone(),
         },
@@ -631,6 +659,24 @@ async fn permanent_and_temporary_chats_run_every_stage() {
             .unwrap();
     assert_eq!(saved.as_deref(), Some("b-1"));
 
+    // Images go to the vision model (2.6); text inputs use the text model.
+    let (status, text) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"What is in the photo?","file_ids":["r-img"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    let config = Config::default();
+    {
+        use base64::Engine;
+        let calls = model.images.lock().unwrap();
+        assert_eq!(calls.last().unwrap(), &(1, config.vision_model.clone()));
+        assert_eq!(calls[0], (0, config.text_model.clone()));
+        let _ = base64::engine::general_purpose::STANDARD.encode("png bytes");
+    }
+
     // 3. Another user cannot continue the chat.
     let (status, text) = call(
         &rt,
@@ -668,7 +714,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(rows, 3);
+    assert_eq!(rows, 4);
     let (status, _) = call(
         &rt,
         &format!("/chats/{temp_session}/inputs"),
@@ -677,7 +723,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert!(model.prompts.lock().unwrap()[5].contains("Temporary question"));
+    assert!(model.prompts.lock().unwrap()[6].contains("Temporary question"));
     assert_eq!(
         log.lock()
             .unwrap()
@@ -750,8 +796,8 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .filter(|l| l.0.starts_with("run "))
         .map(|l| l.1.clone())
         .collect();
-    assert_eq!(runs.len(), 8);
-    assert_eq!(runs.iter().filter(|r| r["user_id"] == "alice").count(), 6);
+    assert_eq!(runs.len(), 9);
+    assert_eq!(runs.iter().filter(|r| r["user_id"] == "alice").count(), 7);
     assert_eq!(
         runs.iter()
             .filter(|r| r["user_id"] == "" && r["app_id"] == "certifications")
