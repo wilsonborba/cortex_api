@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     let hippocampus = cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
         .map_err(|_| "The Hippocampus URL is not valid")?;
-    let runtime = {
+    let (runtime, personas) = {
         use cortex_api::{
             dal::{
                 local::{
@@ -65,7 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             pool: chat_pool.clone(),
         };
         let temporary = TemporaryChats::new(&config, RedisCache::from_environment());
-        std::sync::Arc::new(ChatRuntime {
+        let personas = cortex_api::domain::services::personas::Personas {
+            hippocampus: hippocampus.clone(),
+            shield: shield.clone(),
+        };
+        let runtime = std::sync::Arc::new(ChatRuntime {
             history: History::new(chats.clone(), RedisCache::from_environment(), &config)
                 .map_err(|_| "The history cache config is not valid")?,
             files: FileProxy {
@@ -103,10 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             shield,
             chats,
             config: config.clone(),
-        })
+        });
+        (runtime, personas)
     };
     let routes = cortex_api::presentation::models::router(config.clone())
         .merge(cortex_api::presentation::chat_inputs::router(runtime))
+        .merge(cortex_api::presentation::personas::router(personas))
         .merge(cortex_api::presentation::chat_delete::router(
             cortex_api::domain::services::chat_delete::ChatDelete {
                 history: cortex_api::domain::services::chat_history::ChatHistory {

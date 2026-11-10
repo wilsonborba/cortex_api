@@ -4,6 +4,7 @@ pub mod files;
 pub mod identity;
 pub mod memory_graph;
 pub mod model_catalog;
+pub mod personas;
 pub mod pipeline;
 pub mod run_record;
 pub mod storage;

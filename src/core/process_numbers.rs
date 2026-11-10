@@ -188,6 +188,18 @@ pub const CHAT_DELETE_FAILED: ProcessNumber = ProcessNumber {
     number: 1044,
     message: "The chat memories could not be deleted",
 };
+pub const PERSONA_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1045,
+    message: "The persona was not found",
+};
+pub const PERSONA_INVALID: ProcessNumber = ProcessNumber {
+    number: 1046,
+    message: "The persona data is not valid",
+};
+pub const PERSONA_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1047,
+    message: "Personas could not be loaded or changed",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -234,6 +246,9 @@ pub const REGISTRY: &[ProcessNumber] = &[
     EVENTS_UNAVAILABLE,
     OUTPUT_NOT_RUNNING,
     CHAT_DELETE_FAILED,
+    PERSONA_NOT_FOUND,
+    PERSONA_INVALID,
+    PERSONA_UNAVAILABLE,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {
