@@ -45,6 +45,8 @@
 
 - Merge #71 context-reserves
 
+- Merge #69 user-usage
+
 
 ### Features
 
@@ -63,6 +65,8 @@
 - Input-token-guard (#71)
 
 - User-usage (#69)
+
+- Fixed-stages (#82)
 
 
 ## v1.0.0 - 2026-11-09
