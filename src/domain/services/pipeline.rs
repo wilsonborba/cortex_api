@@ -22,6 +22,9 @@ impl StageReporter {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    fn start(&self, stage: StageName) {
+        let _ = self.events.send(PipelineEvent::StageStarted(stage));
+    }
     fn publish<T>(&self, result: &StageResult<T>, new_notices: &[SourceNotice]) {
         let record = result.record();
         tracing::info!(stage=%record.name,status=%record.status,time_ms=record.time_ms,error_number=?record.error_number,notice_number=?record.notice_number,"Stage completed");
@@ -71,6 +74,7 @@ async fn save<T: PipelineData>(
 ) {
     let start = Instant::now();
     let previous = stages.last().expect("prior stage");
+    reporter.start(StageName::Save);
     let value = services.save(previous).await;
     let result = finish(StageName::Save, start, Some(previous), value, reporter);
     stages.push(result);
@@ -80,6 +84,7 @@ pub async fn run<T: PipelineData>(
     services: &dyn StageServices<T>,
     reporter: &StageReporter,
 ) -> PipelineResult<T> {
+    reporter.start(StageName::Accept);
     let start = Instant::now();
     let accepted = finish(
         StageName::Accept,
@@ -96,6 +101,7 @@ pub async fn run<T: PipelineData>(
     }
     let previous = stages.last().expect("accepted");
     let start = Instant::now();
+    reporter.start(StageName::Gather);
     let (mut files, mut memory, mut web) = tokio::join!(
         services.files(previous),
         services.memory(previous),
@@ -175,6 +181,7 @@ pub async fn run<T: PipelineData>(
             continue;
         }
         let start = Instant::now();
+        reporter.start(name);
         let value = match name {
             StageName::Assemble => services.assemble(previous).await,
             StageName::Think => services.think(previous).await,

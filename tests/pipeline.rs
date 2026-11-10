@@ -147,14 +147,17 @@ async fn check(thinking: bool, fail: Option<&'static str>, cancel: bool) {
     );
     let records = reporter.records();
     assert_eq!(records.len(), expected.len());
+    let mut started = vec![];
     let mut streamed = vec![];
     let mut notices = 0;
     while let Ok(event) = rx.try_recv() {
         match event {
             PipelineEvent::Stage(record) => streamed.push(record),
             PipelineEvent::Notice(_) => notices += 1,
+            PipelineEvent::StageStarted(stage) => started.push(stage.name()),
         }
     }
+    assert_eq!(started, expected);
     assert_eq!(streamed, records);
     assert_eq!(
         records,

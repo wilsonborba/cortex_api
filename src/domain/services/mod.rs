@@ -6,3 +6,5 @@ pub mod pipeline;
 pub mod context;
 
 pub mod security;
+
+pub mod events;

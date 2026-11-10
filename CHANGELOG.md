@@ -51,6 +51,8 @@
 
 - Merge #83 context-assembly
 
+- Merge #84 security-shield
+
 
 ### Features
 
@@ -75,6 +77,8 @@
 - Context-assembly (#83)
 
 - Security-shield (#84)
+
+- Native-sse-events (#86)
 
 
 ## v1.0.0 - 2026-11-09
