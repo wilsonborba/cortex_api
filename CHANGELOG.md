@@ -87,6 +87,8 @@
 
 - Merge #90 run-evidence-retention
 
+- Merge #91 scoped-telemetry
+
 
 ### Features
 
@@ -147,6 +149,8 @@
 - Run-evidence-retention (#90)
 
 - Scoped-telemetry (#91)
+
+- Scoped-memory-graph (#96)
 
 
 ## v1.0.0 - 2026-11-09
