@@ -13,3 +13,5 @@ pub mod search;
 pub mod temporary;
 pub mod timing;
 pub mod web_page;
+
+pub mod loyalty;

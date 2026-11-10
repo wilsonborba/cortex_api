@@ -31,6 +31,7 @@ impl UsageLedger for Ledger {
             Ok(Share {
                 usage: self.users.get(actor).copied().unwrap_or_default(),
                 weight: 1.0,
+                loyalty: None,
             })
         })
     }

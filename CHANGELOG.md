@@ -119,6 +119,8 @@
 
 - Merge #80 file-worker-job-locations
 
+- Merge #113 admin-event-user
+
 
 ### Features
 
@@ -199,6 +201,8 @@
 - Audio-transcription-and-vision-images (#79)
 
 - File-worker-job-locations (#80)
+
+- Refresh loyalty weights from read-only sources (#68)
 
 
 ### Tests

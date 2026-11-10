@@ -120,6 +120,7 @@ impl UsageLedger for Ledger {
             Ok(Share {
                 usage: Usage::default(),
                 weight: 1.0,
+                loyalty: None,
             })
         })
     }

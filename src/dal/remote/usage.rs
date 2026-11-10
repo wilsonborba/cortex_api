@@ -165,21 +165,30 @@ impl RedisLedger {
         for bucket in buckets.into_values() {
             usage.add(bucket);
         }
-        self.cache
-            .put(
-                &CacheKey::Loyalty(actor.into()),
-                &json!({"weight":1.0}),
-                Lifetime::new(self.config.loyalty_snapshot_ttl).map_err(|_| LedgerUnavailable)?,
-            )
+        let loyalty = self
+            .cache
+            .get(&CacheKey::Loyalty(actor.into()))
             .await
-            .map_err(|_| LedgerUnavailable)?;
+            .map_err(|_| LedgerUnavailable)?
+            .and_then(|value| {
+                serde_json::from_value::<crate::domain::models::loyalty::LoyaltySnapshot>(value)
+                    .ok()
+            })
+            .filter(|snapshot| snapshot.valid());
         if repaired {
             self.dirty
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(actor);
         }
-        Ok((Share { usage, weight: 1.0 }, repaired))
+        Ok((
+            Share {
+                usage,
+                weight: loyalty.map_or(1.0, |s| s.weight),
+                loyalty,
+            },
+            repaired,
+        ))
     }
 }
 impl UsageLedger for RedisLedger {

@@ -42,10 +42,10 @@ impl UsageData {
             },
             loyalty_weight: LoyaltyWeight {
                 value: share.weight,
-                age: None,
-                frequency: None,
-                account_days: None,
-                sign_in_days_90: None,
+                age: share.loyalty.map(|s| s.age),
+                frequency: share.loyalty.map(|s| s.frequency),
+                account_days: share.loyalty.map(|s| s.account_days),
+                sign_in_days_90: share.loyalty.map(|s| s.sign_in_days_90),
             },
             formula: "1 + age + frequency",
         }

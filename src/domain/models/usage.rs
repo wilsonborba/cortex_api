@@ -24,6 +24,7 @@ impl Usage {
 pub struct Share {
     pub usage: Usage,
     pub weight: f64,
+    pub loyalty: Option<super::loyalty::LoyaltySnapshot>,
 }
 #[derive(Debug, Clone)]
 pub struct CallUsage {

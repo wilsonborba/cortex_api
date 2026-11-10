@@ -38,6 +38,7 @@ impl UsageLedger for Ledger {
                     ..Usage::default()
                 },
                 weight,
+                loyalty: None,
             })
         })
     }
