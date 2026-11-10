@@ -111,6 +111,8 @@
 
 - Merge #103 user-isolation
 
+- Merge #91 expected-time-first-event
+
 
 ### Features
 
@@ -188,12 +190,19 @@
 
 - Personas-in-context (#105)
 
+- Audio-transcription-and-vision-images (#79)
+
 
 ### Tests
 
 - Redis-down-consumers (#99)
 
 - User-isolation (#103)
+
+
+### wip
+
+- Audio transcription and images to vision model (#79)
 
 
 ## v1.0.0 - 2026-11-09

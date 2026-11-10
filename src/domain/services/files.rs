@@ -20,8 +20,17 @@ use crate::{
 pub struct FileProxy {
     pub hippocampus: Hippocampus,
     pub extractor: DocumentExtractor,
+    pub transcriber: std::sync::Arc<dyn crate::domain::services::transcription::AudioTranscriber>,
     pub temporary: TemporaryChats,
     pub config: Config,
+}
+const AUDIO_EXTENSIONS: [&str; 7] = ["opus", "ogg", "oga", "mp3", "wav", "m4a", "flac"];
+fn is_audio(file: &DocumentFile) -> bool {
+    file.content_type.to_ascii_lowercase().starts_with("audio/")
+        || file
+            .name
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| AUDIO_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 fn lookup_error(error: GraphError) -> ProcessNumber {
     match error {
@@ -43,16 +52,23 @@ impl FileProxy {
         }
         // Upload has no output stream, so the progress events are dropped.
         let (events, _, _) = channel(&self.config, None);
-        let extracted = self.extractor.extract(file.clone(), &events).await;
+        // Audio is transcribed (7.1); a failed transcription still saves the file (8.4).
+        let text = if is_audio(&file) {
+            self.transcriber
+                .transcribe(caller, &file.name, file.bytes.clone(), &events)
+                .await
+                .unwrap_or_default()
+        } else {
+            self.extractor.extract(file.clone(), &events).await.text()
+        };
         if temporary {
-            let pages = extracted
-                .pages
-                .iter()
-                .map(|page| ContextText {
+            let pages = (!text.is_empty())
+                .then(|| ContextText {
                     label: file.name.clone(),
                     source: None,
-                    text: page.text.clone(),
+                    text: text.clone(),
                 })
+                .into_iter()
                 .collect();
             let id = self
                 .temporary
@@ -70,7 +86,7 @@ impl FileProxy {
         Ok(
             match self
                 .hippocampus
-                .save_file(&caller.storage_scope(), &file, &extracted.text())
+                .save_file(&caller.storage_scope(), &file, &text)
                 .await
             {
                 Ok(id) => Upload::Saved(id),

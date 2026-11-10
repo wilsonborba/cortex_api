@@ -81,6 +81,10 @@ pub struct Config {
     pub thinking_notes_token_reserve: u64,
     pub text_model: String,
     pub vision_model: String,
+    pub ffmpeg_path: std::path::PathBuf,
+    pub whisper_model_path: std::path::PathBuf,
+    pub whisper_threads: i32,
+    pub audio_max_seconds: f64,
     pub ollama_url: String,
     pub model_context_tokens: u64,
     pub ollama_keep_alive: String,
@@ -187,6 +191,13 @@ impl Default for Config {
             thinking_notes_token_reserve:1024,
             text_model: "hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0".into(),
             vision_model: "qwen2.5vl:7b".into(),
+            ffmpeg_path: "/usr/bin/ffmpeg".into(),
+            // large-v3-turbo q5_0 GGML (7.6.5), shared with the canonical checkout.
+            whisper_model_path:
+                "/home/main-server/Documents/Others/Asodya/cortex_api/var/whisper-models/ggml-large-v3-turbo-q5_0.bin"
+                    .into(),
+            whisper_threads: 4,
+            audio_max_seconds: 600.0,
             ollama_url: "http://127.0.0.1:11434".into(),
             model_context_tokens: 8192,
             ollama_keep_alive: "2m".into(),

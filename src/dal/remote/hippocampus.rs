@@ -288,6 +288,10 @@ impl Hippocampus {
                 .as_str()
                 .unwrap_or_default()
                 .to_owned(),
+            content_type: graph["node"]["metadata"]["content_type"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
         })
     }
     pub async fn file_content(
