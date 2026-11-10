@@ -99,6 +99,8 @@
 
 - Merge #100 chat-delete
 
+- Merge #104 persona-routes
+
 
 ### Features
 
@@ -171,6 +173,8 @@
 - Chat-delete (#100)
 
 - Persona-routes (#104)
+
+- A2a-chat-inputs (#102)
 
 
 ## v1.0.0 - 2026-11-09

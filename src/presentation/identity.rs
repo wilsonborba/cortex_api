@@ -16,6 +16,21 @@ pub struct CallerContext {
     peer: Option<std::net::IpAddr>,
 }
 impl CallerContext {
+    /// The x-uuid user, or empty for an A2A call (21.3).
+    pub fn user(&self) -> &str {
+        self.user.as_deref().unwrap_or_default()
+    }
+    /// A call with no user must come from a LAN backend (21.3.1).
+    pub fn check_peer(&self) -> Result<(), IdentityError> {
+        if self.user.is_none()
+            && !self
+                .peer
+                .is_some_and(crate::domain::services::identity::lan)
+        {
+            return Err(IdentityError::MissingUser);
+        }
+        Ok(())
+    }
     pub fn for_app(&self, app_id: &str, require_user: bool) -> Result<Caller, IdentityError> {
         crate::domain::services::identity::attribute(
             &Config::default(),
