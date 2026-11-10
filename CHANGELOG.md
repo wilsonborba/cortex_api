@@ -93,6 +93,8 @@
 
 - Merge #81 file-proxy
 
+- Merge #97 chat-runtime
+
 
 ### Features
 
@@ -159,6 +161,8 @@
 - File-proxy (#81)
 
 - Chat-runtime (#97)
+
+- Reconnect-cancel-stop-thinking (#87, #88)
 
 
 ## v1.0.0 - 2026-11-09

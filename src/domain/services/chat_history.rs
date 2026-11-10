@@ -39,8 +39,13 @@ impl ChatHistory {
         };
         Ok((chat, scope))
     }
-    pub async fn list(&self, user: &str) -> Result<Vec<Chat>, ProcessNumber> {
-        self.repo.list_chats(user).await.map_err(error)
+    pub async fn list(&self, user: &str, query: ListQuery) -> Result<Vec<Chat>, ProcessNumber> {
+        match query.status {
+            None => self.repo.list_chats(user).await,
+            // Temporary chats are never in SQL, so they are never listed (10.4.8).
+            Some(ListStatus::Running) => self.repo.running_chats(user).await,
+        }
+        .map_err(error)
     }
     async fn details(
         &self,

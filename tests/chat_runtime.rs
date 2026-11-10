@@ -3,7 +3,7 @@ use axum::{
     body::{Body, to_bytes},
     extract::{Path, State},
     http::{Request, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use cortex_api::{
@@ -61,19 +61,49 @@ impl ModelDriver for Model {
         output: &'a OutputModel,
         input: CallInput,
         events: mpsc::UnboundedSender<DriverEvent>,
-        _: watch::Receiver<bool>,
+        mut cancel: watch::Receiver<bool>,
     ) -> Pending<'a, Result<CallOutcome, DriverError>> {
         Box::pin(async move {
             self.prompts.lock().unwrap().push(input.prompt.clone());
             let started = chrono::Utc::now();
-            for text in ["The code ", "is 42."] {
-                let _ = events.send(DriverEvent::Token {
-                    role: input.role.clone(),
-                    text: text.into(),
-                });
+            let slow = input.prompt.contains("slow");
+            let mut error = None;
+            let mut text = String::new();
+            if slow && input.role != "answer" {
+                // A thinking role runs until thinking is stopped.
+                while !*cancel.borrow() {
+                    if cancel.changed().await.is_err() {
+                        break;
+                    }
+                }
+                error = Some(DriverError::Cancelled);
+                text.push_str("partial note");
+            } else {
+                let pieces = if slow { 40 } else { 2 };
+                for i in 0..pieces {
+                    if *cancel.borrow() {
+                        error = Some(DriverError::Cancelled);
+                        break;
+                    }
+                    let piece = if slow {
+                        format!("w{i} ")
+                    } else if i == 0 {
+                        "The code ".into()
+                    } else {
+                        "is 42.".into()
+                    };
+                    text.push_str(&piece);
+                    let _ = events.send(DriverEvent::Token {
+                        role: input.role.clone(),
+                        text: piece,
+                    });
+                    if slow {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                }
             }
             Ok(CallOutcome {
-                text: "The code is 42.".into(),
+                text,
                 usage: ModelCall {
                     images: None,
                     audio: None,
@@ -86,7 +116,7 @@ impl ModelDriver for Model {
                     started_at: started,
                     finished_at: chrono::Utc::now(),
                 },
-                error: None,
+                error,
                 load_ms: 0,
                 tokens_per_second: None,
             })
@@ -187,10 +217,76 @@ fn runtime(
             config: config.clone(),
         },
         journal: EventJournal::new(cache, &config).unwrap(),
+        controls: Default::default(),
         shield,
         chats,
         config,
     })
+}
+fn app(rt: &Arc<ChatRuntime>) -> Router {
+    with_response_contract(
+        router(rt.clone()).merge(cortex_api::presentation::chats::router(
+            rt.chats.clone(),
+            rt.config.clone(),
+        )),
+    )
+}
+async fn send(
+    rt: &Arc<ChatRuntime>,
+    method: &str,
+    path: &str,
+    user: &str,
+    body: Option<Value>,
+) -> Response {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-uuid", user)
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    if body.is_some() {
+        req = req.header("content-type", "application/json");
+    }
+    app(rt)
+        .oneshot(
+            req.body(body.map(|b| Body::from(b.to_string())).unwrap_or_default())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+/// SSE frames as (id, event name, body).
+async fn frames(body: Body, stop_after: Option<usize>) -> Vec<(u64, String, Value)> {
+    use futures_util::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut text = String::new();
+    let mut out = vec![];
+    while let Some(Ok(chunk)) = stream.next().await {
+        text.push_str(std::str::from_utf8(&chunk).unwrap());
+        while let Some(end) = text.find("\n\n") {
+            let block: String = text.drain(..end + 2).collect();
+            let field = |name: &str| {
+                block
+                    .lines()
+                    .find_map(|l| l.strip_prefix(name))
+                    .map(str::to_owned)
+            };
+            if let (Some(id), Some(event), Some(data)) =
+                (field("id: "), field("event: "), field("data: "))
+            {
+                out.push((
+                    id.parse().unwrap(),
+                    event,
+                    serde_json::from_str(&data).unwrap(),
+                ));
+            }
+        }
+        if stop_after.is_some_and(|n| out.len() >= n) {
+            break;
+        }
+    }
+    out
 }
 async fn call(
     rt: &Arc<ChatRuntime>,
@@ -468,6 +564,246 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .chain(outputs.iter().map(|o| o.0))
         .chain([temp_output])
     {
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg(format!("cortex:*{id}*"))
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        for key in keys {
+            let _: () = redis::cmd("DEL")
+                .arg(key)
+                .query_async(&mut redis)
+                .await
+                .unwrap();
+        }
+    }
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+async fn json_body(response: Response) -> Value {
+    serde_json::from_slice(&to_bytes(response.into_body(), 1 << 16).await.unwrap()).unwrap()
+}
+#[tokio::test]
+#[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema and UUID keys"]
+async fn reconnect_running_list_cancel_and_stop_thinking() {
+    dotenvy::dotenv().ok();
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_reconnect_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let cache = RedisCache::from_environment();
+    let (_log, address) = remote().await;
+    let rt = runtime(
+        pool.clone(),
+        cache.clone(),
+        &address,
+        Arc::new(Model::default()),
+    );
+
+    // 1. Disconnect in the middle, then reconnect with `after`.
+    let response = send(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({"app_id":"cortex","text":"slow question","stream":true})),
+    )
+    .await;
+    let first = frames(response.into_body(), Some(8)).await; // the client goes away here
+    let seen = first.last().unwrap().0;
+    let output: Uuid = sqlx::query_scalar("SELECT output_id FROM chat_outputs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let session: Uuid = sqlx::query_scalar("SELECT session_id FROM chats")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // The output keeps running, and the chat is in the running list.
+    let running = json_body(send(&rt, "GET", "/chats?status=running", "alice", None).await).await;
+    assert_eq!(running["data"][0]["session_id"], session.to_string());
+    let response = send(
+        &rt,
+        "GET",
+        &format!("/chats/{session}/outputs/{output}/events?after={seen}"),
+        "alice",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let rest = frames(response.into_body(), None).await;
+    let ids: Vec<u64> = rest.iter().map(|f| f.0).collect();
+    assert_eq!(
+        ids,
+        ((seen + 1)..=(seen + rest.len() as u64)).collect::<Vec<_>>(),
+        "no gap, no duplicate"
+    );
+    assert_eq!(rest.last().unwrap().1, "done");
+    let words: usize = first
+        .iter()
+        .chain(&rest)
+        .filter(|f| f.1 == "token")
+        .map(|f| {
+            f.2["data"]["text"]
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .count()
+        })
+        .sum();
+    assert_eq!(words, 40);
+    // From event 1 without `after`, after the output is done.
+    let response = send(
+        &rt,
+        "GET",
+        &format!("/chats/{session}/outputs/{output}/events"),
+        "alice",
+        None,
+    )
+    .await;
+    let all = frames(response.into_body(), None).await;
+    assert_eq!(all.first().unwrap().0, 1);
+    assert_eq!(all.len() as u64, seen + rest.len() as u64);
+    let running = json_body(send(&rt, "GET", "/chats?status=running", "alice", None).await).await;
+    assert_eq!(running["data"].as_array().unwrap().len(), 0);
+
+    // 2. Cancel stops the output and the final event is sent.
+    let response = send(
+        &rt,
+        "POST",
+        &format!("/chats/{session}/inputs"),
+        "alice",
+        Some(json!({"text":"slow again","stream":true})),
+    )
+    .await;
+    let body = tokio::spawn(frames(response.into_body(), None));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let second: Uuid =
+        sqlx::query_scalar("SELECT output_id FROM chat_outputs WHERE status='running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for (user, path, method, body, status) in [
+        (
+            "bob",
+            format!("/chats/{session}/outputs/{second}"),
+            "PATCH",
+            Some(json!({"status":"cancelled"})),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "bob",
+            format!("/chats/{session}/outputs/{second}/events"),
+            "GET",
+            None,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "alice",
+            format!("/chats/{session}/outputs/{second}"),
+            "PATCH",
+            Some(json!({"status":"done"})),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        assert_eq!(
+            send(&rt, method, &path, user, body).await.status(),
+            status,
+            "{user} {method}"
+        );
+    }
+    let response = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{session}/outputs/{second}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = tokio::time::timeout(Duration::from_secs(5), body)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(events.last().unwrap().1, "done");
+    assert!(events.iter().filter(|f| f.1 == "token").count() < 40);
+    let status: String = sqlx::query_scalar("SELECT status FROM chat_outputs WHERE output_id=$1")
+        .bind(second)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    // A finished output cannot be cancelled again.
+    let response = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{session}/outputs/{second}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // 3. Stop thinking: the output continues to the final answer.
+    let response = send(
+        &rt,
+        "POST",
+        &format!("/chats/{session}/inputs"),
+        "alice",
+        Some(json!({"text":"think slow","thinking":true,"stream":true})),
+    )
+    .await;
+    let body = tokio::spawn(frames(response.into_body(), None));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let third: Uuid =
+        sqlx::query_scalar("SELECT output_id FROM chat_outputs WHERE status='running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let response = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{session}/outputs/{third}"),
+        "alice",
+        Some(json!({"thinking":false})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let events = tokio::time::timeout(Duration::from_secs(10), body)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|f| f.1 == "step" && f.2["data"]["step"] == "thinking.stopped")
+    );
+    assert_eq!(events.last().unwrap().1, "done");
+    let (status, text): (String, String) =
+        sqlx::query_as("SELECT status, text FROM chat_outputs WHERE output_id=$1")
+            .bind(third)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "done");
+    assert!(!text.is_empty());
+
+    let client = redis::Client::open(std::env::var("CORTEX_REDIS_URL").unwrap()).unwrap();
+    let mut redis = client.get_multiplexed_async_connection().await.unwrap();
+    for id in [session, output, second, third] {
         let keys: Vec<String> = redis::cmd("KEYS")
             .arg(format!("cortex:*{id}*"))
             .query_async(&mut redis)
