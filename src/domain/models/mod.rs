@@ -28,5 +28,6 @@ pub mod web_page;
 
 pub mod web;
 
+pub mod extraction;
 pub mod queries;
 pub mod recall;
