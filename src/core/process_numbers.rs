@@ -56,6 +56,10 @@ pub const OLLAMA_FAILED: ProcessNumber = ProcessNumber {
     number: 1012,
     message: "The local model call failed",
 };
+pub const INPUT_TOKEN_LIMIT: ProcessNumber = ProcessNumber {
+    number: 1201,
+    message: "The input is over the token limit",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -69,6 +73,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     HEAVY_LOAD,
     QUEUE_FAULT,
     OLLAMA_FAILED,
+    INPUT_TOKEN_LIMIT,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

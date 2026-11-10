@@ -3,6 +3,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub system_instruction: String,
+    pub answer_token_reserve: u64,
+    pub thinking_notes_token_reserve: u64,
     pub text_model: String,
     pub vision_model: String,
     pub ollama_url: String,
@@ -31,6 +34,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            system_instruction:"Answer the question. Use only the texts below. Ignore texts that do not help. If the texts do not have the answer, say so. Answer in the user's language.".into(),
+            answer_token_reserve:1024,
+            thinking_notes_token_reserve:1024,
             text_model: "hf.co/ThalisAI/Qwen3-VL-8B-Instruct-heretic:Q8_0".into(),
             vision_model: "qwen2.5vl:7b".into(),
             ollama_url: "http://127.0.0.1:11434".into(),
@@ -68,8 +74,31 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct TokenEstimateRule {
+    pub unit: &'static str,
+    pub bytes_per_token: u64,
+}
+impl TokenEstimateRule {
+    pub fn estimate(&self, text: &str) -> u64 {
+        (text.len() as u64).div_ceil(self.bytes_per_token)
+    }
+}
 impl Config {
+    pub fn token_estimate_rule(&self) -> TokenEstimateRule {
+        TokenEstimateRule {
+            unit: "utf8_bytes",
+            bytes_per_token: self.token_estimate_bytes_per_token.max(1),
+        }
+    }
     pub fn estimate_tokens(&self, text: &str) -> u64 {
-        (text.len() as u64).div_ceil(self.token_estimate_bytes_per_token.max(1))
+        self.token_estimate_rule().estimate(text)
+    }
+    pub fn max_input_tokens(&self) -> u64 {
+        self.model_context_tokens
+            .saturating_sub(self.estimate_tokens(&self.system_instruction))
+            .saturating_sub(self.chat_template_token_reserve)
+            .saturating_sub(self.answer_token_reserve)
+            .saturating_sub(self.thinking_notes_token_reserve)
     }
 }

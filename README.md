@@ -368,3 +368,20 @@ output, immediate tokens, cancellation, failure and queue release. The ignored
 ollama_msi test measures cold/warm loads and token rate through the real queue.
 Run it only in an owner-approved MSI GPU window. Its stores and keys are tests.
 The measurement report stays in ignored docs/ollama-8192-night.md.
+
+## Rust input limit and models route
+
+GET /models returns one active T0 entry, max_input_tokens and estimate_rule.
+The estimate is UTF-8 bytes divided by bytes_per_token, rounded up. The
+current value is 1 byte per estimated token. This conservative rule works
+with the same UTF-8 encoding on Flutter web and the API.
+
+Config computes the limit once from 8192 minus the system text estimate,
+chat-template reserve, 1024 answer tokens and 1024 thinking-note tokens.
+The same safe limit applies with thinking on or off. Only user text enters
+the guard. Inputs above it return error_number 1201. Extra files, memories
+and web text are trimmed by Assemble; they do not reject a valid input.
+
+Route and guard tests cover the exact boundary, over-limit text, Thai,
+emoji, one T0 model and matching published values. Issue #71 stays open
+until the chat Accept stage calls this guard.

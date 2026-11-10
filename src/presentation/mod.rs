@@ -54,3 +54,4 @@ async fn normalize_framework_error(request: Request, next: Next) -> Response {
 pub mod balancer;
 pub mod identity;
 pub mod model_error;
+pub mod models;
