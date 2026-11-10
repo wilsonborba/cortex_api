@@ -61,6 +61,8 @@
 
 - Merge #93 history-storage-cache
 
+- Merge #94 scoped-history-routes
+
 
 ### Features
 
@@ -95,6 +97,8 @@
 - History-storage-cache (#93)
 
 - Scoped-history-routes (#94)
+
+- Exchange-memory-save (#95)
 
 
 ## v1.0.0 - 2026-11-09
