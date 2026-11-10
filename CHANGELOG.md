@@ -12,6 +12,8 @@
 
 - Expected-time-first-event (#91)
 
+- Admin-event-user (#113)
+
 
 ### Chores
 
@@ -114,6 +116,8 @@
 - Merge #91 expected-time-first-event
 
 - Merge #79 audio-transcription-and-vision-images
+
+- Merge #80 file-worker-job-locations
 
 
 ### Features

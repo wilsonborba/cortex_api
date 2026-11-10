@@ -6,7 +6,7 @@
       "reduce": "_stats"
     },
     "events": {
-      "map": "function(doc) { if (!doc.output_id || !doc.calls || typeof doc.user_id !== 'string') return; doc.calls.forEach(function(c, i) { var stamp = Date.parse(c.started_at); if (!isFinite(stamp)) return; var row = {request_id: doc.output_id + ':' + i, output_id: doc.output_id, model: c.model, role: c.role, input_tokens: c.input_tokens, output_tokens: c.output_tokens, total_tokens: c.input_tokens + c.output_tokens, started_at: c.started_at, finished_at: c.finished_at}; emit([stamp, doc.output_id, i], row); }); }"
+      "map": "function(doc) { if (!doc.output_id || !doc.calls || typeof doc.user_id !== 'string') return; doc.calls.forEach(function(c, i) { var stamp = Date.parse(c.started_at); if (!isFinite(stamp)) return; var row = {user_id: doc.user_id, request_id: doc.output_id + ':' + i, output_id: doc.output_id, model: c.model, role: c.role, input_tokens: c.input_tokens, output_tokens: c.output_tokens, total_tokens: c.input_tokens + c.output_tokens, started_at: c.started_at, finished_at: c.finished_at}; emit([stamp, doc.output_id, i], row); }); }"
     },
     "events_by_user": {
       "map": "function(doc) { if (!doc.output_id || !doc.calls || typeof doc.user_id !== 'string') return; doc.calls.forEach(function(c, i) { var stamp = Date.parse(c.started_at); if (!isFinite(stamp)) return; var row = {request_id: doc.output_id + ':' + i, output_id: doc.output_id, model: c.model, role: c.role, input_tokens: c.input_tokens, output_tokens: c.output_tokens, total_tokens: c.input_tokens + c.output_tokens, started_at: c.started_at, finished_at: c.finished_at}; emit([doc.user_id, stamp, doc.output_id, i], row); }); }"
