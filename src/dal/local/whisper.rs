@@ -47,8 +47,10 @@ pub fn transcribe(
     samples: &[f32],
     progress: mpsc::Sender<i32>,
 ) -> Result<String, ProcessNumber> {
-    let mut parameters = WhisperContextParameters::default();
-    parameters.use_gpu = true;
+    let parameters = WhisperContextParameters {
+        use_gpu: true,
+        ..Default::default()
+    };
     let path = config
         .whisper_model_path
         .to_str()

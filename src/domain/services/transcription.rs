@@ -74,13 +74,28 @@ impl AudioTranscriber for LocalTranscriber {
             events.send(step(name, 0.0, total));
             let (tx, rx) = std::sync::mpsc::channel();
             let config = self.config.clone();
-            let job =
-                tokio::task::spawn_blocking(move || whisper::transcribe(&config, &samples, tx));
+            // whisper-rs keeps the progress callback (and its sender) after the job,
+            // so the forwarder stops on this flag, not on a closed channel.
+            let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let finished = done.clone();
+            let job = tokio::task::spawn_blocking(move || {
+                let text = whisper::transcribe(&config, &samples, tx);
+                finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                text
+            });
             let sink = events.clone();
             let owned = name.to_owned();
             let forward = tokio::task::spawn_blocking(move || {
-                while let Ok(percent) = rx.recv() {
-                    sink.send(step(&owned, total * f64::from(percent) / 100.0, total));
+                use std::sync::mpsc::RecvTimeoutError;
+                loop {
+                    match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                        Ok(percent) => {
+                            sink.send(step(&owned, total * f64::from(percent) / 100.0, total))
+                        }
+                        Err(RecvTimeoutError::Timeout)
+                            if !done.load(std::sync::atomic::Ordering::SeqCst) => {}
+                        Err(_) => break,
+                    }
                 }
             });
             let text = job.await.map_err(|_| process_numbers::AUDIO_FAILED)?;
