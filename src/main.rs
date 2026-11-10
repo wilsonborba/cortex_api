@@ -34,6 +34,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 config: config.clone(),
             },
         ))
+        .merge(cortex_api::presentation::memory_graph::router(
+            cortex_api::domain::services::memory_graph::MemoryGraph {
+                hippocampus: cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
+                    .map_err(|_| "The Hippocampus URL is not valid")?,
+                config: config.clone(),
+            },
+        ))
         .merge(cortex_api::presentation::logs::router(logs))
         .merge(cortex_api::presentation::telemetry::router(ledger, &config))
         .merge(cortex_api::presentation::chats::router(

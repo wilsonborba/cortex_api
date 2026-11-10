@@ -1,6 +1,6 @@
 use crate::{
     core::config::Config,
-    domain::models::{recall::RecalledMemory, storage::AppUser},
+    domain::models::{memory_graph::GraphError, recall::RecalledMemory, storage::AppUser},
 };
 use serde::{Deserialize, Serialize};
 #[derive(Clone)]
@@ -147,5 +147,60 @@ impl Hippocampus {
             .filter(|id| !id.is_empty())
             .map(str::to_owned)
             .ok_or(HippoUnavailable)
+    }
+    pub async fn graph(
+        &self,
+        scope: &AppUser,
+        node: Option<&str>,
+        limit: Option<usize>,
+        depth: Option<usize>,
+    ) -> Result<serde_json::Value, GraphError> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|_| GraphError::Unavailable)?
+            .pop_if_empty()
+            .extend(["api", "v1", "graph"])
+            .extend(node.map(|n| ["nodes", n]).into_iter().flatten());
+        {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("workspace_id", &self.workspace)
+                .append_pair("app_id", &scope.app_id)
+                .append_pair("user_id", &scope.user_id);
+            if let Some(limit) = limit {
+                q.append_pair("limit", &limit.to_string());
+            }
+            if let Some(depth) = depth {
+                q.append_pair("depth", &depth.to_string());
+            }
+        }
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| GraphError::Unavailable)?;
+        match response.status() {
+            s if s.is_success() => {}
+            reqwest::StatusCode::NOT_FOUND if node.is_some() => return Err(GraphError::NotFound),
+            reqwest::StatusCode::BAD_REQUEST => return Err(GraphError::Invalid),
+            _ => return Err(GraphError::Unavailable),
+        }
+        let mut value: serde_json::Value =
+            response.json().await.map_err(|_| GraphError::Unavailable)?;
+        let data = value["data"].take();
+        let user = (!scope.user_id.is_empty()).then_some(scope.user_id.as_str());
+        // Do not trust a malformed or wrong-scope graph, even from a LAN peer.
+        let nodes = data["nodes"].as_array().ok_or(GraphError::Unavailable)?;
+        let in_scope = nodes.iter().all(|n| {
+            n["id"].as_str().is_some_and(|id| !id.is_empty())
+                && (n["node_type"] != "memory"
+                    || (n["metadata"]["workspace_id"] == self.workspace
+                        && n["metadata"]["app_id"] == scope.app_id.as_str()
+                        && n["metadata"]["user_id"].as_str() == user))
+        });
+        if !in_scope || !data["edges"].is_array() || (node.is_some() && !data["node"].is_object()) {
+            return Err(GraphError::Unavailable);
+        }
+        Ok(data)
     }
 }

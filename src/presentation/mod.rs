@@ -61,4 +61,5 @@ pub mod events;
 
 pub mod chats;
 pub mod logs;
+pub mod memory_graph;
 pub mod telemetry_reads;

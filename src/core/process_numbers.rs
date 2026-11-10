@@ -164,6 +164,10 @@ pub const TELEMETRY_UNAVAILABLE: ProcessNumber = ProcessNumber {
     number: 1038,
     message: "Telemetry data could not be loaded",
 };
+pub const MEMORY_NODE_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1039,
+    message: "The memory graph node was not found",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -204,6 +208,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     THINKING_TIME_LIMIT,
     LOG_LAN_ONLY,
     TELEMETRY_UNAVAILABLE,
+    MEMORY_NODE_NOT_FOUND,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {
