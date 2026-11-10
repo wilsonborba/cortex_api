@@ -83,6 +83,7 @@ fn metric(key: &str) -> bool {
             | "output_tokens"
             | "pages"
             | "files"
+            | "records"
     )
 }
 fn named(key: &str) -> bool {

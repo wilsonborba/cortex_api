@@ -83,6 +83,8 @@
 
 - Merge #88 bounded-thinking
 
+- Merge #89 private-standard-logs
+
 
 ### Features
 
@@ -139,6 +141,8 @@
 - Bounded-thinking (#88)
 
 - Private-standard-logs (#89)
+
+- Run-evidence-retention (#90)
 
 
 ## v1.0.0 - 2026-11-09

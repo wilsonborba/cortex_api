@@ -14,6 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if store.initialize().await.is_err() {
         tracing::warn!("Run record database setup failed");
     }
+    let _retention = cortex_api::domain::tasks::run_retention::spawn(store.clone(), config.clone());
     let ledger = std::sync::Arc::new(cortex_api::dal::remote::usage::RedisLedger::new(
         cortex_api::dal::remote::cache::RedisCache::from_environment(),
         store,

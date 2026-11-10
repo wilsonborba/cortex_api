@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub run_retention_days: i64,
+    pub run_purge_interval: std::time::Duration,
     pub development: bool,
     pub log_stream_capacity: usize,
     pub log_line_bytes: usize,
@@ -101,6 +103,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            run_retention_days:30,
+            run_purge_interval:std::time::Duration::from_secs(24*3600),
             development:false,
             log_stream_capacity:1024,
             log_line_bytes:16_384,
