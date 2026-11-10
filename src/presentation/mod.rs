@@ -55,3 +55,4 @@ pub mod balancer;
 pub mod identity;
 pub mod model_error;
 pub mod models;
+pub mod telemetry;

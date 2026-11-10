@@ -389,3 +389,18 @@ and web text are trimmed by Assemble; they do not reject a valid input.
 Route and guard tests cover the exact boundary, over-limit text, Thai,
 emoji, one T0 model and matching published values. Issue #71 stays open
 until the chat Accept stage calls this guard.
+
+## Rust usage route
+
+GET /telemetry/usage requires x-uuid and returns only that user's 24-hour
+buckets. Query user ids and admin headers cannot select another user. The
+response has window_hours, input/output/total tokens, image/audio items,
+loyalty_weight and its parts, and the formula. While #68 is blocked, the
+weight is 1 and age, frequency, account_days and sign_in_days_90 are null.
+The frontend can show Not available yet. Missing x-uuid uses process 1005;
+unavailable usage uses process 1013.
+
+The route is registered in the development API. Its run-record source is
+cortex_runs_test until cutover, so development checks do not write primary
+run records. Tests cover two users, attempted query/admin overrides, missing
+identity, a failed ledger and values read from real Valkey buckets.

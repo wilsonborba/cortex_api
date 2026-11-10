@@ -43,6 +43,8 @@
 
 - Merge #71 input-token-guard
 
+- Merge #71 context-reserves
+
 
 ### Features
 
@@ -59,6 +61,8 @@
 - Ollama-driver (#70)
 
 - Input-token-guard (#71)
+
+- User-usage (#69)
 
 
 ## v1.0.0 - 2026-11-09
