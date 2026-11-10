@@ -15,8 +15,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("Run record database setup failed");
     }
     let _retention = cortex_api::domain::tasks::run_retention::spawn(store.clone(), config.clone());
+    let loyalty_cache = cortex_api::dal::remote::cache::RedisCache::from_environment();
+    let _loyalty =
+        match cortex_api::dal::remote::loyalty::SupabaseLoyalty::from_environment(&config) {
+            Ok(source) => Some(cortex_api::domain::tasks::loyalty::spawn(
+                std::sync::Arc::new(source),
+                loyalty_cache.clone(),
+                config.clone(),
+            )),
+            Err(_) => {
+                tracing::warn!("Loyalty source is not configured; base weight remains available");
+                None
+            }
+        };
     let ledger = std::sync::Arc::new(cortex_api::dal::remote::usage::RedisLedger::new(
-        cortex_api::dal::remote::cache::RedisCache::from_environment(),
+        loyalty_cache,
         store.clone(),
         config.local_queue_name.into(),
     ));
