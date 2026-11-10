@@ -37,6 +37,8 @@
 
 - Merge #70 ollama-driver
 
+- Merge #70 measurement-image
+
 
 ### Features
 
@@ -51,6 +53,8 @@
 - Usage-balancer (#67)
 
 - Ollama-driver (#70)
+
+- Input-token-guard (#71)
 
 
 ## v1.0.0 - 2026-11-09

@@ -18,8 +18,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(address = %config.listen, "Development server started");
     axum::serve(
         listener,
-        cortex_api::presentation::with_response_contract(axum::Router::new())
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        cortex_api::presentation::with_response_contract(cortex_api::presentation::models::router(
+            config.clone(),
+        ))
+        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
     Ok(())
