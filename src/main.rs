@@ -6,22 +6,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().init();
     let config = Config::default();
     use cortex_api::dal::remote::runs::{RunDatabase, RunStore};
-    match RunStore::from_environment(RunDatabase::Primary) {
-        Ok(store) => {
-            if store.initialize().await.is_err() {
-                tracing::warn!("Run record database setup failed");
-            }
-        }
-        Err(_) => tracing::warn!("Run record database is not configured"),
+    // The night-run development API uses test stores. Cutover selects primary stores.
+    let store = std::sync::Arc::new(
+        RunStore::from_environment(RunDatabase::Test)
+            .map_err(|_| "The run record store is not configured")?,
+    );
+    if store.initialize().await.is_err() {
+        tracing::warn!("Run record database setup failed");
     }
+    let ledger = std::sync::Arc::new(cortex_api::dal::remote::usage::RedisLedger::new(
+        cortex_api::dal::remote::cache::RedisCache::from_environment(),
+        store,
+        config.local_queue_name.into(),
+    ));
+    let routes = cortex_api::presentation::models::router(config.clone())
+        .merge(cortex_api::presentation::telemetry::router(ledger, &config));
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address = %config.listen, "Development server started");
     axum::serve(
         listener,
-        cortex_api::presentation::with_response_contract(cortex_api::presentation::models::router(
-            config.clone(),
-        ))
-        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        cortex_api::presentation::with_response_contract(routes)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
     Ok(())

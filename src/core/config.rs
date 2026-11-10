@@ -21,6 +21,7 @@ pub struct Config {
     pub usage_bucket_ttl: std::time::Duration,
     pub loyalty_snapshot_ttl: std::time::Duration,
     pub queue_wait_timeout: std::time::Duration,
+    pub local_queue_name: &'static str,
     pub queue_snapshot_ttl: std::time::Duration,
     pub run_read_batch: usize,
     pub allowed_apps: Vec<&'static str>,
@@ -54,6 +55,7 @@ impl Default for Config {
             usage_bucket_ttl: std::time::Duration::from_secs(24 * 3600),
             loyalty_snapshot_ttl: std::time::Duration::from_secs(3600),
             queue_wait_timeout: std::time::Duration::from_secs(300),
+            local_queue_name:"msi",
             queue_snapshot_ttl: std::time::Duration::from_secs(301),
             run_read_batch: 200,
             allowed_apps: vec![
