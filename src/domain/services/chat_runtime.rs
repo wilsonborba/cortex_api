@@ -12,6 +12,7 @@ use crate::{
             driver::{DriverError, OutputModel},
             events::{Memory, NativeEvent, OutputEvent, StepName, StepProgress},
             history::{FinishedOutput, FinishedStatus},
+            personas::PersonaError,
             pipeline::*,
             replay::StoredEvent,
             run_evidence::RunIdentity,
@@ -47,6 +48,7 @@ pub struct ChatRuntime {
     pub runs: RunEvidence,
     pub telemetry: TelemetryReads,
     pub journal: EventJournal,
+    pub personas: crate::domain::services::personas::Personas,
     pub controls: crate::domain::services::output_controls::OutputControls,
 }
 /// The final state of one output, for an input sent without `stream`.
@@ -97,6 +99,17 @@ impl Run {
             StageName::Accept,
             StepName::SecurityOk,
         )));
+        if let TurnRequest::New(body) = turn.request.as_ref()
+            && let Some(id) = &body.persona_id
+        {
+            rt.personas
+                .check_bot(caller, id)
+                .await
+                .map_err(|e| match e {
+                    PersonaError::Process(process) => process,
+                    PersonaError::Invalid(_) => process_numbers::PERSONA_NOT_FOUND,
+                })?;
+        }
         let temporary = match turn.request.as_ref() {
             TurnRequest::New(body) => body.temporary,
             TurnRequest::Next(session, _) => rt
@@ -142,14 +155,16 @@ impl Run {
                 input_id: input.input_id,
                 output_id: output.output_id,
             };
-            return Ok(self.accepted(
-                turn,
-                ids,
-                true,
-                input,
-                history,
-                chat.files.iter().flat_map(|f| f.pages.clone()).collect(),
-            ));
+            return Ok(self
+                .accepted(
+                    turn,
+                    ids,
+                    true,
+                    input,
+                    history,
+                    chat.files.iter().flat_map(|f| f.pages.clone()).collect(),
+                )
+                .with_persona(chat.persona_id.clone()));
         }
         let mut files = vec![];
         for id in file_ids {
@@ -160,10 +175,11 @@ impl Run {
                 name: file.name,
             });
         }
-        let prepared = match turn.request.as_ref() {
-            TurnRequest::New(body) => {
-                chat_session::new_permanent(&rt.config, caller, body.clone(), &files, now)?
-            }
+        let (prepared, persona_id) = match turn.request.as_ref() {
+            TurnRequest::New(body) => (
+                chat_session::new_permanent(&rt.config, caller, body.clone(), &files, now)?,
+                body.persona_id.clone(),
+            ),
             TurnRequest::Next(session, body) => {
                 let chat = rt
                     .chats
@@ -171,7 +187,10 @@ impl Run {
                     .await
                     .map_err(|_| process_numbers::HISTORY_FAILED)?
                     .ok_or(process_numbers::CHAT_NOT_FOUND)?;
-                chat_session::continue_permanent(caller, &chat, body.clone(), &files, now)?
+                (
+                    chat_session::continue_permanent(caller, &chat, body.clone(), &files, now)?,
+                    chat.persona_id.clone(),
+                )
             }
         };
         let history = match &prepared.new_chat {
@@ -189,14 +208,16 @@ impl Run {
             .save_accepted(&prepared)
             .await
             .map_err(|_| process_numbers::HISTORY_FAILED)?;
-        Ok(self.accepted(
-            turn,
-            prepared.ids(),
-            false,
-            &prepared.input,
-            history,
-            vec![],
-        ))
+        Ok(self
+            .accepted(
+                turn,
+                prepared.ids(),
+                false,
+                &prepared.input,
+                history,
+                vec![],
+            )
+            .with_persona(persona_id))
     }
     fn accepted(
         &self,
@@ -217,6 +238,7 @@ impl Run {
             use_memory: input.use_memory,
             memory_topic: input.memory_topic.clone(),
             thinking: input.thinking,
+            persona_id: None,
             history,
             temporary_files,
         }
@@ -342,8 +364,28 @@ impl StageServices<Turn> for Run {
             turn.files = recalled.files;
             turn.memories = recalled.memories;
             turn.references = recalled.references;
+            let mut notices = recalled.notices;
+            // Personas are always on, with no flag (23). A failure is a notice.
+            match self
+                .runtime
+                .personas
+                .for_context(
+                    &turn.caller,
+                    &accepted.question,
+                    accepted.persona_id.as_deref(),
+                    self.runtime.config.named_persona_count,
+                )
+                .await
+            {
+                Ok(personas) => turn.personas = personas,
+                Err(_) => notices.push(SourceNotice {
+                    process: process_numbers::PERSONA_UNAVAILABLE,
+                    label: "personas".into(),
+                    source: None,
+                }),
+            }
             let mut value = StageValue::ok(turn);
-            value.output.notices = recalled.notices;
+            value.output.notices = notices;
             value
         })
     }
@@ -391,7 +433,9 @@ impl StageServices<Turn> for Run {
                     files: std::mem::take(&mut turn.files),
                     memories: std::mem::take(&mut turn.memories),
                     web: std::mem::take(&mut turn.web),
-                    ..Default::default()
+                    self_persona: turn.personas.self_persona.clone(),
+                    bot_persona: turn.personas.bot_persona.clone(),
+                    named_personas: turn.personas.named.clone(),
                 },
             );
             let Ok(assembled) = assembled else {

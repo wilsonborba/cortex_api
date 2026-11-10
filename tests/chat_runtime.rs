@@ -64,7 +64,10 @@ impl ModelDriver for Model {
         mut cancel: watch::Receiver<bool>,
     ) -> Pending<'a, Result<CallOutcome, DriverError>> {
         Box::pin(async move {
-            self.prompts.lock().unwrap().push(input.prompt.clone());
+            self.prompts
+                .lock()
+                .unwrap()
+                .push(format!("{}\n{}", input.system, input.prompt));
             let started = chrono::Utc::now();
             let slow = input.prompt.contains("slow");
             let mut error = None;
@@ -124,6 +127,9 @@ impl ModelDriver for Model {
     }
 }
 type Log = Arc<Mutex<Vec<(String, Value)>>>;
+fn persona(id: &str, kind: &str, name: &str, is_self: bool, attributes: Value) -> Value {
+    json!({"id":id,"workspace_id":"cortex","app_id":"cortex","user_id":"alice","entity_type":kind,"canonical_name":name,"aliases":[],"is_self":is_self,"attributes":attributes,"schema_name":kind,"schema_version":1})
+}
 /// Hippocampus and CouchDB double. alice owns file r-a in file memory m-a.
 async fn remote() -> (Log, String) {
     let log: Log = Arc::default();
@@ -142,6 +148,47 @@ async fn remote() -> (Log, String) {
                     {"id":"resource:r-a","node_type":"file","label":"codes.txt","metadata":{}}],
                     "edges":[{"source_id":"m-a","target_id":"resource:r-a","edge_type":"attachment"}],
                     "truncated":false,"node":{"id":"resource:r-a","label":"codes.txt"}}})).into_response()
+            }),
+        )
+        // Personas: alice has a self persona, bot b-1 and a named persona Bruno.
+        .route(
+            "/api/v1/entities",
+            get(|axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                let data = if q.get("user_id").map(String::as_str) == Some("alice") {
+                    json!([persona("s-1", "person", "Alice", true, json!({"city":"Porto","secret":"hidden"}))])
+                } else {
+                    json!([])
+                };
+                Json(json!({"data": data}))
+            }),
+        )
+        .route(
+            "/api/v1/entities/match",
+            post(|Json(body): Json<Value>| async move {
+                let data = if body["user_id"] == "alice" && body["text"].as_str().unwrap_or_default().contains("Bruno") {
+                    json!([persona("n-1", "person", "Bruno", false, json!({"city":"Lisbon"}))])
+                } else {
+                    json!([])
+                };
+                Json(json!({"data": data}))
+            }),
+        )
+        .route(
+            "/api/v1/entities/{id}",
+            get(|Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                if id == "b-1" && q.get("user_id").map(String::as_str) == Some("alice") {
+                    Json(json!({"data": persona("b-1", "bot", "Calm bot", false, json!({"city":"calm style"}))})).into_response()
+                } else {
+                    (StatusCode::NOT_FOUND, Json(json!({}))).into_response()
+                }
+            }),
+        )
+        .route(
+            "/api/v1/persona-schemas/{name}/versions/{version}",
+            get(|| async {
+                Json(json!({"data":{"fields":[
+                    {"name":"city","type":"string","required":false,"in_context":true},
+                    {"name":"secret","type":"string","required":false,"in_context":false}]}}))
             }),
         )
         .route(
@@ -218,6 +265,10 @@ fn runtime(
         },
         journal: EventJournal::new(cache, &config).unwrap(),
         controls: Default::default(),
+        personas: cortex_api::domain::services::personas::Personas {
+            hippocampus: Hippocampus::new(&config).unwrap(),
+            shield: shield.clone(),
+        },
         shield,
         chats,
         config,
@@ -510,6 +561,59 @@ async fn permanent_and_temporary_chats_run_every_stage() {
     assert_eq!(saved.first().unwrap().id, 1);
     assert_eq!(saved.last().unwrap().name, "done");
 
+    // Personas: self persona always, the chat bot persona, a named persona;
+    // only in_context fields.
+    let (status, text) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"What does Bruno like?","persona_id":"b-1"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    let prompt = model.prompts.lock().unwrap().last().unwrap().clone();
+    for part in [
+        "name: Alice",
+        "city: Porto",
+        "name: Calm bot",
+        "name: Bruno",
+        "city: Lisbon",
+    ] {
+        assert!(prompt.contains(part), "{part}");
+    }
+    assert!(!prompt.contains("hidden"));
+    let (status, text) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"hi","persona_id":"n-404"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+    assert!(text.contains("1045"));
+    let persona_chat: Uuid = serde_json::from_str::<Value>(
+        &call(
+            &rt,
+            "/chats",
+            Some("alice"),
+            json!({"app_id":"cortex","text":"x","persona_id":"b-1"}),
+        )
+        .await
+        .1,
+    )
+    .unwrap()["data"]["session_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let saved: Option<String> =
+        sqlx::query_scalar("SELECT persona_id FROM chats WHERE session_id=$1")
+            .bind(persona_chat)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(saved.as_deref(), Some("b-1"));
+
     // 3. Another user cannot continue the chat.
     let (status, text) = call(
         &rt,
@@ -547,7 +651,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(rows, 1);
+    assert_eq!(rows, 3);
     let (status, _) = call(
         &rt,
         &format!("/chats/{temp_session}/inputs"),
@@ -556,7 +660,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert!(model.prompts.lock().unwrap()[3].contains("Temporary question"));
+    assert!(model.prompts.lock().unwrap()[5].contains("Temporary question"));
     assert_eq!(
         log.lock()
             .unwrap()
@@ -629,8 +733,8 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .filter(|l| l.0.starts_with("run "))
         .map(|l| l.1.clone())
         .collect();
-    assert_eq!(runs.len(), 6);
-    assert_eq!(runs.iter().filter(|r| r["user_id"] == "alice").count(), 4);
+    assert_eq!(runs.len(), 8);
+    assert_eq!(runs.iter().filter(|r| r["user_id"] == "alice").count(), 6);
     assert_eq!(
         runs.iter()
             .filter(|r| r["user_id"] == "" && r["app_id"] == "certifications")
@@ -646,8 +750,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
     let client = redis::Client::open(std::env::var("CORTEX_REDIS_URL").unwrap()).unwrap();
     let mut redis = client.get_multiplexed_async_connection().await.unwrap();
     let a2a_outputs: Vec<Uuid> =
-        sqlx::query_scalar("SELECT output_id FROM chat_outputs WHERE session_id=$1")
-            .bind(a2a)
+        sqlx::query_scalar("SELECT output_id FROM chat_outputs UNION SELECT session_id FROM chats")
             .fetch_all(&pool)
             .await
             .unwrap();

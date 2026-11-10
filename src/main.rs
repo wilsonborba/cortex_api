@@ -104,6 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             journal: EventJournal::new(RedisCache::from_environment(), &config)
                 .map_err(|_| "The event journal config is not valid")?,
             controls: Default::default(),
+            personas: personas.clone(),
             shield,
             chats,
             config: config.clone(),

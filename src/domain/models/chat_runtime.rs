@@ -24,10 +24,17 @@ pub struct AcceptedTurn {
     pub use_memory: bool,
     pub memory_topic: Option<String>,
     pub thinking: bool,
+    /// The chat bot persona (23.5). Temporary chats use it but never change it.
+    pub persona_id: Option<String>,
     pub model: OutputModel,
     pub history: Vec<Exchange>,
     /// Temporary chat files. Permanent chat files are read in Gather.
     pub temporary_files: Vec<ContextText>,
+}
+impl AcceptedTurn {
+    pub fn with_persona(self, persona_id: Option<String>) -> Self {
+        Self { persona_id, ..self }
+    }
 }
 /// Data carried between stages. Full text never goes to logs or run records.
 #[derive(Clone)]
@@ -45,6 +52,7 @@ pub struct Turn {
     pub used_memories: Vec<Memory>,
     pub thinking: Option<Arc<ThinkingResult>>,
     pub answer: String,
+    pub personas: crate::domain::services::personas::PersonaContext,
 }
 impl Turn {
     pub fn new(caller: Caller, request: TurnRequest) -> Self {
@@ -62,6 +70,7 @@ impl Turn {
             used_memories: vec![],
             thinking: None,
             answer: String::new(),
+            personas: Default::default(),
         }
     }
     pub fn accepted(&self) -> &AcceptedTurn {
@@ -79,6 +88,7 @@ impl crate::domain::models::pipeline::PipelineData for Turn {
         data.files = files.files;
         data.files.extend(memory.files);
         data.memories = memory.memories;
+        data.personas = memory.personas;
         data.references = memory.references;
         data.web = web.web;
         data.sources = web.sources;

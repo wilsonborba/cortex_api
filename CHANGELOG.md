@@ -101,6 +101,8 @@
 
 - Merge #104 persona-routes
 
+- Merge #102 a2a-chat-inputs
+
 
 ### Features
 
@@ -175,6 +177,8 @@
 - Persona-routes (#104)
 
 - A2a-chat-inputs (#102)
+
+- Personas-in-context (#105)
 
 
 ## v1.0.0 - 2026-11-09
