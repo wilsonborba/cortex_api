@@ -190,6 +190,7 @@ pub fn assemble(config: &Config, input: ContextInput) -> Result<AssembledContext
     let (system, prompt, estimated_input_tokens) =
         render(config, &input.question, &system_personas, &history, &texts);
     Ok(AssembledContext {
+        question: input.question,
         system,
         prompt,
         system_personas,

@@ -31,3 +31,4 @@ pub mod crawler;
 pub mod extraction;
 pub mod recall;
 pub mod temporary;
+pub mod thinking;

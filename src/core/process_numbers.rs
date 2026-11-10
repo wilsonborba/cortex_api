@@ -152,6 +152,10 @@ pub const TEMPORARY_UNAVAILABLE: ProcessNumber = ProcessNumber {
     number: 1035,
     message: "Temporary chat storage is not available",
 };
+pub const THINKING_TIME_LIMIT: ProcessNumber = ProcessNumber {
+    number: 1036,
+    message: "The thinking time limit was reached",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -189,6 +193,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     FILE_OCR_LIMIT,
     FILE_OCR,
     TEMPORARY_UNAVAILABLE,
+    THINKING_TIME_LIMIT,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

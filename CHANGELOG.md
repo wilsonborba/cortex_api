@@ -79,6 +79,8 @@
 
 - Merge #78 document-extraction
 
+- Merge #98 redis-temporary-chats
+
 
 ### Features
 
@@ -131,6 +133,8 @@
 - Document-extraction (#78)
 
 - Redis-temporary-chats (#98)
+
+- Bounded-thinking (#88)
 
 
 ## v1.0.0 - 2026-11-09
