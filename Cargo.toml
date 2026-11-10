@@ -19,6 +19,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
+toon-format = { version = "0.6.1", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
