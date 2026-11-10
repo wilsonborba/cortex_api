@@ -89,6 +89,8 @@
 
 - Merge #91 scoped-telemetry
 
+- Merge #96 scoped-memory-graph
+
 
 ### Features
 
@@ -151,6 +153,8 @@
 - Scoped-telemetry (#91)
 
 - Scoped-memory-graph (#96)
+
+- File-proxy (#81)
 
 
 ## v1.0.0 - 2026-11-09

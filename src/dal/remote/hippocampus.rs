@@ -1,6 +1,9 @@
 use crate::{
     core::config::Config,
-    domain::models::{memory_graph::GraphError, recall::RecalledMemory, storage::AppUser},
+    domain::models::{
+        extraction::DocumentFile, files::FileContent, memory_graph::GraphError,
+        recall::RecalledMemory, storage::AppUser,
+    },
 };
 use serde::{Deserialize, Serialize};
 #[derive(Clone)]
@@ -161,11 +164,9 @@ impl Hippocampus {
             .pop_if_empty()
             .extend(["api", "v1", "graph"])
             .extend(node.map(|n| ["nodes", n]).into_iter().flatten());
+        self.scope_query(&mut url, scope);
         {
             let mut q = url.query_pairs_mut();
-            q.append_pair("workspace_id", &self.workspace)
-                .append_pair("app_id", &scope.app_id)
-                .append_pair("user_id", &scope.user_id);
             if let Some(limit) = limit {
                 q.append_pair("limit", &limit.to_string());
             }
@@ -202,5 +203,117 @@ impl Hippocampus {
             return Err(GraphError::Unavailable);
         }
         Ok(data)
+    }
+    fn scope_query(&self, url: &mut reqwest::Url, scope: &AppUser) {
+        url.query_pairs_mut()
+            .append_pair("workspace_id", &self.workspace)
+            .append_pair("app_id", &scope.app_id)
+            .append_pair("user_id", &scope.user_id);
+    }
+    /// One call: the file, the scope and the extracted text (8.3).
+    pub async fn save_file(
+        &self,
+        scope: &AppUser,
+        file: &DocumentFile,
+        text: &str,
+    ) -> Result<String, HippoUnavailable> {
+        let part = reqwest::multipart::Part::bytes(file.bytes.to_vec())
+            .file_name(file.name.clone())
+            .mime_str(&file.content_type)
+            .or_else(|_| {
+                reqwest::multipart::Part::bytes(file.bytes.to_vec())
+                    .file_name(file.name.clone())
+                    .mime_str("application/octet-stream")
+            })
+            .map_err(|_| HippoUnavailable)?;
+        let form = reqwest::multipart::Form::new()
+            .text("workspace_id", self.workspace.clone())
+            .text("app_id", scope.app_id.clone())
+            .text("user_id", scope.user_id.clone())
+            .text("extracted_text", text.to_owned())
+            .part("file", part);
+        let url = self
+            .base
+            .join("api/v1/files")
+            .map_err(|_| HippoUnavailable)?;
+        let response = self
+            .client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|_| HippoUnavailable)?;
+        if !response.status().is_success() {
+            return Err(HippoUnavailable);
+        }
+        let value: serde_json::Value = response.json().await.map_err(|_| HippoUnavailable)?;
+        let present = |key: &str| value["data"][key].as_str().filter(|id| !id.is_empty());
+        present("memory_id")
+            .and(present("resource_id"))
+            .map(str::to_owned)
+            .ok_or(HippoUnavailable)
+    }
+    /// The file memory id comes from the scoped graph node `resource:{file_id}`.
+    pub async fn file_memory(&self, scope: &AppUser, file_id: &str) -> Result<String, GraphError> {
+        let node = format!("resource:{file_id}");
+        let graph = self.graph(scope, Some(&node), None, Some(0)).await?;
+        graph["edges"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|e| e["target_id"] == node.as_str())
+            .filter_map(|e| e["source_id"].as_str())
+            .find(|id| {
+                graph["nodes"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|n| n["id"] == *id && n["node_type"] == "memory")
+            })
+            .map(str::to_owned)
+            .ok_or(GraphError::Unavailable)
+    }
+    pub async fn file_content(
+        &self,
+        scope: &AppUser,
+        file_id: &str,
+    ) -> Result<FileContent, GraphError> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|_| GraphError::Unavailable)?
+            .pop_if_empty()
+            .extend(["api", "v1", "resources", file_id, "content"]);
+        self.scope_query(&mut url, scope);
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| GraphError::Unavailable)?;
+        match response.status() {
+            s if s.is_success() => {}
+            reqwest::StatusCode::NOT_FOUND => return Err(GraphError::NotFound),
+            _ => return Err(GraphError::Unavailable),
+        }
+        let header = |name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let content_type = header(reqwest::header::CONTENT_TYPE)
+            .unwrap_or_else(|| "application/octet-stream".into());
+        let disposition = header(reqwest::header::CONTENT_DISPOSITION);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| GraphError::Unavailable)?
+            .to_vec();
+        Ok(FileContent {
+            content_type,
+            disposition,
+            bytes,
+        })
     }
 }
