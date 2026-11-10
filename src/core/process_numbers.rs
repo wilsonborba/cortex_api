@@ -168,6 +168,14 @@ pub const MEMORY_NODE_NOT_FOUND: ProcessNumber = ProcessNumber {
     number: 1039,
     message: "The memory graph node was not found",
 };
+pub const FILE_NOT_SAVED: ProcessNumber = ProcessNumber {
+    number: 1040,
+    message: "The file was not saved",
+};
+pub const FILE_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1041,
+    message: "The file was not found",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -209,6 +217,8 @@ pub const REGISTRY: &[ProcessNumber] = &[
     LOG_LAN_ONLY,
     TELEMETRY_UNAVAILABLE,
     MEMORY_NODE_NOT_FOUND,
+    FILE_NOT_SAVED,
+    FILE_NOT_FOUND,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

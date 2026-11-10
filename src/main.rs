@@ -23,6 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chat_pool =
         cortex_api::dal::local::database::connect(cortex_api::dal::local::database::Target::Test)
             .await?;
+    let hippocampus = cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
+        .map_err(|_| "The Hippocampus URL is not valid")?;
     let routes = cortex_api::presentation::models::router(config.clone())
         .merge(cortex_api::presentation::telemetry_reads::router(
             cortex_api::domain::services::telemetry_reads::TelemetryReads {
@@ -36,8 +38,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .merge(cortex_api::presentation::memory_graph::router(
             cortex_api::domain::services::memory_graph::MemoryGraph {
-                hippocampus: cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
-                    .map_err(|_| "The Hippocampus URL is not valid")?,
+                hippocampus: hippocampus.clone(),
+                config: config.clone(),
+            },
+        ))
+        .merge(cortex_api::presentation::files::router(
+            cortex_api::domain::services::files::FileProxy {
+                hippocampus,
+                extractor: cortex_api::domain::services::extraction::DocumentExtractor::new(
+                    &config,
+                ),
+                temporary: cortex_api::domain::services::temporary::TemporaryChats::new(
+                    &config,
+                    cortex_api::dal::remote::cache::RedisCache::from_environment(),
+                ),
                 config: config.clone(),
             },
         ))

@@ -1,4 +1,5 @@
 pub mod balancer;
+pub mod files;
 pub mod identity;
 pub mod input_guard;
 pub mod memory_graph;
