@@ -208,6 +208,10 @@ pub const AUDIO_FAILED: ProcessNumber = ProcessNumber {
     number: 1049,
     message: "The audio could not be transcribed",
 };
+pub const FILE_WORKER_FAILED: ProcessNumber = ProcessNumber {
+    number: 1050,
+    message: "The file worker did not answer",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -259,6 +263,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     PERSONA_UNAVAILABLE,
     AUDIO_LIMIT,
     AUDIO_FAILED,
+    FILE_WORKER_FAILED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

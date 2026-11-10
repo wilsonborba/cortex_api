@@ -119,6 +119,24 @@ impl Scheduler {
             }
         }
     }
+    /// A remote job does not use this queue, but it still counts as usage (7.10.6).
+    pub async fn record_remote(
+        &self,
+        actor: String,
+        output_id: uuid::Uuid,
+        usage: Usage,
+        finished_at: DateTime<Utc>,
+    ) -> Result<(), LedgerUnavailable> {
+        self.inner
+            .ledger
+            .record(CallUsage {
+                actor,
+                output_id,
+                finished_at,
+                usage,
+            })
+            .await
+    }
     pub fn waiting_count(&self) -> usize {
         self.inner
             .state

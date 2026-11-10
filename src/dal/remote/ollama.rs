@@ -65,12 +65,17 @@ impl Ollama {
         }
     }
     async fn post(&self, path: &str, body: &Value) -> Result<reqwest::Response, DriverError> {
+        self.post_to(&self.config.ollama_url, path, body).await
+    }
+    async fn post_to(
+        &self,
+        base: &str,
+        path: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response, DriverError> {
         let response = self
             .client
-            .post(format!(
-                "{}{path}",
-                self.config.ollama_url.trim_end_matches('/')
-            ))
+            .post(format!("{}{path}", base.trim_end_matches('/')))
             .json(body)
             .send()
             .await
@@ -192,6 +197,7 @@ impl Ollama {
     }
     async fn generate(
         &self,
+        base: &str,
         model: &str,
         input: &CallInput,
         events: &mpsc::UnboundedSender<DriverEvent>,
@@ -204,7 +210,7 @@ impl Ollama {
         }
         messages.push(json!({"role":"user","content":input.prompt,"images":input.images}));
         collected.sent = true;
-        let response=self.post("/api/chat",&json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":{"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens}})).await?;
+        let response=self.post_to(base,"/api/chat",&json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":{"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens}})).await?;
         let mut stream = response.bytes_stream();
         let mut buffer = vec![];
         while let Some(chunk) = stream.next().await {
@@ -258,7 +264,19 @@ impl ModelDriver for Ollama {
                 return Err(DriverError::InvalidInput);
             }
             let _ = events.send(DriverEvent::Waiting);
-            let permit = tokio::select! {biased;_=cancelled(&mut cancel)=>return Err(DriverError::Cancelled),permit=self.queue.acquire(output.actor.clone(),output.output_id)=>permit.map_err(DriverError::Queue)?};
+            // Remote vision is another Ollama URL; it does not use the MSI queue (7.10.5).
+            let remote = match (&self.config.vision_location, output.is_vision()) {
+                (crate::core::config::JobLocation::Remote(url), true) => Some(url.clone()),
+                _ => None,
+            };
+            let permit = if remote.is_none() {
+                Some(
+                    tokio::select! {biased;_=cancelled(&mut cancel)=>return Err(DriverError::Cancelled),permit=self.queue.acquire(output.actor.clone(),output.output_id)=>permit.map_err(DriverError::Queue)?},
+                )
+            } else {
+                None
+            };
+            let base = remote.unwrap_or_else(|| self.config.ollama_url.clone());
             let started_at = Utc::now();
             let start = Instant::now();
             let model = output.name(&self.config);
@@ -271,7 +289,7 @@ impl ModelDriver for Ollama {
                 first_ms: None,
                 sent: false,
             };
-            let result = tokio::select! {biased;_=cancelled(&mut cancel)=>Err(DriverError::Cancelled),result=async{load_ms=self.prepare(&permit,model,&events).await?;self.generate(model,&input,&events,&mut collected,start).await}=>result};
+            let result = tokio::select! {biased;_=cancelled(&mut cancel)=>Err(DriverError::Cancelled),result=async{if let Some(permit)=&permit{load_ms=self.prepare(permit,model,&events).await?;}self.generate(&base,model,&input,&events,&mut collected,start).await}=>result};
             let finished_at = Utc::now();
             let input_tokens = collected.prompt.unwrap_or_else(|| {
                 if collected.sent {
@@ -302,17 +320,20 @@ impl ModelDriver for Ollama {
                 started_at,
                 finished_at,
             };
-            let _ = permit
-                .finish(
-                    Usage {
-                        input: input_tokens,
-                        output: output_tokens,
-                        images: u64::from(images),
-                        audio: 0,
-                    },
-                    finished_at,
-                )
-                .await;
+            let used = Usage {
+                input: input_tokens,
+                output: output_tokens,
+                images: u64::from(images),
+                audio: 0,
+            };
+            let _ = match permit {
+                Some(permit) => permit.finish(used, finished_at).await,
+                None => {
+                    self.queue
+                        .record_remote(output.actor.clone(), output.output_id, used, finished_at)
+                        .await
+                }
+            };
             let tokens_per_second = collected
                 .eval_ns
                 .filter(|ns| *ns > 0)

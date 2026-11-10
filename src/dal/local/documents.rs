@@ -62,11 +62,50 @@ pub fn progress(events: &EventSink, step: StepName, name: &str, page: u32, total
     event.progress = Some([page.into(), total.into()]);
     events.send(NativeEvent::Step(event));
 }
+/// Tesseract on one gray page image (7.6.2). Used by the PDF path and the worker.
+pub fn ocr_gray(config: &Config, image: &image::GrayImage) -> Result<String, ProcessNumber> {
+    let width = i32::try_from(image.width()).map_err(|_| process_numbers::FILE_OCR)?;
+    let height = i32::try_from(image.height()).map_err(|_| process_numbers::FILE_OCR)?;
+    tesseract::Tesseract::new(None, Some(&config.ocr_languages))
+        .map_err(|_| process_numbers::FILE_OCR)?
+        .set_frame(image.as_raw(), width, height, 1, width)
+        .map_err(|_| process_numbers::FILE_OCR)?
+        .recognize()
+        .map_err(|_| process_numbers::FILE_OCR)?
+        .get_text()
+        .map_err(|_| process_numbers::FILE_OCR)
+}
+/// OCR runs where `config.ocr_location` says (7.10). A remote page goes as PNG.
+fn ocr_page(
+    config: &Config,
+    name: &str,
+    image: &image::GrayImage,
+    worker: Option<&crate::dal::remote::file_worker::FileWorker>,
+) -> Result<String, ProcessNumber> {
+    let Some(worker) = worker else {
+        return ocr_gray(config, image);
+    };
+    let mut png = std::io::Cursor::new(vec![]);
+    image
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|_| process_numbers::FILE_OCR)?;
+    // Called inside spawn_blocking, which has the runtime context.
+    tokio::runtime::Handle::current()
+        .block_on(worker.run("ocr", name, "image/png", png.into_inner()))
+        .map(|t| {
+            t.pages
+                .into_iter()
+                .map(|p| p.text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+}
 pub fn pdf(
     config: &Config,
     name: &str,
     bytes: &[u8],
     events: &EventSink,
+    ocr_worker: Option<&crate::dal::remote::file_worker::FileWorker>,
 ) -> Result<Vec<TextPage>, ProcessNumber> {
     let pdfium = match Pdfium::bind_to_library(&config.pdfium_path) {
         Ok(bindings) => Pdfium::new(bindings),
@@ -107,8 +146,6 @@ pub fn pdf(
     if blank.is_empty() {
         return Ok(pages);
     }
-    let mut ocr = tesseract::Tesseract::new(None, Some(&config.ocr_languages))
-        .map_err(|_| process_numbers::FILE_OCR)?;
     let render = PdfRenderConfig::new()
         .set_target_width(config.ocr_render_width)
         .set_maximum_height(config.ocr_render_height);
@@ -129,14 +166,7 @@ pub fn pdf(
             .and_then(|b| b.as_image())
             .map_err(|_| process_numbers::FILE_OCR)?
             .into_luma8();
-        let width = i32::try_from(image.width()).map_err(|_| process_numbers::FILE_OCR)?;
-        let height = i32::try_from(image.height()).map_err(|_| process_numbers::FILE_OCR)?;
-        ocr = ocr
-            .set_frame(image.as_raw(), width, height, 1, width)
-            .map_err(|_| process_numbers::FILE_OCR)?
-            .recognize()
-            .map_err(|_| process_numbers::FILE_OCR)?;
-        pages[index].text = ocr.get_text().map_err(|_| process_numbers::FILE_OCR)?;
+        pages[index].text = ocr_page(config, name, &image, ocr_worker)?;
         pages[index].ocr = true;
     }
     Ok(pages)

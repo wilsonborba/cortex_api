@@ -532,6 +532,7 @@ dependencies = [
  "dom_smoothie",
  "dotenvy",
  "futures-util",
+ "image",
  "ort",
  "pdfium-render",
  "redis",

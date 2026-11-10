@@ -114,3 +114,50 @@ impl AudioTranscriber for LocalTranscriber {
         })
     }
 }
+/// Transcription on the file worker (7.10.3). It does not use the MSI GPU
+/// queue, but it still counts as a usage item (7.10.6).
+pub struct RemoteTranscriber {
+    pub worker: crate::dal::remote::file_worker::FileWorker,
+    pub queue: Scheduler,
+}
+impl AudioTranscriber for RemoteTranscriber {
+    fn transcribe<'a>(
+        &'a self,
+        caller: &'a Caller,
+        name: &'a str,
+        bytes: Arc<Vec<u8>>,
+        events: &'a EventSink,
+    ) -> Pending<'a, Result<String, ProcessNumber>> {
+        Box::pin(async move {
+            events.send(step(name, 0.0, 0.0));
+            let answer = self
+                .worker
+                .run(
+                    "transcribe",
+                    name,
+                    "application/octet-stream",
+                    bytes.to_vec(),
+                )
+                .await?;
+            events.send(step(name, answer.audio_s, answer.audio_s));
+            let _ = self
+                .queue
+                .record_remote(
+                    caller.balancer_identity(),
+                    uuid::Uuid::now_v7(),
+                    Usage {
+                        audio: answer.audio_s.ceil() as u64,
+                        ..Default::default()
+                    },
+                    chrono::Utc::now(),
+                )
+                .await;
+            Ok(answer
+                .pages
+                .into_iter()
+                .map(|p| p.text)
+                .collect::<Vec<_>>()
+                .join("\n"))
+        })
+    }
+}

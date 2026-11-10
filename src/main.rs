@@ -77,13 +77,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             files: FileProxy {
                 hippocampus: hippocampus.clone(),
                 extractor: DocumentExtractor::new(&config),
-                transcriber: std::sync::Arc::new(
-                    cortex_api::domain::services::transcription::LocalTranscriber {
-                        queue: queue.clone(),
-                        ollama: ollama.clone(),
-                        config: config.clone(),
-                    },
-                ),
+                transcriber: match &config.transcribe_location {
+                    cortex_api::core::config::JobLocation::Local => std::sync::Arc::new(
+                        cortex_api::domain::services::transcription::LocalTranscriber {
+                            queue: queue.clone(),
+                            ollama: ollama.clone(),
+                            config: config.clone(),
+                        },
+                    )
+                        as std::sync::Arc<
+                            dyn cortex_api::domain::services::transcription::AudioTranscriber,
+                        >,
+                    cortex_api::core::config::JobLocation::Remote(url) => std::sync::Arc::new(
+                        cortex_api::domain::services::transcription::RemoteTranscriber {
+                            worker: cortex_api::dal::remote::file_worker::FileWorker::new(
+                                &config, url,
+                            ),
+                            queue: queue.clone(),
+                        },
+                    ),
+                },
                 temporary: temporary.clone(),
                 config: config.clone(),
             },

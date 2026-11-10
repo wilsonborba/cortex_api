@@ -62,6 +62,7 @@ pub mod events;
 pub mod chat_delete;
 pub mod chat_inputs;
 pub mod chats;
+pub mod file_worker;
 pub mod files;
 pub mod logs;
 pub mod memory_graph;
