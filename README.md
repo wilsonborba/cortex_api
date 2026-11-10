@@ -341,3 +341,30 @@ real Redis/CouchDB test checks full and partial cache loss, pending calls,
 no double count after Save, more than 200 source records, and prefix/TTL for
 every fixture key. It removes its own records and keys. Issue #67 remains
 open for the Ollama driver and Save-stage integration.
+
+## Rust local model driver
+
+There is one ModelDriver implementation, Ollama. Config holds the approved
+text and vision model ids, the MSI URL, and num_ctx = 8192. OutputModel picks
+the model once for an output. Image outputs use the vision model for every
+role, including roles that need no image payload.
+
+Every model call acquires the shared queue permit. The driver checks the
+loaded model and context, unloads the previous model if needed, then loads
+the selected model. Model-loading events go to the progress channel. Native
+Ollama NDJSON text is sent to the token channel as each complete frame arrives.
+The parser handles split UTF-8 data and multiple frames in a network chunk.
+It sends no OpenAI routes, response-format request or other provider call.
+
+Completed calls use Ollama token and timing counts. A cancelled or broken
+stream can lack final counts; its partial usage uses the shared conservative
+UTF-8-byte estimate in Config. The future input guard uses that same rule.
+The text is not logged. Cancellation is control flow, not a numbered fault.
+Model failures use process 1012 and release the queue. Local transcription
+can unload models while holding the same permit.
+
+The local HTTP double tests cover text and vision, switching, one model per
+output, immediate tokens, cancellation, failure and queue release. The ignored
+ollama_msi test measures cold/warm loads and token rate through the real queue.
+Run it only in an owner-approved MSI GPU window. Its stores and keys are tests.
+The measurement report stays in ignored docs/ollama-8192-night.md.

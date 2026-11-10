@@ -52,6 +52,10 @@ pub const QUEUE_FAULT: ProcessNumber = ProcessNumber {
     number: 1011,
     message: "The local call queue failed",
 };
+pub const OLLAMA_FAILED: ProcessNumber = ProcessNumber {
+    number: 1012,
+    message: "The local model call failed",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -64,6 +68,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     UNKNOWN_APP,
     HEAVY_LOAD,
     QUEUE_FAULT,
+    OLLAMA_FAILED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

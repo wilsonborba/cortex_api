@@ -28,6 +28,8 @@
 
 - Merge #102 app-user-attribution
 
+- Merge #67 usage-balancer
+
 
 ### Features
 
@@ -40,6 +42,8 @@
 - App-user-attribution (#102)
 
 - Usage-balancer (#67)
+
+- Ollama-driver (#70)
 
 
 ## v1.0.0 - 2026-11-09
