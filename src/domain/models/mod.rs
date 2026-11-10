@@ -29,3 +29,4 @@ pub mod web_page;
 pub mod web;
 
 pub mod queries;
+pub mod recall;
