@@ -28,4 +28,5 @@ pub mod queries;
 pub mod robots;
 
 pub mod crawler;
+pub mod extraction;
 pub mod recall;

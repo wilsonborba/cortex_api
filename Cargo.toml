@@ -30,6 +30,9 @@ dom_smoothie = "0.18"
 text-splitter = "0.27"
 bm25 = { version = "2.3.2", features = ["language_detection"] }
 texting_robots = "0.2"
+pdfium-render = "=0.9.5"
+docx-rs = "=0.4.22"
+tesseract = "=0.15.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

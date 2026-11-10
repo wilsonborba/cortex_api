@@ -3,6 +3,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub file_bytes: usize,
+    pub ocr_page_limit: usize,
+    pub pdfium_path: std::path::PathBuf,
+    pub ocr_languages: String,
+    pub ocr_render_width: i32,
+    pub ocr_render_height: i32,
     pub medium_web_timeout: std::time::Duration,
     pub deep_web_timeout: std::time::Duration,
     pub medium_web_depth: usize,
@@ -84,6 +90,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            file_bytes:25 * 1024 * 1024,
+            ocr_page_limit:20,
+            pdfium_path:"models/pdfium/lib/libpdfium.so".into(),
+            ocr_languages:"eng+por+tha".into(),
+            ocr_render_width:2480,
+            ocr_render_height:3508,
             medium_web_timeout:std::time::Duration::from_secs(30),
             deep_web_timeout:std::time::Duration::from_secs(60),
             medium_web_depth:1,

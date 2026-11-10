@@ -128,6 +128,26 @@ pub const MEMORY_LOAD_FAILED: ProcessNumber = ProcessNumber {
     number: 1029,
     message: "Memory could not be loaded",
 };
+pub const FILE_TYPE: ProcessNumber = ProcessNumber {
+    number: 1030,
+    message: "The file type is not supported",
+};
+pub const FILE_SIZE: ProcessNumber = ProcessNumber {
+    number: 1031,
+    message: "The file is over the size limit",
+};
+pub const FILE_EXTRACTION: ProcessNumber = ProcessNumber {
+    number: 1032,
+    message: "The file text could not be read",
+};
+pub const FILE_OCR_LIMIT: ProcessNumber = ProcessNumber {
+    number: 1033,
+    message: "The file is over the OCR page limit",
+};
+pub const FILE_OCR: ProcessNumber = ProcessNumber {
+    number: 1034,
+    message: "The file image text could not be read",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -159,6 +179,11 @@ pub const REGISTRY: &[ProcessNumber] = &[
     WEB_PAGE_LIMIT,
     WEB_ROBOTS_FAILED,
     MEMORY_LOAD_FAILED,
+    FILE_TYPE,
+    FILE_SIZE,
+    FILE_EXTRACTION,
+    FILE_OCR_LIMIT,
+    FILE_OCR,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

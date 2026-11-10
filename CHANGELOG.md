@@ -75,6 +75,8 @@
 
 - Merge #76 bounded-web-traversal
 
+- Merge #77 scoped-memory-recall
+
 
 ### Features
 
@@ -123,6 +125,8 @@
 - Bounded-web-traversal (#76)
 
 - Scoped-memory-recall (#77)
+
+- Document-extraction (#78)
 
 
 ## v1.0.0 - 2026-11-09
