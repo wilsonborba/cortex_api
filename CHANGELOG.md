@@ -24,6 +24,8 @@
 
 - Merge #92 postgres-storage
 
+- Merge #101 run-records
+
 
 ### Features
 
@@ -32,6 +34,8 @@
 - Postgres-storage (#92)
 
 - Run-records (#101)
+
+- App-user-attribution (#102)
 
 
 ## v1.0.0 - 2026-11-09
