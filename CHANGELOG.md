@@ -103,6 +103,8 @@
 
 - Merge #102 a2a-chat-inputs
 
+- Merge #105 personas-in-context
+
 
 ### Features
 
@@ -179,6 +181,11 @@
 - A2a-chat-inputs (#102)
 
 - Personas-in-context (#105)
+
+
+### Tests
+
+- Redis-down-consumers (#99)
 
 
 ## v1.0.0 - 2026-11-09
