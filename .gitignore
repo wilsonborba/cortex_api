@@ -38,3 +38,5 @@ var/whisper-models/
 /target
 /docs/
 .env
+
+/models/

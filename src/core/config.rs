@@ -3,6 +3,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub shield_model_path: std::path::PathBuf,
+    pub shield_tokenizer_path: std::path::PathBuf,
+    pub shield_runtime_path: std::path::PathBuf,
+    pub shield_threshold: f32,
+    pub shield_cpu_threads: usize,
     pub context_format: ContextFormat,
     pub history_context_tokens: u64,
     pub memory_context_tokens: u64,
@@ -45,6 +50,11 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            shield_model_path:"models/prompt-guard-2-22m/model.onnx".into(),
+            shield_tokenizer_path:"models/prompt-guard-2-22m/tokenizer.json".into(),
+            shield_runtime_path:"models/onnxruntime/lib/libonnxruntime.so".into(),
+            shield_threshold:0.5,
+            shield_cpu_threads:2,
             context_format: ContextFormat::Json,
             history_context_tokens:2000,
             memory_context_tokens:1500,
