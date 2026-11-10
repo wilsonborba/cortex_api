@@ -49,6 +49,8 @@
 
 - Merge #82 fixed-stages
 
+- Merge #83 context-assembly
+
 
 ### Features
 
@@ -71,6 +73,8 @@
 - Fixed-stages (#82)
 
 - Context-assembly (#83)
+
+- Security-shield (#84)
 
 
 ## v1.0.0 - 2026-11-09

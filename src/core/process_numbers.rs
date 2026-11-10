@@ -64,6 +64,14 @@ pub const USAGE_UNAVAILABLE: ProcessNumber = ProcessNumber {
     number: 1013,
     message: "The usage data is not available",
 };
+pub const SECURITY_BLOCK: ProcessNumber = ProcessNumber {
+    number: 1014,
+    message: "Are you kidding me, clown?",
+};
+pub const SECURITY_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1015,
+    message: "The input security check is not available",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -79,6 +87,8 @@ pub const REGISTRY: &[ProcessNumber] = &[
     OLLAMA_FAILED,
     INPUT_TOKEN_LIMIT,
     USAGE_UNAVAILABLE,
+    SECURITY_BLOCK,
+    SECURITY_UNAVAILABLE,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

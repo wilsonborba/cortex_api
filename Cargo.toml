@@ -20,6 +20,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 toon-format = { version = "0.6.1", default-features = false }
+regex = "1.13.1"
+unicode-normalization = "0.1.26"
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-24"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

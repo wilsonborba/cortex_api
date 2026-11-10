@@ -404,3 +404,31 @@ The route is registered in the development API. Its run-record source is
 cortex_runs_test until cutover, so development checks do not write primary
 run records. Tests cover two users, attempted query/admin overrides, missing
 identity, a failed ledger and values read from real Valkey buckets.
+
+### Rust v2 input security
+
+The v2 shield uses normalized Rust rules and Prompt Guard 2 22M on CPU.
+There is no skip flag. Missing classifier files reject the security check with
+process 1015. A blocked input returns process 1014 and the aligned block message.
+File and web checks drop failed chunks. The persona check scans saved text fields.
+Chat and persona route integration is still open.
+
+The model, tokenizer and CPU runtime paths and threshold are in `src/core/config.rs`.
+The ONNX export must expose int64 `input_ids`, `attention_mask` and optionally
+`token_type_ids`, plus float32 `logits` with shape `[1, 2]`, ordered BENIGN,
+MALICIOUS. Each window has at most 512 tokens, with 64 tokens of overlap.
+The adapter adds the tokenizer's special tokens to each window. Runtime 1.24 is
+loaded from the configured local path. Model files and runtime files stay in the
+ignored `models/` directory.
+
+Model access is gated. The night run token returned HTTP 403. Real model CPU
+speed has not been measured. After access and export, run
+`cargo test --test security measure_real_prompt_guard_cpu -- --ignored`.
+The report goes to ignored `docs/prompt-guard-cpu.md`.
+The tiny ONNX fixture in `tests/fixtures/` is only a transport test double.
+It is not a replacement classifier.
+
+Rule sources: [Vigil](https://github.com/deadbits/vigil-llm/tree/main/data/yara)
+and the [Meta model card](https://github.com/meta-llama/PurpleLlama/blob/main/Llama-Prompt-Guard-2/22M/MODEL_CARD.md).
+The English Vigil patterns were adapted. The Portuguese and Thai patterns were
+added for the aligned languages. The Vigil license is in `LICENSES/`.
