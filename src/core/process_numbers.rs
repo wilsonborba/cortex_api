@@ -40,6 +40,10 @@ pub const SERVER_ERROR: ProcessNumber = ProcessNumber {
     number: 1008,
     message: "The server could not complete the request",
 };
+pub const UNKNOWN_APP: ProcessNumber = ProcessNumber {
+    number: 1009,
+    message: "The app_id is not allowed",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -49,6 +53,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     WRONG_CONTENT_TYPE,
     BODY_TOO_LARGE,
     SERVER_ERROR,
+    UNKNOWN_APP,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

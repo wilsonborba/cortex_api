@@ -292,3 +292,23 @@ Telemetry routes and retention are implemented in their area 12 issue.
 The real document test uses cortex_runs_test. It checks startup setup,
 indexes, repeat writes, typed reads, grouped statistics and fixture removal.
 Primary setup creates only the database, indexes and design document.
+
+## Rust app and user attribution
+
+Config lists the nine slugs read from defaultdb_app in a read-only query.
+Only those app ids are accepted. Unknown app ids return process number 1009.
+The app comes from app_id at chat creation, then from the stored chat. Routes
+without a chat use their aligned query or form app_id.
+
+CallerContext reads users only from x-uuid and admins only from
+x-access-level = admin. A required-user route rejects a missing header.
+The no-user path requires a private or loopback socket peer. Forwarded
+headers do not select that path. This does not add app authentication.
+
+Caller builds the Hippo scope with workspace cortex, the checked app and an
+explicit user filter. A2A uses null for Hippo, an empty SQL user and balancer
+identity app:{app_id}. A user call uses its header user identity. There is
+no user database sync, client secret or app proof header.
+
+Issue #102 stays open until the chat, file, graph and persona handlers use
+this layer and their integration checks pass.
