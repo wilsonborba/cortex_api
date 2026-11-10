@@ -109,8 +109,9 @@ async fn create(
     context: CallerContext,
     Json(body): Json<NewChat>,
 ) -> Result<Response, Response> {
+    // A LAN backend may call without x-uuid; it uses only A2A memory (21.3).
     let caller = context
-        .for_app(&body.app_id, true)
+        .for_app(&body.app_id, false)
         .map_err(IntoResponse::into_response)?;
     let stream = body.stream;
     Ok(respond(
@@ -123,13 +124,14 @@ async fn create(
 }
 async fn next(
     State(runtime): State<Arc<ChatRuntime>>,
-    UserId(user): UserId,
     context: CallerContext,
     Path(session): Path<Uuid>,
     Json(body): Json<NextInput>,
 ) -> Result<Response, Response> {
     let failure = |process: ProcessNumber| response::error(status(process), process);
     // The app comes from the chat, never from the input body (21.2).
+    context.check_peer().map_err(IntoResponse::into_response)?;
+    let user = context.user().to_owned();
     let app = match runtime.chats.owned_chat(&user, session).await {
         Ok(Some(chat)) => chat.app_id,
         Ok(None) => runtime
@@ -140,7 +142,7 @@ async fn next(
         Err(_) => return Err(failure(process_numbers::HISTORY_FAILED)),
     };
     let caller = context
-        .for_app(&app, true)
+        .for_app(&app, false)
         .map_err(IntoResponse::into_response)?;
     let stream = body.stream;
     Ok(respond(
