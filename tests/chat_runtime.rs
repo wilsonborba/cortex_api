@@ -192,6 +192,23 @@ async fn remote() -> (Log, String) {
             }),
         )
         .route(
+            "/api/v1/graph",
+            get(|State(log): State<Log>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                log.lock().unwrap().push(("graph".into(), json!(q)));
+                Json(json!({"data":{"nodes":[],"edges":[],"truncated":false}}))
+            }),
+        )
+        .route(
+            "/api/v1/resources/{id}/content",
+            get(|Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                if id == "r-a" && q.get("user_id").map(String::as_str) == Some("alice") {
+                    "file bytes".into_response()
+                } else {
+                    (StatusCode::NOT_FOUND, Json(json!({}))).into_response()
+                }
+            }),
+        )
+        .route(
             "/api/v1/memories",
             post(|State(log): State<Log>, Json(body): Json<Value>| async move {
                 log.lock().unwrap().push(("memory".into(), body));
@@ -1112,6 +1129,276 @@ async fn redis_down_stream_history_reconnect_and_temporary() {
     assert!(text.contains("1035"));
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
+        .await
+        .unwrap();
+}
+
+/// Every route of the route map that holds user data, merged like main.rs.
+fn full_app(rt: &Arc<ChatRuntime>) -> Router {
+    let hippocampus = Hippocampus::new(&rt.config).unwrap();
+    with_response_contract(
+        router(rt.clone())
+            .merge(cortex_api::presentation::chats::router(
+                rt.chats.clone(),
+                rt.config.clone(),
+            ))
+            .merge(cortex_api::presentation::files::router(rt.files.clone()))
+            .merge(cortex_api::presentation::memory_graph::router(
+                cortex_api::domain::services::memory_graph::MemoryGraph {
+                    hippocampus: hippocampus.clone(),
+                    config: rt.config.clone(),
+                },
+            ))
+            .merge(cortex_api::presentation::personas::router(
+                rt.personas.clone(),
+            ))
+            .merge(cortex_api::presentation::chat_delete::router(
+                cortex_api::domain::services::chat_delete::ChatDelete {
+                    history: cortex_api::domain::services::chat_history::ChatHistory {
+                        repo: rt.chats.clone(),
+                        config: rt.config.clone(),
+                    },
+                    hippocampus,
+                },
+            )),
+    )
+}
+async fn as_user(
+    app: &Router,
+    method: &str,
+    path: &str,
+    user: &str,
+    admin: bool,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-uuid", user)
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    if admin {
+        req = req.header("x-access-level", "admin");
+    }
+    if body.is_some() {
+        req = req.header("content-type", "application/json");
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            req.body(body.map(|b| Body::from(b.to_string())).unwrap_or_default())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+#[tokio::test]
+#[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema and UUID keys"]
+async fn two_users_and_an_admin_are_isolated_on_every_user_data_route() {
+    dotenvy::dotenv().ok();
+    let admin_db = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_isolation_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin_db)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let cache = RedisCache::from_environment();
+    let (log, address) = remote().await;
+    let rt = runtime(
+        pool.clone(),
+        cache.clone(),
+        &address,
+        Arc::new(Model::default()),
+    );
+    let app = full_app(&rt);
+    let secret = "What is the secret code?";
+    let (status, body) = as_user(
+        &app,
+        "POST",
+        "/chats",
+        "alice",
+        false,
+        Some(json!({"app_id":"cortex","text":secret,"file_ids":["r-a"],"persona_id":"b-1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let s = body["data"]["session_id"].as_str().unwrap().to_owned();
+    let o = body["data"]["output_id"].as_str().unwrap().to_owned();
+    let (status, body) = as_user(
+        &app,
+        "POST",
+        "/chats",
+        "alice",
+        false,
+        Some(json!({"app_id":"cortex","text":"temporary","temporary":true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let t = body["data"]["session_id"].as_str().unwrap().to_owned();
+    let to = body["data"]["output_id"].as_str().unwrap().to_owned();
+
+    // Bob, and an admin who is not alice, reach nothing of alice.
+    for (user, admin) in [("bob", false), ("root", true)] {
+        for (method, path, body) in [
+            ("GET", format!("/chats/{s}"), None),
+            ("PATCH", format!("/chats/{s}"), Some(json!({"title":"x"}))),
+            ("GET", format!("/chats/{s}/outputs/{o}"), None),
+            ("GET", format!("/chats/{s}/outputs/{o}/events"), None),
+            (
+                "PATCH",
+                format!("/chats/{s}/outputs/{o}"),
+                Some(json!({"status":"cancelled"})),
+            ),
+            (
+                "POST",
+                format!("/chats/{s}/inputs"),
+                Some(json!({"text":"x"})),
+            ),
+            (
+                "POST",
+                format!("/chats/{t}/inputs"),
+                Some(json!({"text":"x"})),
+            ),
+            ("GET", format!("/chats/{t}/outputs/{to}/events"), None),
+            ("DELETE", format!("/chats/{s}"), None),
+            ("GET", "/files/r-a/content?app_id=cortex".into(), None),
+            (
+                "GET",
+                "/memory-graph/nodes/resource:r-a?app_id=cortex".into(),
+                None,
+            ),
+            ("GET", "/personas/b-1?app_id=cortex".into(), None),
+            (
+                "PATCH",
+                "/personas/b-1?app_id=cortex".into(),
+                Some(json!({"name":"x"})),
+            ),
+            ("DELETE", "/personas/b-1?app_id=cortex".into(), None),
+        ] {
+            let (status, value) = as_user(&app, method, &path, user, admin, body).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{user} {method} {path} {value}"
+            );
+        }
+        // A new chat of bob cannot use alice's bot persona.
+        let (status, _) = as_user(
+            &app,
+            "POST",
+            "/chats",
+            user,
+            admin,
+            Some(json!({"app_id":"cortex","text":"hi","persona_id":"b-1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        for path in ["/chats", "/chats?status=running", "/personas?app_id=cortex"] {
+            let (status, value) = as_user(&app, "GET", path, user, admin, None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value["data"], json!([]), "{user} {path}");
+        }
+        // The graph scope always carries the caller, never another user.
+        let (status, _) = as_user(
+            &app,
+            "GET",
+            "/memory-graph?app_id=cortex",
+            user,
+            admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let sent = log
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|l| l.0 == "graph")
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(sent["user_id"], user);
+        assert_eq!(sent["workspace_id"], "cortex");
+    }
+    // Alice still has everything; her temporary chat is never listed.
+    let (_, list) = as_user(&app, "GET", "/chats", "alice", false, None).await;
+    assert_eq!(list["data"].as_array().unwrap().len(), 1);
+    assert_eq!(list["data"][0]["session_id"], s.as_str());
+    let (status, _) = as_user(
+        &app,
+        "GET",
+        &format!("/chats/{s}/outputs/{o}"),
+        "alice",
+        false,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = as_user(
+        &app,
+        "GET",
+        "/files/r-a/content?app_id=cortex",
+        "alice",
+        false,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Run records hold no user text.
+    let runs: Vec<String> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.0.starts_with("run "))
+        .map(|l| l.1.to_string())
+        .collect();
+    assert_eq!(runs.len(), 2);
+    assert!(
+        runs.iter()
+            .all(|r| !r.contains(secret) && !r.contains("temporary"))
+    );
+
+    let client = redis::Client::open(std::env::var("CORTEX_REDIS_URL").unwrap()).unwrap();
+    let mut redis = client.get_multiplexed_async_connection().await.unwrap();
+    for id in [&s, &o, &t, &to] {
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg(format!("cortex:*{id}*"))
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        for key in keys {
+            let ttl: i64 = redis::cmd("PTTL")
+                .arg(&key)
+                .query_async(&mut redis)
+                .await
+                .unwrap();
+            assert!(key.starts_with("cortex:") && ttl > 0, "{key} {ttl}");
+            let _: () = redis::cmd("DEL")
+                .arg(key)
+                .query_async(&mut redis)
+                .await
+                .unwrap();
+        }
+    }
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin_db)
         .await
         .unwrap();
 }

@@ -105,6 +105,8 @@
 
 - Merge #105 personas-in-context
 
+- Merge #99 redis-down-consumers
+
 
 ### Features
 
@@ -186,6 +188,8 @@
 ### Tests
 
 - Redis-down-consumers (#99)
+
+- User-isolation (#103)
 
 
 ## v1.0.0 - 2026-11-09
