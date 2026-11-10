@@ -27,6 +27,8 @@ fn record(mode: WebMode, thinking: bool, total_ms: u64) -> RunRecord {
             time_ms: 1,
         }],
         calls: vec![ModelCall {
+            images: None,
+            audio: None,
             role: "answer".into(),
             model: "fixture-model".into(),
             input_tokens: 20,

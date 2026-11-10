@@ -3,6 +3,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub usage_window_hours: i64,
+    pub usage_bucket_ttl: std::time::Duration,
+    pub loyalty_snapshot_ttl: std::time::Duration,
+    pub queue_wait_timeout: std::time::Duration,
+    pub queue_snapshot_ttl: std::time::Duration,
+    pub run_read_batch: usize,
     pub allowed_apps: Vec<&'static str>,
     pub memory_workspace: &'static str,
     pub run_database: String,
@@ -16,6 +22,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            usage_window_hours: 24,
+            usage_bucket_ttl: std::time::Duration::from_secs(24 * 3600),
+            loyalty_snapshot_ttl: std::time::Duration::from_secs(3600),
+            queue_wait_timeout: std::time::Duration::from_secs(300),
+            queue_snapshot_ttl: std::time::Duration::from_secs(301),
+            run_read_batch: 200,
             allowed_apps: vec![
                 "annotations",
                 "api_for_apps",

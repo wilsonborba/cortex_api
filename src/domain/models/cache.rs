@@ -6,6 +6,8 @@ pub enum CacheKey {
     Events(String),
     Usage { user: String, hour: String },
     Timing(String),
+    Loyalty(String),
+    WaitQueue(String),
 }
 impl CacheKey {
     pub fn name(&self) -> String {
@@ -15,6 +17,8 @@ impl CacheKey {
             Self::Events(id) => format!("cortex:output:{id}:events"),
             Self::Usage { user, hour } => format!("cortex:usage:{user}:{hour}"),
             Self::Timing(kind) => format!("cortex:timing:{kind}"),
+            Self::Loyalty(user) => format!("cortex:loyalty:{user}"),
+            Self::WaitQueue(queue) => format!("cortex:queue:{queue}"),
         }
     }
 }

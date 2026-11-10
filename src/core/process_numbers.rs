@@ -44,6 +44,14 @@ pub const UNKNOWN_APP: ProcessNumber = ProcessNumber {
     number: 1009,
     message: "The app_id is not allowed",
 };
+pub const HEAVY_LOAD: ProcessNumber = ProcessNumber {
+    number: 1010,
+    message: "The server is under heavy load. Try later",
+};
+pub const QUEUE_FAULT: ProcessNumber = ProcessNumber {
+    number: 1011,
+    message: "The local call queue failed",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -54,6 +62,8 @@ pub const REGISTRY: &[ProcessNumber] = &[
     BODY_TOO_LARGE,
     SERVER_ERROR,
     UNKNOWN_APP,
+    HEAVY_LOAD,
+    QUEUE_FAULT,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

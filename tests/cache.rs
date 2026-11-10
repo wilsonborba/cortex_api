@@ -14,6 +14,8 @@ fn keys(id: &str) -> Vec<CacheKey> {
             hour: "fixture".into(),
         },
         CacheKey::Timing(format!("fixture-{id}")),
+        CacheKey::Loyalty(id.into()),
+        CacheKey::WaitQueue(id.into()),
     ]
 }
 #[test]

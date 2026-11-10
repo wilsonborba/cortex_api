@@ -40,6 +40,10 @@ pub struct StageRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<u32>,
     pub role: String,
     pub model: String,
     pub input_tokens: u64,
