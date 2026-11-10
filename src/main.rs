@@ -107,6 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let routes = cortex_api::presentation::models::router(config.clone())
         .merge(cortex_api::presentation::chat_inputs::router(runtime))
+        .merge(cortex_api::presentation::chat_delete::router(
+            cortex_api::domain::services::chat_delete::ChatDelete {
+                history: cortex_api::domain::services::chat_history::ChatHistory {
+                    repo: cortex_api::dal::local::chats::Chats {
+                        pool: chat_pool.clone(),
+                    },
+                    config: config.clone(),
+                },
+                hippocampus: hippocampus.clone(),
+            },
+        ))
         .merge(cortex_api::presentation::telemetry_reads::router(
             cortex_api::domain::services::telemetry_reads::TelemetryReads {
                 store,

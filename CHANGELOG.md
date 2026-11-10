@@ -95,6 +95,8 @@
 
 - Merge #97 chat-runtime
 
+- Merge #87 #88 reconnect-cancel-stop-thinking
+
 
 ### Features
 
@@ -163,6 +165,8 @@
 - Chat-runtime (#97)
 
 - Reconnect-cancel-stop-thinking (#87, #88)
+
+- Chat-delete (#100)
 
 
 ## v1.0.0 - 2026-11-09

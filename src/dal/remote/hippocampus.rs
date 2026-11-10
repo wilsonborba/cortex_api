@@ -333,4 +333,33 @@ impl Hippocampus {
             bytes,
         })
     }
+    /// One bulk call with the chat memory ids and the scope (19.4).
+    pub async fn delete_memories(
+        &self,
+        scope: &AppUser,
+        ids: &[String],
+    ) -> Result<(), HippoUnavailable> {
+        let url = self
+            .base
+            .join("api/v1/memories/delete")
+            .map_err(|_| HippoUnavailable)?;
+        let user = (!scope.user_id.is_empty()).then_some(scope.user_id.as_str());
+        let response = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "workspace_id": self.workspace,
+                "app_id": scope.app_id,
+                "user_id": user,
+                "memory_ids": ids,
+            }))
+            .send()
+            .await
+            .map_err(|_| HippoUnavailable)?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(HippoUnavailable)
+        }
+    }
 }

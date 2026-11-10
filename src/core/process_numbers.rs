@@ -184,6 +184,10 @@ pub const OUTPUT_NOT_RUNNING: ProcessNumber = ProcessNumber {
     number: 1043,
     message: "The output is not running",
 };
+pub const CHAT_DELETE_FAILED: ProcessNumber = ProcessNumber {
+    number: 1044,
+    message: "The chat memories could not be deleted",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -229,6 +233,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     FILE_NOT_FOUND,
     EVENTS_UNAVAILABLE,
     OUTPUT_NOT_RUNNING,
+    CHAT_DELETE_FAILED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

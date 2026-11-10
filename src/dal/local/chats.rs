@@ -153,6 +153,27 @@ impl Chats {
     pub async fn list_chats(&self, user: &str) -> Result<Vec<Chat>, StorageError> {
         Ok(sqlx::query_as("SELECT * FROM chats WHERE user_id=$1 ORDER BY is_pinned DESC,updated_at DESC,session_id DESC").bind(user).fetch_all(&self.pool).await?)
     }
+    /// Exchange and file memories of the chat (19.3).
+    pub async fn chat_memory_ids(
+        &self,
+        scope: &AppUser,
+        session: Uuid,
+    ) -> Result<Vec<String>, StorageError> {
+        Ok(sqlx::query_scalar("SELECT o.memory_id FROM chat_outputs o JOIN chats c USING(session_id) WHERE c.session_id=$1 AND c.app_id=$2 AND c.user_id=$3 AND o.memory_id IS NOT NULL UNION SELECT f.memory_id FROM chat_input_files f JOIN chat_inputs i USING(input_id) JOIN chats c USING(session_id) WHERE c.session_id=$1 AND c.app_id=$2 AND c.user_id=$3 ORDER BY 1").bind(session).bind(&scope.app_id).bind(&scope.user_id).fetch_all(&self.pool).await?)
+    }
+    /// Hard delete. The foreign keys remove every row of the chat in the
+    /// same statement, so it is one transaction (13.5).
+    pub async fn delete_chat(&self, scope: &AppUser, session: Uuid) -> Result<u64, StorageError> {
+        Ok(
+            sqlx::query("DELETE FROM chats WHERE session_id=$1 AND app_id=$2 AND user_id=$3")
+                .bind(session)
+                .bind(&scope.app_id)
+                .bind(&scope.user_id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
+    }
     pub async fn running_chats(&self, user: &str) -> Result<Vec<Chat>, StorageError> {
         Ok(sqlx::query_as("SELECT c.* FROM chats c WHERE c.user_id=$1 AND EXISTS(SELECT 1 FROM chat_outputs o WHERE o.session_id=c.session_id AND o.status='running') ORDER BY c.is_pinned DESC,c.updated_at DESC,c.session_id DESC").bind(user).fetch_all(&self.pool).await?)
     }
