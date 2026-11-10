@@ -8,6 +8,8 @@
 
 - Measurement-image (#70)
 
+- Context-reserves (#71)
+
 
 ### Chores
 
@@ -38,6 +40,8 @@
 - Merge #70 ollama-driver
 
 - Merge #70 measurement-image
+
+- Merge #71 input-token-guard
 
 
 ### Features

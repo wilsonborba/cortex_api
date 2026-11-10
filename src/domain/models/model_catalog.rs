@@ -21,7 +21,7 @@ impl From<&Config> for ModelsData {
                 name: config.text_model.clone(),
             }],
             max_input_tokens: config.max_input_tokens(),
-            estimate_rule: config.token_estimate_rule(),
+            estimate_rule: config.input_estimate_rule(),
         }
     }
 }
