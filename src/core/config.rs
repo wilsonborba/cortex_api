@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub event_retention: std::time::Duration,
+    pub event_read_batch: usize,
     pub stream_heartbeat: std::time::Duration,
     pub shield_model_path: std::path::PathBuf,
     pub shield_tokenizer_path: std::path::PathBuf,
@@ -51,6 +53,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            event_retention:std::time::Duration::from_secs(3600),
+            event_read_batch:200,
             stream_heartbeat:std::time::Duration::from_secs(5),
             shield_model_path:"models/prompt-guard-2-22m/model.onnx".into(),
             shield_tokenizer_path:"models/prompt-guard-2-22m/tokenizer.json".into(),
