@@ -18,6 +18,7 @@ pub mod events;
 
 pub mod replay;
 
+pub mod chat_runtime;
 pub mod chat_session;
 
 pub mod history;

@@ -91,6 +91,8 @@
 
 - Merge #96 scoped-memory-graph
 
+- Merge #81 file-proxy
+
 
 ### Features
 
@@ -155,6 +157,8 @@
 - Scoped-memory-graph (#96)
 
 - File-proxy (#81)
+
+- Chat-runtime (#97)
 
 
 ## v1.0.0 - 2026-11-09
