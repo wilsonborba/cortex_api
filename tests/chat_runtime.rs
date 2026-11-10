@@ -896,6 +896,15 @@ async fn reconnect_running_list_cancel_and_stop_thinking() {
     .await;
     let all = frames(response.into_body(), None).await;
     assert_eq!(all.first().unwrap().0, 1);
+    // The first stage event has the expected time; null with no completed runs.
+    assert_eq!(all[0].1, "stage");
+    let first_data = all[0].2["data"].as_object().unwrap();
+    assert!(first_data.contains_key("expected_ms") && first_data["expected_ms"].is_null());
+    assert!(
+        !all[1..]
+            .iter()
+            .any(|f| f.2["data"].get("expected_ms").is_some())
+    );
     assert_eq!(all.len() as u64, seen + rest.len() as u64);
     let running = json_body(send(&rt, "GET", "/chats?status=running", "alice", None).await).await;
     assert_eq!(running["data"].as_array().unwrap().len(), 0);

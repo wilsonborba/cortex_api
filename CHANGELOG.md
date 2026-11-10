@@ -10,6 +10,8 @@
 
 - Context-reserves (#71)
 
+- Expected-time-first-event (#91)
+
 
 ### Chores
 
@@ -106,6 +108,8 @@
 - Merge #105 personas-in-context
 
 - Merge #99 redis-down-consumers
+
+- Merge #103 user-isolation
 
 
 ### Features
