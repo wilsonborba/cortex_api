@@ -69,6 +69,8 @@
 
 - Merge #73 bounded-page-reader
 
+- Merge #74 fast-web-gather
+
 
 ### Features
 
@@ -111,6 +113,8 @@
 - Bounded-page-reader (#73)
 
 - Fast-web-gather (#74)
+
+- Bounded-query-rewrite (#75)
 
 
 ## v1.0.0 - 2026-11-09

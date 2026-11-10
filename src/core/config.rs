@@ -3,6 +3,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub medium_query_count: usize,
+    pub deep_query_count: usize,
+    pub query_output_tokens: u32,
+    pub query_temperature: f64,
+    pub query_instruction: String,
     pub fast_web_pages: usize,
     pub fast_web_timeout: std::time::Duration,
     pub web_page_timeout: std::time::Duration,
@@ -72,6 +77,11 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            medium_query_count:3,
+            deep_query_count:4,
+            query_output_tokens:256,
+            query_temperature:0.0,
+            query_instruction:"Write up to {limit} short web search queries for the question. Write one query per line. Use plain text only. Do not answer the question.".into(),
             fast_web_pages:5,
             fast_web_timeout:std::time::Duration::from_secs(15),
             web_page_timeout:std::time::Duration::from_secs(8),
