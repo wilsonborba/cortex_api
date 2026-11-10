@@ -160,6 +160,10 @@ pub const LOG_LAN_ONLY: ProcessNumber = ProcessNumber {
     number: 1037,
     message: "The live log stream is for the LAN",
 };
+pub const TELEMETRY_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1038,
+    message: "Telemetry data could not be loaded",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -199,6 +203,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     TEMPORARY_UNAVAILABLE,
     THINKING_TIME_LIMIT,
     LOG_LAN_ONLY,
+    TELEMETRY_UNAVAILABLE,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

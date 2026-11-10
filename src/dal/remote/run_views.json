@@ -4,6 +4,12 @@
     "stats": {
       "map": "function(doc) { if (!doc.output_id || !doc.mode || !doc.calls || !doc.stages) return; var input = 0, output = 0, success = 1; doc.calls.forEach(function(c) { input += c.input_tokens; output += c.output_tokens; }); doc.stages.forEach(function(s) { if (s.error_number !== null && s.error_number !== undefined || s.status === 'failed' || s.status === 'cancelled') success = 0; }); emit([doc.mode.web_mode, doc.mode.thinking], [doc.total_ms, input, output, input + output, success]); }",
       "reduce": "_stats"
+    },
+    "events": {
+      "map": "function(doc) { if (!doc.output_id || !doc.calls || typeof doc.user_id !== 'string') return; doc.calls.forEach(function(c, i) { var stamp = Date.parse(c.started_at); if (!isFinite(stamp)) return; var row = {request_id: doc.output_id + ':' + i, output_id: doc.output_id, model: c.model, role: c.role, input_tokens: c.input_tokens, output_tokens: c.output_tokens, total_tokens: c.input_tokens + c.output_tokens, started_at: c.started_at, finished_at: c.finished_at}; emit([stamp, doc.output_id, i], row); }); }"
+    },
+    "events_by_user": {
+      "map": "function(doc) { if (!doc.output_id || !doc.calls || typeof doc.user_id !== 'string') return; doc.calls.forEach(function(c, i) { var stamp = Date.parse(c.started_at); if (!isFinite(stamp)) return; var row = {request_id: doc.output_id + ':' + i, output_id: doc.output_id, model: c.model, role: c.role, input_tokens: c.input_tokens, output_tokens: c.output_tokens, total_tokens: c.input_tokens + c.output_tokens, started_at: c.started_at, finished_at: c.finished_at}; emit([doc.user_id, stamp, doc.output_id, i], row); }); }"
     }
   }
 }

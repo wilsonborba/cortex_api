@@ -32,5 +32,6 @@ pub mod extraction;
 pub mod queries;
 pub mod recall;
 pub mod run_evidence;
+pub mod telemetry_reads;
 pub mod temporary;
 pub mod thinking;
