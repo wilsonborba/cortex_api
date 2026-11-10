@@ -325,10 +325,18 @@ async fn real_couch_views_stats_scope_admin_a2a_and_stable_call_paging() {
         let rows = body["data"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r["output_id"] == id.to_string()));
+        assert!(rows.iter().all(|r| r.get("user_id").is_none()));
     }
     let (status, body) = request(&router, "/telemetry/events", Some("admin"), true).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["data"].as_array().unwrap().len(), 6);
+    let owners: std::collections::HashSet<_> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["user_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(owners, ["user-a", "user-b", ""].into_iter().collect());
     assert_eq!(
         request(&router, "/telemetry/events", Some("admin"), false)
             .await

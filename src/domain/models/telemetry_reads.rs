@@ -20,6 +20,8 @@ pub struct GroupStats {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CallEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     pub request_id: String,
     pub output_id: Uuid,
     pub model: String,
