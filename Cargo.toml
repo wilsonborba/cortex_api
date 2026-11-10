@@ -24,6 +24,8 @@ regex = "1.13.1"
 unicode-normalization = "0.1.26"
 tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-24"] }
+scraper = "0.29.0"
+url = "2.5.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

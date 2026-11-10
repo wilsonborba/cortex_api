@@ -63,6 +63,8 @@
 
 - Merge #94 scoped-history-routes
 
+- Merge #95 exchange-memory-save
+
 
 ### Features
 
@@ -99,6 +101,8 @@
 - Scoped-history-routes (#94)
 
 - Exchange-memory-save (#95)
+
+- Key-free-search-adapters (#72)
 
 
 ## v1.0.0 - 2026-11-09
