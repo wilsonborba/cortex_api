@@ -766,6 +766,13 @@ async fn permanent_and_temporary_chats_run_every_stage() {
             .await
             .unwrap();
         for key in keys {
+            // Every key has the cortex: prefix and a TTL (area 18).
+            let ttl: i64 = redis::cmd("PTTL")
+                .arg(&key)
+                .query_async(&mut redis)
+                .await
+                .unwrap();
+            assert!(key.starts_with("cortex:") && ttl > 0, "{key} {ttl}");
             let _: () = redis::cmd("DEL")
                 .arg(key)
                 .query_async(&mut redis)
@@ -1006,6 +1013,13 @@ async fn reconnect_running_list_cancel_and_stop_thinking() {
             .await
             .unwrap();
         for key in keys {
+            // Every key has the cortex: prefix and a TTL (area 18).
+            let ttl: i64 = redis::cmd("PTTL")
+                .arg(&key)
+                .query_async(&mut redis)
+                .await
+                .unwrap();
+            assert!(key.starts_with("cortex:") && ttl > 0, "{key} {ttl}");
             let _: () = redis::cmd("DEL")
                 .arg(key)
                 .query_async(&mut redis)
@@ -1013,6 +1027,89 @@ async fn reconnect_running_list_cancel_and_stop_thinking() {
                 .unwrap();
         }
     }
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+#[tokio::test]
+#[ignore = "requires cortex_api_test; unique temporary schema; Redis is down on purpose"]
+async fn redis_down_stream_history_reconnect_and_temporary() {
+    dotenvy::dotenv().ok();
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_redis_down_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let (_log, address) = remote().await;
+    let model = Arc::new(Model::default());
+    let rt = runtime(
+        pool.clone(),
+        RedisCache::new(None, Duration::from_millis(20)),
+        &address,
+        model.clone(),
+    );
+    // The stream still reaches the open connection (18.5).
+    let response = send(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({"app_id":"cortex","text":"first","stream":true})),
+    )
+    .await;
+    let events = frames(response.into_body(), None).await;
+    assert_eq!(events.last().unwrap().1, "done");
+    assert!(events.iter().any(|f| f.1 == "token"));
+    let session: Uuid = sqlx::query_scalar("SELECT session_id FROM chats")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let output: Uuid = sqlx::query_scalar("SELECT output_id FROM chat_outputs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // History falls back to PostgreSQL.
+    let (status, _) = call(
+        &rt,
+        &format!("/chats/{session}/inputs"),
+        Some("alice"),
+        json!({"text":"second"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(model.prompts.lock().unwrap()[1].contains("The code is 42."));
+    // Reconnect does not work without Redis.
+    let response = send(
+        &rt,
+        "GET",
+        &format!("/chats/{session}/outputs/{output}/events"),
+        "alice",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(response).await["data"]["error_number"], 1042);
+    // A temporary chat cannot start.
+    let (status, text) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"t","temporary":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(text.contains("1035"));
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await
