@@ -57,6 +57,8 @@
 
 - Merge #87 redis-event-journal
 
+- Merge #97 atomic-chat-inputs
+
 
 ### Features
 
@@ -87,6 +89,8 @@
 - Redis-event-journal (#87)
 
 - Atomic-chat-inputs (#97)
+
+- History-storage-cache (#93)
 
 
 ## v1.0.0 - 2026-11-09

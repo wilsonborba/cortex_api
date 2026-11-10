@@ -10,3 +10,5 @@ pub mod security;
 pub mod events;
 
 pub mod chat_session;
+
+pub mod history;

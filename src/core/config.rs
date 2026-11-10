@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub history_cache_exchanges: usize,
+    pub history_cache_ttl: std::time::Duration,
     pub chat_title_characters: usize,
     pub event_retention: std::time::Duration,
     pub event_read_batch: usize,
@@ -54,6 +56,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            history_cache_exchanges:20,
+            history_cache_ttl:std::time::Duration::from_secs(3600),
             chat_title_characters:60,
             event_retention:std::time::Duration::from_secs(3600),
             event_read_batch:200,
