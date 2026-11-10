@@ -59,6 +59,8 @@
 
 - Merge #97 atomic-chat-inputs
 
+- Merge #93 history-storage-cache
+
 
 ### Features
 
@@ -91,6 +93,8 @@
 - Atomic-chat-inputs (#97)
 
 - History-storage-cache (#93)
+
+- Scoped-history-routes (#94)
 
 
 ## v1.0.0 - 2026-11-09

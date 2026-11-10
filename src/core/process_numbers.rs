@@ -72,6 +72,18 @@ pub const SECURITY_UNAVAILABLE: ProcessNumber = ProcessNumber {
     number: 1015,
     message: "The input security check is not available",
 };
+pub const CHAT_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1016,
+    message: "The chat was not found",
+};
+pub const HISTORY_FAILED: ProcessNumber = ProcessNumber {
+    number: 1017,
+    message: "The chat history could not be loaded or changed",
+};
+pub const OUTPUT_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1018,
+    message: "The output was not found",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -89,6 +101,9 @@ pub const REGISTRY: &[ProcessNumber] = &[
     USAGE_UNAVAILABLE,
     SECURITY_BLOCK,
     SECURITY_UNAVAILABLE,
+    CHAT_NOT_FOUND,
+    HISTORY_FAILED,
+    OUTPUT_NOT_FOUND,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

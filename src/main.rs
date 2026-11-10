@@ -19,8 +19,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store,
         config.local_queue_name.into(),
     ));
+    let chat_pool =
+        cortex_api::dal::local::database::connect(cortex_api::dal::local::database::Target::Test)
+            .await?;
     let routes = cortex_api::presentation::models::router(config.clone())
-        .merge(cortex_api::presentation::telemetry::router(ledger, &config));
+        .merge(cortex_api::presentation::telemetry::router(ledger, &config))
+        .merge(cortex_api::presentation::chats::router(
+            cortex_api::dal::local::chats::Chats { pool: chat_pool },
+            config.clone(),
+        ));
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address = %config.listen, "Development server started");
     axum::serve(

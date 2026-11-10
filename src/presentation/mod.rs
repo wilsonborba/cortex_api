@@ -58,3 +58,5 @@ pub mod models;
 pub mod telemetry;
 
 pub mod events;
+
+pub mod chats;

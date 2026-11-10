@@ -134,3 +134,58 @@ impl Chats {
         Ok(())
     }
 }
+
+impl Chats {
+    /// The app comes from the owned chat, not from a caller override.
+    pub async fn owned_chat(
+        &self,
+        user: &str,
+        session: Uuid,
+    ) -> Result<Option<Chat>, StorageError> {
+        Ok(
+            sqlx::query_as("SELECT * FROM chats WHERE session_id=$1 AND user_id=$2")
+                .bind(session)
+                .bind(user)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+    pub async fn list_chats(&self, user: &str) -> Result<Vec<Chat>, StorageError> {
+        Ok(sqlx::query_as("SELECT * FROM chats WHERE user_id=$1 ORDER BY is_pinned DESC,updated_at DESC,session_id DESC").bind(user).fetch_all(&self.pool).await?)
+    }
+    pub async fn page_inputs(
+        &self,
+        scope: &AppUser,
+        session: Uuid,
+        before: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<ChatInput>, StorageError> {
+        if let Some(cursor) = before {
+            let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chat_inputs i JOIN chats c USING(session_id) WHERE i.input_id=$1 AND i.session_id=$2 AND c.app_id=$3 AND c.user_id=$4)").bind(cursor).bind(session).bind(&scope.app_id).bind(&scope.user_id).fetch_one(&self.pool).await?;
+            if !exists {
+                return Err(StorageError::NotFound);
+            }
+        }
+        Ok(sqlx::query_as("SELECT i.* FROM chat_inputs i JOIN chats c USING(session_id) WHERE i.session_id=$1 AND c.app_id=$2 AND c.user_id=$3 AND ($4::uuid IS NULL OR (i.created_at,i.input_id)<(SELECT b.created_at,b.input_id FROM chat_inputs b WHERE b.input_id=$4 AND b.session_id=$1)) ORDER BY i.created_at DESC,i.input_id DESC LIMIT $5").bind(session).bind(&scope.app_id).bind(&scope.user_id).bind(before).bind(i64::from(limit)).fetch_all(&self.pool).await?)
+    }
+    pub async fn output_for_input(
+        &self,
+        scope: &AppUser,
+        input: Uuid,
+    ) -> Result<Option<ChatOutput>, StorageError> {
+        Ok(sqlx::query_as("SELECT o.* FROM chat_outputs o JOIN chats c USING(session_id) WHERE o.input_id=$1 AND c.app_id=$2 AND c.user_id=$3").bind(input).bind(&scope.app_id).bind(&scope.user_id).fetch_optional(&self.pool).await?)
+    }
+    pub async fn patch_chat(
+        &self,
+        scope: &AppUser,
+        session: Uuid,
+        patch: &crate::domain::models::chat_history::ChatPatch,
+    ) -> Result<Chat, StorageError> {
+        use crate::domain::models::chat_history::ChatPatch;
+        let (title, pin) = match patch {
+            ChatPatch::Title { title } => (Some(title), None),
+            ChatPatch::Pin { is_pinned } => (None, Some(*is_pinned)),
+        };
+        sqlx::query_as("UPDATE chats SET title=COALESCE($4,title),is_pinned=COALESCE($5,is_pinned) WHERE session_id=$1 AND app_id=$2 AND user_id=$3 RETURNING *").bind(session).bind(&scope.app_id).bind(&scope.user_id).bind(title).bind(pin).fetch_optional(&self.pool).await?.ok_or(StorageError::NotFound)
+    }
+}
