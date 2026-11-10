@@ -7,6 +7,7 @@ use cortex_api::{
 };
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Barrier, mpsc};
+use tracing::instrument::WithSubscriber;
 #[derive(Clone)]
 struct Data {
     thinking: bool,
@@ -116,6 +117,18 @@ async fn check(thinking: bool, fail: Option<&'static str>, cancel: bool) {
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
     let reporter = StageReporter::new(tx);
+    let log_config = cortex_api::core::config::Config::default();
+    let hub = cortex_api::core::logs::LogHub::new(&log_config);
+    let mut log_lines = hub.subscribe();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .event_format(cortex_api::core::logs::LineFormat {
+            config: log_config,
+            redactor: cortex_api::core::logs::Redactor::new(vec![]),
+        })
+        .with_writer(hub)
+        .finish();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         run(
@@ -127,8 +140,16 @@ async fn check(thinking: bool, fail: Option<&'static str>, cancel: bool) {
             &reporter,
         ),
     )
+    .with_subscriber(subscriber)
     .await
     .unwrap();
+    let mut logged = String::new();
+    while let Ok(line) = log_lines.try_recv() {
+        logged.push_str(&line);
+    }
+    assert!(logged.contains("Stage completed"));
+    assert!(!logged.contains("private input"));
+    assert!(!logged.contains("private URL"));
     let mut expected = vec!["accept"];
     if fail != Some("accept") {
         expected.extend(["gather", "assemble"]);

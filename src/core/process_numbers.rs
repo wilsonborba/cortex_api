@@ -156,6 +156,10 @@ pub const THINKING_TIME_LIMIT: ProcessNumber = ProcessNumber {
     number: 1036,
     message: "The thinking time limit was reached",
 };
+pub const LOG_LAN_ONLY: ProcessNumber = ProcessNumber {
+    number: 1037,
+    message: "The live log stream is for the LAN",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -194,6 +198,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     FILE_OCR,
     TEMPORARY_UNAVAILABLE,
     THINKING_TIME_LIMIT,
+    LOG_LAN_ONLY,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

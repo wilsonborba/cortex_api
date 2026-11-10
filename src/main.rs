@@ -3,8 +3,8 @@ use cortex_api::core::config::Config;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt().init();
     let config = Config::default();
+    let logs = cortex_api::core::logs::init(&config);
     use cortex_api::dal::remote::runs::{RunDatabase, RunStore};
     // The night-run development API uses test stores. Cutover selects primary stores.
     let store = std::sync::Arc::new(
@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cortex_api::dal::local::database::connect(cortex_api::dal::local::database::Target::Test)
             .await?;
     let routes = cortex_api::presentation::models::router(config.clone())
+        .merge(cortex_api::presentation::logs::router(logs))
         .merge(cortex_api::presentation::telemetry::router(ledger, &config))
         .merge(cortex_api::presentation::chats::router(
             cortex_api::dal::local::chats::Chats { pool: chat_pool },

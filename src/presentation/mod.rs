@@ -60,3 +60,4 @@ pub mod telemetry;
 pub mod events;
 
 pub mod chats;
+pub mod logs;

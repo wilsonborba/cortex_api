@@ -3,7 +3,7 @@ use crate::{
     domain::models::identity::{Caller, IdentityError},
 };
 use std::net::IpAddr;
-fn lan(ip: IpAddr) -> bool {
+pub(crate) fn lan(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
         IpAddr::V6(ip) => {

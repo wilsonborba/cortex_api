@@ -3,6 +3,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub development: bool,
+    pub log_stream_capacity: usize,
+    pub log_line_bytes: usize,
     pub thinking_timeout: std::time::Duration,
     pub thinking_output_tokens: u32,
     pub thinking_plan_steps: usize,
@@ -98,6 +101,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            development:false,
+            log_stream_capacity:1024,
+            log_line_bytes:16_384,
             thinking_timeout:std::time::Duration::from_secs(180),
             thinking_output_tokens:512,
             thinking_plan_steps:4,
