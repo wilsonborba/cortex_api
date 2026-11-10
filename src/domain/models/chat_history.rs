@@ -12,7 +12,15 @@ pub struct PageQuery {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ListQuery {}
+pub struct ListQuery {
+    pub status: Option<ListStatus>,
+}
+/// `GET /chats?status=running`: chats with a running output (10.4.4).
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ListStatus {
+    Running,
+}
 #[derive(Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub enum ChatPatch {

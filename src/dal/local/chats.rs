@@ -153,6 +153,9 @@ impl Chats {
     pub async fn list_chats(&self, user: &str) -> Result<Vec<Chat>, StorageError> {
         Ok(sqlx::query_as("SELECT * FROM chats WHERE user_id=$1 ORDER BY is_pinned DESC,updated_at DESC,session_id DESC").bind(user).fetch_all(&self.pool).await?)
     }
+    pub async fn running_chats(&self, user: &str) -> Result<Vec<Chat>, StorageError> {
+        Ok(sqlx::query_as("SELECT c.* FROM chats c WHERE c.user_id=$1 AND EXISTS(SELECT 1 FROM chat_outputs o WHERE o.session_id=c.session_id AND o.status='running') ORDER BY c.is_pinned DESC,c.updated_at DESC,c.session_id DESC").bind(user).fetch_all(&self.pool).await?)
+    }
     pub async fn page_inputs(
         &self,
         scope: &AppUser,

@@ -47,6 +47,7 @@ pub struct ChatRuntime {
     pub runs: RunEvidence,
     pub telemetry: TelemetryReads,
     pub journal: EventJournal,
+    pub controls: crate::domain::services::output_controls::OutputControls,
 }
 /// The final state of one output, for an input sent without `stream`.
 pub struct Finished {
@@ -78,6 +79,7 @@ struct Run {
     cancel: watch::Receiver<bool>,
     stop: watch::Receiver<bool>,
     ids: watch::Sender<Option<(InputIds, bool)>>,
+    control: crate::domain::services::output_controls::Control,
     finished: std::sync::Mutex<Option<FinishedOutput>>,
 }
 impl Run {
@@ -301,6 +303,10 @@ impl StageServices<Turn> for Run {
                     let _ = self
                         .ids
                         .send(Some((accepted.ids.clone(), accepted.temporary)));
+                    // Temporary chats have no reconnect, but can be cancelled.
+                    self.runtime
+                        .controls
+                        .open(accepted.ids.output_id, self.control.clone());
                     turn.accepted = Some(Arc::new(accepted));
                     StageValue::ok(turn)
                 }
@@ -547,6 +553,14 @@ impl ChatRuntime {
             });
             // The output id is known only after Accept. Events wait until then.
             let (ids_tx, ids_rx) = watch::channel::<Option<(InputIds, bool)>>(None);
+            let (cancel_tx, cancel) = watch::channel(false);
+            let (stop_tx, stop) = watch::channel(false);
+            let control = crate::domain::services::output_controls::Control {
+                cancel: Arc::new(cancel_tx),
+                stop_thinking: Arc::new(stop_tx),
+                live: tokio::sync::broadcast::channel(runtime.config.event_read_batch.max(1)).0,
+            };
+            let live = control.live.clone();
             let journal = runtime.journal.clone();
             let deliver = tokio::spawn(async move {
                 let mut ids_rx = ids_rx;
@@ -560,21 +574,21 @@ impl ChatRuntime {
                     // Temporary chats have no reconnect (10.4.8).
                     if let Some((ids, false)) = ids {
                         for event in pending.drain(..) {
-                            let _ = journal
-                                .append(ids.output_id, &StoredEvent::from(&event))
-                                .await;
+                            let stored = StoredEvent::from(&event);
+                            let _ = journal.append(ids.output_id, &stored).await;
+                            // Live after the journal, so a reconnect misses nothing.
+                            let _ = live.send(stored);
                         }
                     }
                 }
             });
-            let (_cancel, cancel) = watch::channel(false);
-            let (_stop, stop) = watch::channel(false);
             let run = Run {
                 runtime: runtime.clone(),
                 events: events.clone(),
                 cancel,
                 stop,
                 ids: ids_tx,
+                control,
                 finished: Default::default(),
             };
             let reporter = pipeline::StageReporter::new(stage_tx);
@@ -656,6 +670,9 @@ impl ChatRuntime {
                         .completed(&mode, ids.output_id, total_ms, done.status)
                         .await;
                 }
+            }
+            if let Some((ids, ..)) = &accepted {
+                runtime.controls.close(ids.output_id);
             }
             drop(run);
             drop(reporter);

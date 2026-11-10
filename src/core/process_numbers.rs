@@ -176,6 +176,14 @@ pub const FILE_NOT_FOUND: ProcessNumber = ProcessNumber {
     number: 1041,
     message: "The file was not found",
 };
+pub const EVENTS_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1042,
+    message: "The output events are not available",
+};
+pub const OUTPUT_NOT_RUNNING: ProcessNumber = ProcessNumber {
+    number: 1043,
+    message: "The output is not running",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -219,6 +227,8 @@ pub const REGISTRY: &[ProcessNumber] = &[
     MEMORY_NODE_NOT_FOUND,
     FILE_NOT_SAVED,
     FILE_NOT_FOUND,
+    EVENTS_UNAVAILABLE,
+    OUTPUT_NOT_RUNNING,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

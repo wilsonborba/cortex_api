@@ -43,10 +43,10 @@ fn failure(process: ProcessNumber) -> Response {
 async fn list(
     UserId(user): UserId,
     State(state): State<ChatHistory>,
-    Query(_): Query<ListQuery>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Envelope<impl serde::Serialize>, Response> {
     state
-        .list(&user)
+        .list(&user, query)
         .await
         .map(|chats| Envelope::new("Chats loaded", chats))
         .map_err(failure)
