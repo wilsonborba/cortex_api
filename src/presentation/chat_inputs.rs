@@ -51,6 +51,7 @@ fn status(process: ProcessNumber) -> StatusCode {
         process_numbers::HEAVY_LOAD,
         process_numbers::QUEUE_FAULT,
         process_numbers::OLLAMA_FAILED,
+        process_numbers::PERSONA_UNAVAILABLE,
     ];
     if process.number == process_numbers::OUTPUT_NOT_RUNNING.number {
         return StatusCode::CONFLICT;
@@ -58,7 +59,8 @@ fn status(process: ProcessNumber) -> StatusCode {
     match process.number {
         n if n == process_numbers::CHAT_NOT_FOUND.number
             || n == process_numbers::FILE_NOT_FOUND.number
-            || n == process_numbers::OUTPUT_NOT_FOUND.number =>
+            || n == process_numbers::OUTPUT_NOT_FOUND.number
+            || n == process_numbers::PERSONA_NOT_FOUND.number =>
         {
             StatusCode::NOT_FOUND
         }

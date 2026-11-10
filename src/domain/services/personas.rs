@@ -188,3 +188,161 @@ impl Personas {
         }))
     }
 }
+/// Personas for one chat context (area 23, issue #105).
+#[derive(Default, Clone)]
+pub struct PersonaContext {
+    pub self_persona: Option<crate::domain::models::context::ContextText>,
+    pub bot_persona: Option<crate::domain::models::context::ContextText>,
+    pub named: Vec<crate::domain::models::context::ContextText>,
+}
+impl Personas {
+    async fn raw(&self, caller: &Caller, id: &str) -> Result<Value, PersonaError> {
+        let data = self
+            .call(Method::GET, &["entities", id], caller, &[], None)
+            .await?;
+        self.present(&caller.storage_scope(), &data)?;
+        Ok(data)
+    }
+    /// Only schema fields with `in_context = true` reach the context (23.4).
+    async fn context_text(
+        &self,
+        caller: &Caller,
+        persona: &Value,
+        label: &str,
+        schemas: &mut std::collections::HashMap<(String, i64), Vec<String>>,
+    ) -> Result<crate::domain::models::context::ContextText, PersonaError> {
+        let mut lines = vec![format!(
+            "name: {}",
+            persona["canonical_name"].as_str().unwrap_or_default()
+        )];
+        let aliases: Vec<_> = persona["aliases"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_str())
+            .collect();
+        if !aliases.is_empty() {
+            lines.push(format!("aliases: {}", aliases.join(", ")));
+        }
+        if let (Some(name), Some(version)) = (
+            persona["schema_name"].as_str(),
+            persona["schema_version"].as_i64(),
+        ) {
+            let key = (name.to_owned(), version);
+            if !schemas.contains_key(&key) {
+                let version = version.to_string();
+                let data = self
+                    .call(
+                        Method::GET,
+                        &["persona-schemas", name, "versions", &version],
+                        caller,
+                        &[],
+                        None,
+                    )
+                    .await?;
+                let fields = data["fields"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|f| f["in_context"] == true)
+                    .filter_map(|f| f["name"].as_str())
+                    // Top-level fields only; a nested path has no own value here.
+                    .filter(|n| !n.contains(['.', '[']))
+                    .map(str::to_owned)
+                    .collect();
+                schemas.insert(key.clone(), fields);
+            }
+            for field in &schemas[&key] {
+                let value = &persona["attributes"][field];
+                if !value.is_null() {
+                    let text = value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string());
+                    lines.push(format!("{field}: {text}"));
+                }
+            }
+        }
+        Ok(crate::domain::models::context::ContextText {
+            label: label.into(),
+            source: None,
+            text: lines.join("\n"),
+        })
+    }
+    /// is_self always, the chat bot persona if set, and at most the
+    /// configured number of named personas from a deterministic match.
+    pub async fn for_context(
+        &self,
+        caller: &Caller,
+        text: &str,
+        bot: Option<&str>,
+        named_limit: usize,
+    ) -> Result<PersonaContext, PersonaError> {
+        let mut schemas = Default::default();
+        let mut out = PersonaContext::default();
+        let scope = caller.storage_scope();
+        let all = self
+            .call(
+                Method::GET,
+                &["entities"],
+                caller,
+                &[("type", "person")],
+                None,
+            )
+            .await?;
+        for value in all.as_array().into_iter().flatten() {
+            self.present(&scope, value)?;
+            if value["is_self"] == true {
+                out.self_persona = Some(
+                    self.context_text(caller, value, "self persona", &mut schemas)
+                        .await?,
+                );
+            }
+        }
+        let mut skip = vec![];
+        if let Some(id) = bot {
+            let value = self.raw(caller, id).await?;
+            out.bot_persona = Some(
+                self.context_text(caller, &value, "bot persona", &mut schemas)
+                    .await?,
+            );
+            skip.push(id.to_owned());
+        }
+        let matched = self
+            .call(
+                Method::POST,
+                &["entities", "match"],
+                caller,
+                &[],
+                Some(json!({"text": text})),
+            )
+            .await?;
+        for value in matched.as_array().into_iter().flatten() {
+            if out.named.len() == named_limit {
+                break;
+            }
+            self.present(&scope, value)?;
+            let id = value["id"].as_str().unwrap_or_default();
+            if value["is_self"] == true || skip.iter().any(|s| s == id) {
+                continue;
+            }
+            let label = format!(
+                "persona {}",
+                value["canonical_name"].as_str().unwrap_or_default()
+            );
+            out.named.push(
+                self.context_text(caller, value, &label, &mut schemas)
+                    .await?,
+            );
+        }
+        Ok(out)
+    }
+    /// A chat bot persona must be a bot persona in the caller's scope (23.5).
+    pub async fn check_bot(&self, caller: &Caller, id: &str) -> Result<(), PersonaError> {
+        let persona = self.get(caller, id).await?;
+        if persona.kind != "bot" {
+            return Err(PersonaError::Process(process_numbers::PERSONA_NOT_FOUND));
+        }
+        Ok(())
+    }
+}
