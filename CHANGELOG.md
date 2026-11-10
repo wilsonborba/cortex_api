@@ -77,6 +77,8 @@
 
 - Merge #77 scoped-memory-recall
 
+- Merge #78 document-extraction
+
 
 ### Features
 
@@ -127,6 +129,8 @@
 - Scoped-memory-recall (#77)
 
 - Document-extraction (#78)
+
+- Redis-temporary-chats (#98)
 
 
 ## v1.0.0 - 2026-11-09

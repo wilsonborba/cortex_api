@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub temporary_ttl: std::time::Duration,
     pub file_bytes: usize,
     pub ocr_page_limit: usize,
     pub pdfium_path: std::path::PathBuf,
@@ -90,6 +91,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            temporary_ttl:std::time::Duration::from_secs(3600),
             file_bytes:25 * 1024 * 1024,
             ocr_page_limit:20,
             pdfium_path:"models/pdfium/lib/libpdfium.so".into(),

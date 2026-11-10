@@ -28,7 +28,7 @@ pub fn title(config: &Config, text: &str, files: &[SessionFile]) -> String {
     }
     prefix.into()
 }
-fn prepare(
+pub(crate) fn prepare(
     scope: AppUser,
     session: Uuid,
     input: NextInput,

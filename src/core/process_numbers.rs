@@ -148,6 +148,10 @@ pub const FILE_OCR: ProcessNumber = ProcessNumber {
     number: 1034,
     message: "The file image text could not be read",
 };
+pub const TEMPORARY_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1035,
+    message: "Temporary chat storage is not available",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -184,6 +188,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     FILE_EXTRACTION,
     FILE_OCR_LIMIT,
     FILE_OCR,
+    TEMPORARY_UNAVAILABLE,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {
