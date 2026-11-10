@@ -83,3 +83,54 @@ impl Chats {
         Ok(())
     }
 }
+
+impl Chats {
+    pub async fn history_head(
+        &self,
+        scope: &AppUser,
+        session: Uuid,
+    ) -> Result<Option<i64>, StorageError> {
+        Ok(sqlx::query_scalar("SELECT (SELECT count(*) FROM chat_outputs o WHERE o.session_id=c.session_id AND o.status='done') FROM chats c WHERE c.session_id=$1 AND c.app_id=$2 AND c.user_id=$3").bind(session).bind(&scope.app_id).bind(&scope.user_id).fetch_optional(&self.pool).await?)
+    }
+    pub async fn recent_history(
+        &self,
+        scope: &AppUser,
+        session: Uuid,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::models::history::HistoryExchange>, StorageError> {
+        let limit = i64::try_from(limit).map_err(|_| StorageError::Database)?;
+        Ok(sqlx::query_as("SELECT i.input_id,i.text AS input,o.text AS output FROM chat_inputs i JOIN chat_outputs o USING(input_id,session_id) JOIN chats c USING(session_id) WHERE c.session_id=$1 AND c.app_id=$2 AND c.user_id=$3 AND o.status='done' ORDER BY i.created_at DESC,i.input_id DESC LIMIT $4").bind(session).bind(&scope.app_id).bind(&scope.user_id).bind(limit).fetch_all(&self.pool).await?)
+    }
+    pub async fn all_chat_files(
+        &self,
+        scope: &AppUser,
+        session: Uuid,
+    ) -> Result<Vec<crate::domain::models::history::ChatFile>, StorageError> {
+        Ok(sqlx::query_as("SELECT f.file_id,f.memory_id FROM chat_input_files f JOIN chat_inputs i USING(input_id) JOIN chats c USING(session_id) WHERE c.session_id=$1 AND c.app_id=$2 AND c.user_id=$3 GROUP BY f.file_id,f.memory_id ORDER BY min(i.created_at),f.file_id,f.memory_id").bind(session).bind(&scope.app_id).bind(&scope.user_id).fetch_all(&self.pool).await?)
+    }
+    pub async fn finish_output(
+        &self,
+        scope: &AppUser,
+        output: &crate::domain::models::history::FinishedOutput,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let rows=sqlx::query("UPDATE chat_outputs o SET status=$4,text=$5,thinking_text=$6,memory_id=$7,finished_at=$8 FROM chats c WHERE o.session_id=c.session_id AND o.session_id=$1 AND o.output_id=$2 AND c.app_id=$3 AND c.user_id=$9 AND o.status='running'").bind(output.session_id).bind(output.output_id).bind(&scope.app_id).bind(output.status.name()).bind(&output.text).bind(&output.thinking_text).bind(&output.memory_id).bind(output.finished_at).bind(&scope.user_id).execute(&mut *tx).await?.rows_affected();
+        inserted(rows)?;
+        for (position, source) in output.sources.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO chat_output_sources(output_id,position,title,url) VALUES($1,$2,$3,$4)",
+            )
+            .bind(output.output_id)
+            .bind(i32::try_from(position).map_err(|_| StorageError::Database)?)
+            .bind(&source.title)
+            .bind(&source.url)
+            .execute(&mut *tx)
+            .await?;
+        }
+        for (position, memory) in output.memories.iter().enumerate() {
+            sqlx::query("INSERT INTO chat_output_memories(output_id,position,memory_id,title) VALUES($1,$2,$3,$4)").bind(output.output_id).bind(i32::try_from(position).map_err(|_|StorageError::Database)?).bind(&memory.id).bind(&memory.title).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+}
