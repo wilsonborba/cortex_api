@@ -586,8 +586,21 @@ impl ChatRuntime {
             let started = Instant::now();
             let created_at = Utc::now();
             let caller = turn.caller.clone();
+            // The first stage event carries the average of recent completed runs of
+            // this kind (12.4); null when none exists.
+            let (web, thinking) = match turn.request.as_ref() {
+                TurnRequest::New(body) => (body.web_mode, body.thinking),
+                TurnRequest::Next(_, body) => (body.web_mode, body.thinking),
+            };
+            let expected = runtime
+                .telemetry
+                .expected(&RunMode {
+                    web_mode: web,
+                    thinking,
+                })
+                .await;
             let (events, mut output, events_task) =
-                crate::domain::services::events::channel(&runtime.config, None);
+                crate::domain::services::events::channel(&runtime.config, expected);
             let (stage_tx, mut stage_rx) = mpsc::unbounded_channel();
             let sink = events.clone();
             let forward = tokio::spawn(async move {
