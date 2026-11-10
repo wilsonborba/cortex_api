@@ -9,4 +9,5 @@ pub mod hippocampus;
 
 pub mod search;
 
+pub mod temporary;
 pub mod web_page;

@@ -2,7 +2,7 @@ use crate::{
     core::process_numbers::ProcessNumber,
     domain::models::{pipeline::StageName, run_record::StageRecord, usage::Usage},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -114,12 +114,12 @@ impl StageProgress {
         }
     }
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Source {
     pub title: String,
     pub url: String,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Memory {
     pub id: String,
     pub title: String,
