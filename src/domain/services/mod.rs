@@ -22,3 +22,5 @@ pub mod search;
 pub mod chunks;
 
 pub mod web;
+
+pub mod queries;

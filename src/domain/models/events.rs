@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum StepName {
+    #[serde(rename = "web.queries")]
+    WebQueries,
     #[serde(rename = "queue.wait")]
     QueueWait,
     #[serde(rename = "model.load")]
@@ -39,6 +41,7 @@ pub enum StepName {
 impl StepName {
     pub fn message(self) -> &'static str {
         match self {
+            Self::WebQueries => "Preparing search queries",
             Self::QueueWait => "Waiting for the model",
             Self::ModelLoad => "Loading the model",
             Self::ModelReady => "The model is ready",
