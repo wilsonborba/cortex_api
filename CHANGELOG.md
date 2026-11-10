@@ -85,6 +85,8 @@
 
 - Merge #89 private-standard-logs
 
+- Merge #90 run-evidence-retention
+
 
 ### Features
 
@@ -143,6 +145,8 @@
 - Private-standard-logs (#89)
 
 - Run-evidence-retention (#90)
+
+- Scoped-telemetry (#91)
 
 
 ## v1.0.0 - 2026-11-09

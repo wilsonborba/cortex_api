@@ -17,13 +17,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _retention = cortex_api::domain::tasks::run_retention::spawn(store.clone(), config.clone());
     let ledger = std::sync::Arc::new(cortex_api::dal::remote::usage::RedisLedger::new(
         cortex_api::dal::remote::cache::RedisCache::from_environment(),
-        store,
+        store.clone(),
         config.local_queue_name.into(),
     ));
     let chat_pool =
         cortex_api::dal::local::database::connect(cortex_api::dal::local::database::Target::Test)
             .await?;
     let routes = cortex_api::presentation::models::router(config.clone())
+        .merge(cortex_api::presentation::telemetry_reads::router(
+            cortex_api::domain::services::telemetry_reads::TelemetryReads {
+                store,
+                timing: cortex_api::dal::remote::timing::TimingStore::new(
+                    &config,
+                    cortex_api::dal::remote::cache::RedisCache::from_environment(),
+                ),
+                config: config.clone(),
+            },
+        ))
         .merge(cortex_api::presentation::logs::router(logs))
         .merge(cortex_api::presentation::telemetry::router(ledger, &config))
         .merge(cortex_api::presentation::chats::router(

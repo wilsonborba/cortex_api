@@ -323,3 +323,76 @@ impl RunStore {
         Ok(out)
     }
 }
+
+impl RunStore {
+    pub async fn call_events(
+        &self,
+        user: Option<&str>,
+        before: Option<&str>,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::domain::models::telemetry_reads::CallEvent>,
+        crate::domain::models::telemetry_reads::TelemetryReadError,
+    > {
+        use crate::domain::models::telemetry_reads::{CallEvent, TelemetryReadError as E};
+        let mut start = None;
+        if let Some(before) = before {
+            let (id, index) = before.rsplit_once(':').ok_or(E::InvalidCursor)?;
+            let id = uuid::Uuid::parse_str(id).map_err(|_| E::InvalidCursor)?;
+            let index = index.parse::<usize>().map_err(|_| E::InvalidCursor)?;
+            let record = self
+                .get(id)
+                .await
+                .map_err(|_| E::Unavailable)?
+                .ok_or(E::InvalidCursor)?;
+            if user.is_some_and(|u| u != record.user_id) {
+                return Err(E::InvalidCursor);
+            }
+            let call = record.calls.get(index).ok_or(E::InvalidCursor)?;
+            let previous = i64::try_from(index).map_err(|_| E::InvalidCursor)? - 1;
+            start = Some(if let Some(user) = user {
+                json!([user, call.started_at.timestamp_millis(), id, previous])
+            } else {
+                json!([call.started_at.timestamp_millis(), id, previous])
+            });
+        }
+        let view = if user.is_some() {
+            "events_by_user"
+        } else {
+            "events"
+        };
+        let mut url = self.url(&["_design", "cortex_runs", "_view", view]);
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("descending", "true")
+                .append_pair("limit", &limit.to_string());
+            if let Some(user) = user {
+                let key = start.unwrap_or_else(|| json!([user, {}]));
+                query
+                    .append_pair("startkey", &key.to_string())
+                    .append_pair("endkey", &json!([user]).to_string());
+            } else if let Some(key) = start {
+                query.append_pair("startkey", &key.to_string());
+            }
+        }
+        let response = self
+            .client
+            .get(url)
+            .basic_auth(&self.user, Some(&self.password))
+            .send()
+            .await
+            .map_err(|_| E::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(E::Unavailable);
+        }
+        let value: Value = response.json().await.map_err(|_| E::Unavailable)?;
+        let rows = value["rows"].as_array().ok_or(E::Unavailable)?;
+        rows.iter()
+            .map(|row| {
+                serde_json::from_value::<CallEvent>(row["value"].clone())
+                    .map_err(|_| E::Unavailable)
+            })
+            .collect()
+    }
+}
