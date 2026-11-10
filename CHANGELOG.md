@@ -55,6 +55,8 @@
 
 - Merge #86 native-sse-events
 
+- Merge #87 redis-event-journal
+
 
 ### Features
 
@@ -83,6 +85,8 @@
 - Native-sse-events (#86)
 
 - Redis-event-journal (#87)
+
+- Atomic-chat-inputs (#97)
 
 
 ## v1.0.0 - 2026-11-09

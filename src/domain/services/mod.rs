@@ -8,3 +8,5 @@ pub mod context;
 pub mod security;
 
 pub mod events;
+
+pub mod chat_session;

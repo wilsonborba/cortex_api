@@ -15,3 +15,5 @@ pub mod security;
 pub mod events;
 
 pub mod replay;
+
+pub mod chat_session;

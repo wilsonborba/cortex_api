@@ -48,6 +48,7 @@ async fn every_table_scope_constraints_and_reversible_migrations() {
         app_id: actor.app_id.clone(),
         user_id: actor.user_id.clone(),
         title: "Fixture".into(),
+        persona_id: None,
         is_pinned: false,
         created_at: clock,
         updated_at: clock,

@@ -12,6 +12,7 @@ pub struct Chat {
     pub app_id: String,
     pub user_id: String,
     pub title: String,
+    pub persona_id: Option<String>,
     pub is_pinned: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
