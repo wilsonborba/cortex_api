@@ -3,6 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub fast_web_pages: usize,
+    pub fast_web_timeout: std::time::Duration,
     pub web_page_timeout: std::time::Duration,
     pub web_parallel_pages: usize,
     pub web_chunk_tokens: usize,
@@ -70,6 +72,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            fast_web_pages:5,
+            fast_web_timeout:std::time::Duration::from_secs(15),
             web_page_timeout:std::time::Duration::from_secs(8),
             web_parallel_pages:5,
             web_chunk_tokens:500,

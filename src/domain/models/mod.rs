@@ -25,3 +25,5 @@ pub mod chat_history;
 pub mod search;
 
 pub mod web_page;
+
+pub mod web;

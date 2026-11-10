@@ -67,6 +67,8 @@
 
 - Merge #72 key-free-search-adapters
 
+- Merge #73 bounded-page-reader
+
 
 ### Features
 
@@ -107,6 +109,8 @@
 - Key-free-search-adapters (#72)
 
 - Bounded-page-reader (#73)
+
+- Fast-web-gather (#74)
 
 
 ## v1.0.0 - 2026-11-09
