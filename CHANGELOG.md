@@ -81,6 +81,8 @@
 
 - Merge #98 redis-temporary-chats
 
+- Merge #88 bounded-thinking
+
 
 ### Features
 
@@ -135,6 +137,8 @@
 - Redis-temporary-chats (#98)
 
 - Bounded-thinking (#88)
+
+- Private-standard-logs (#89)
 
 
 ## v1.0.0 - 2026-11-09
