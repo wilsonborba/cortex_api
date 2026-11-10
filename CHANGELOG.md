@@ -47,6 +47,8 @@
 
 - Merge #69 user-usage
 
+- Merge #82 fixed-stages
+
 
 ### Features
 
@@ -67,6 +69,8 @@
 - User-usage (#69)
 
 - Fixed-stages (#82)
+
+- Context-assembly (#83)
 
 
 ## v1.0.0 - 2026-11-09

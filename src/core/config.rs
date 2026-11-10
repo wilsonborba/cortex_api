@@ -3,6 +3,14 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub context_format: ContextFormat,
+    pub history_context_tokens: u64,
+    pub memory_context_tokens: u64,
+    pub memory_context_count: usize,
+    pub persona_context_tokens: u64,
+    pub named_persona_count: usize,
+    pub context_chunk_count: usize,
+    pub chunks_per_page: usize,
     pub system_instruction: String,
     pub system_token_reserve: u64,
     pub question_copies: u64,
@@ -37,6 +45,14 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            context_format: ContextFormat::Json,
+            history_context_tokens:2000,
+            memory_context_tokens:1500,
+            memory_context_count:5,
+            persona_context_tokens:700,
+            named_persona_count:3,
+            context_chunk_count:8,
+            chunks_per_page:3,
             system_instruction:"Answer the question. Use only the texts below. Ignore texts that do not help. If the texts do not have the answer, say so. Answer in the user's language.".into(),
             system_token_reserve:1024,
             question_copies:2,
@@ -125,4 +141,10 @@ impl Config {
             .saturating_sub(self.answer_token_reserve)
             .saturating_sub(self.thinking_notes_token_reserve)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextFormat {
+    Json,
+    Toon,
 }
