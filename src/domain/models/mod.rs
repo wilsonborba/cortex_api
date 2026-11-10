@@ -32,3 +32,4 @@ pub mod extraction;
 pub mod queries;
 pub mod recall;
 pub mod temporary;
+pub mod thinking;

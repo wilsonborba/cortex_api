@@ -3,6 +3,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 /// Development listener. Production binding belongs to the cutover issue.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub thinking_timeout: std::time::Duration,
+    pub thinking_output_tokens: u32,
+    pub thinking_plan_steps: usize,
+    pub thinking_plan_instruction: String,
+    pub thinking_work_instruction: String,
+    pub thinking_check_instruction: String,
+    pub thinking_final_instruction: String,
     pub temporary_ttl: std::time::Duration,
     pub file_bytes: usize,
     pub ocr_page_limit: usize,
@@ -91,6 +98,13 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            thinking_timeout:std::time::Duration::from_secs(180),
+            thinking_output_tokens:512,
+            thinking_plan_steps:4,
+            thinking_plan_instruction:"Your only task is to plan how to answer the question. Write at most 4 steps, one step per line. Use plain text.".into(),
+            thinking_work_instruction:"Your only task is to work through the plan with the given texts. Write free text notes. Use the earlier check to correct unsupported claims. Do not invent support.".into(),
+            thinking_check_instruction:"Your only task is to compare the work notes with the given texts. List each claim the texts do not support, one per line. If every claim is supported, write NONE. Use plain text.".into(),
+            thinking_final_instruction:"Write the final answer from the given texts, work notes and check. Remove unsupported claims. Answer in the user's language. Use plain text.".into(),
             temporary_ttl:std::time::Duration::from_secs(3600),
             file_bytes:25 * 1024 * 1024,
             ocr_page_limit:20,

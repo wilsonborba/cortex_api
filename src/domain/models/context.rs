@@ -26,6 +26,7 @@ pub struct ContextInput {
     pub web: Vec<ContextText>,
 }
 pub struct AssembledContext {
+    pub question: String,
     pub system: String,
     pub prompt: String,
     pub system_personas: Vec<ContextText>,
