@@ -113,6 +113,8 @@
 
 - Merge #91 expected-time-first-event
 
+- Merge #79 audio-transcription-and-vision-images
+
 
 ### Features
 
@@ -191,6 +193,8 @@
 - Personas-in-context (#105)
 
 - Audio-transcription-and-vision-images (#79)
+
+- File-worker-job-locations (#80)
 
 
 ### Tests

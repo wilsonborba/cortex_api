@@ -1,6 +1,13 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// Development listener. Production binding belongs to the cutover issue.
+/// Where one file job runs (7.10). Remote is the base URL of the file worker
+/// binary (`src/bin/file-worker.rs`); for vision it is another Ollama URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobLocation {
+    Local,
+    Remote(String),
+}
 #[derive(Debug, Clone)]
 pub struct Config {
     pub timing_sample_count: usize,
@@ -85,6 +92,12 @@ pub struct Config {
     pub whisper_model_path: std::path::PathBuf,
     pub whisper_threads: i32,
     pub audio_max_seconds: f64,
+    pub extract_location: JobLocation,
+    pub ocr_location: JobLocation,
+    pub transcribe_location: JobLocation,
+    pub vision_location: JobLocation,
+    pub worker_listen: SocketAddr,
+    pub worker_timeout: std::time::Duration,
     pub ollama_url: String,
     pub model_context_tokens: u64,
     pub ollama_keep_alive: String,
@@ -198,6 +211,13 @@ impl Default for Config {
                     .into(),
             whisper_threads: 4,
             audio_max_seconds: 600.0,
+            // Owner decision (7.10.8): everything runs on the MSI now.
+            extract_location: JobLocation::Local,
+            ocr_location: JobLocation::Local,
+            transcribe_location: JobLocation::Local,
+            vision_location: JobLocation::Local,
+            worker_listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 18090),
+            worker_timeout: std::time::Duration::from_secs(900),
             ollama_url: "http://127.0.0.1:11434".into(),
             model_context_tokens: 8192,
             ollama_keep_alive: "2m".into(),
