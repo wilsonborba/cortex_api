@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v2.0.0 - 2026-11-11
 
 
 ### Bug Fixes
@@ -138,6 +138,10 @@
 - Merge #106 v2.0.0 preparation
 
 - Merge #115 restore-authorized-prompt-guard
+
+- Merge #116 preserve-temporary-images-for-vision
+
+- Prepare development for v2.0.0
 
 
 ### Features
