@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v2.1.0 - 2026-11-11
 
 
 ### Chores
@@ -16,6 +16,8 @@
 ### Features
 
 - Title exchanges and link chats (#117)
+
+- Merge exchange titles and chat links (#117)
 
 
 ## v2.0.0 - 2026-11-11
