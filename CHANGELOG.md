@@ -1,12 +1,14 @@
 # Changelog
 
 
-## Unreleased
+## v2.1.1 - 2026-11-11
 
 
 ### Bug Fixes
 
 - Use canonical memory context ids (#117)
+
+- Merge canonical graph context ids (#117)
 
 
 ### Chores
