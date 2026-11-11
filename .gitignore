@@ -40,3 +40,5 @@ var/whisper-models/
 .env
 
 /models/
+
+/var/systemd/

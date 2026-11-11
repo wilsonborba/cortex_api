@@ -3,15 +3,31 @@ use cortex_api::core::config::Config;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    let config = Config::default();
+    let production = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => false,
+        [mode] if mode == "--production" => true,
+        _ => return Err("Use cortex-api [--production]".into()),
+    };
+    let config = if production {
+        Config::production()
+    } else {
+        Config::default()
+    };
     let logs = cortex_api::core::logs::init(&config);
     use cortex_api::dal::remote::runs::{RunDatabase, RunStore};
-    // The night-run development API uses test stores. Cutover selects primary stores.
+    // Store selection follows the explicit launch mode, never a secret value.
     let store = std::sync::Arc::new(
-        RunStore::from_environment(RunDatabase::Test)
-            .map_err(|_| "The run record store is not configured")?,
+        RunStore::from_environment(if production {
+            RunDatabase::Primary
+        } else {
+            RunDatabase::Test
+        })
+        .map_err(|_| "The run record store is not configured")?,
     );
     if store.initialize().await.is_err() {
+        if production {
+            return Err("The production run database is unavailable".into());
+        }
         tracing::warn!("Run record database setup failed");
     }
     let _retention = cortex_api::domain::tasks::run_retention::spawn(store.clone(), config.clone());
@@ -33,9 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store.clone(),
         config.local_queue_name.into(),
     ));
-    let chat_pool =
-        cortex_api::dal::local::database::connect(cortex_api::dal::local::database::Target::Test)
-            .await?;
+    let chat_pool = cortex_api::dal::local::database::connect(if production {
+        cortex_api::dal::local::database::Target::Primary
+    } else {
+        cortex_api::dal::local::database::Target::Test
+    })
+    .await?;
     let hippocampus = cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
         .map_err(|_| "The Hippocampus URL is not valid")?;
     let (runtime, personas) = {
@@ -186,7 +205,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.clone(),
         ));
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    tracing::info!(address = %config.listen, "Development server started");
+    tracing::info!(address = %config.listen, "Server started");
     axum::serve(
         listener,
         cortex_api::presentation::with_response_contract(routes)

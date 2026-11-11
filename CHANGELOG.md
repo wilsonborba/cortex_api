@@ -125,6 +125,8 @@
 
 - Merge #84 use the approved ungated ONNX injection classifier
 
+- Merge #85 select the measured plain context default
+
 
 ### Features
 
@@ -211,6 +213,8 @@
 - Use the approved ungated ONNX injection classifier (#84)
 
 - Select the measured plain context default (#85)
+
+- Prepare the Rust production runtime and service scripts (#106)
 
 
 ### Tests
