@@ -1,6 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-/// Development listener. Production binding belongs to the cutover issue.
+/// Runtime configuration. Production uses an explicit --production launch.
 /// Where one file job runs (7.10). Remote is the base URL of the file worker
 /// binary (`src/bin/file-worker.rs`); for vision it is another Ollama URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +127,16 @@ pub struct Config {
     pub database_connections: u32,
     pub cache_operation_timeout: std::time::Duration,
     pub listen: SocketAddr,
+}
+
+impl Config {
+    pub fn production() -> Self {
+        Self {
+            listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8003),
+            hippocampus_url: "http://127.0.0.1:8001".into(),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for Config {
