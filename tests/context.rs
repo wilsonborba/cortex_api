@@ -24,12 +24,19 @@ fn json_and_toon_encode_the_same_data() {
         text("memory", "id", "comma, newline\nไทย \"quote\""),
         text("file", "file:1", "Português"),
     ];
+    let plain = encode(ContextFormat::Plain, &values);
+    assert!(plain.contains("[memory: id] comma, newline\nไทย \"quote\""));
+    assert!(plain.contains("[file: file:1] Português"));
     let json = encode(ContextFormat::Json, &values);
     let toon = encode(ContextFormat::Toon, &values);
     let left: serde_json::Value = serde_json::from_str(&json).unwrap();
     let right: serde_json::Value = toon_format::decode_default(&toon).unwrap();
     assert_eq!(left, right);
-    for format in [ContextFormat::Json, ContextFormat::Toon] {
+    for format in [
+        ContextFormat::Json,
+        ContextFormat::Toon,
+        ContextFormat::Plain,
+    ] {
         let config = Config {
             context_format: format,
             ..Default::default()
@@ -99,7 +106,11 @@ fn files_first_share_eight_chunks_and_three_per_page() {
 }
 #[test]
 fn oversized_sources_never_overflow_and_history_is_whole() {
-    for format in [ContextFormat::Json, ContextFormat::Toon] {
+    for format in [
+        ContextFormat::Json,
+        ContextFormat::Toon,
+        ContextFormat::Plain,
+    ] {
         for thinking in [false, true] {
             let config = Config {
                 context_format: format,

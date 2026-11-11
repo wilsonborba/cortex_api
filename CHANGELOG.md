@@ -123,6 +123,8 @@
 
 - Merge #68 refresh loyalty weights from read-only sources
 
+- Merge #84 use the approved ungated ONNX injection classifier
+
 
 ### Features
 
@@ -207,6 +209,8 @@
 - Refresh loyalty weights from read-only sources (#68)
 
 - Use the approved ungated ONNX injection classifier (#84)
+
+- Select the measured plain context default (#85)
 
 
 ### Tests

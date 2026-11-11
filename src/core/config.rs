@@ -195,7 +195,7 @@ impl Default for Config {
             shield_runtime_path:"models/onnxruntime/lib/libonnxruntime.so".into(),
             shield_threshold:0.5,
             shield_cpu_threads:2,
-            context_format: ContextFormat::Json,
+            context_format: ContextFormat::Plain,
             history_context_tokens:2000,
             memory_context_tokens:1500,
             memory_context_count:5,
@@ -318,6 +318,7 @@ impl Config {
 pub enum ContextFormat {
     Json,
     Toon,
+    Plain,
 }
 
 #[derive(Debug, Clone, Copy)]
