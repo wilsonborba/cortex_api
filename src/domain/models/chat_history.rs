@@ -35,8 +35,14 @@ pub struct OutputDetails {
     pub memories: Vec<Memory>,
 }
 #[derive(Serialize)]
-pub struct ChatPage {
+pub struct ChatWithMemory {
+    #[serde(flatten)]
     pub chat: Chat,
+    pub memory_node_id: Option<String>,
+}
+#[derive(Serialize)]
+pub struct ChatPage {
+    pub chat: ChatWithMemory,
     pub inputs: Vec<ChatInput>,
     pub outputs: Vec<OutputDetails>,
 }
