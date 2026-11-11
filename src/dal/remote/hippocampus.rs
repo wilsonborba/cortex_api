@@ -1,6 +1,7 @@
 use crate::{
     core::config::Config,
     domain::models::{
+        exchange_memory::Exchange,
         extraction::DocumentFile,
         files::{FileContent, FileMemory},
         memory_graph::GraphError,
@@ -24,6 +25,16 @@ struct ExchangeMemory<'a> {
     user_id: Option<&'a str>,
     title: &'a str,
     content: String,
+    resources: [ChatResource<'a>; 1],
+    tags: Vec<&'a str>,
+}
+#[derive(Serialize)]
+struct ChatResource<'a> {
+    resource_type: &'static str,
+    source_system: &'static str,
+    external_id: String,
+    title: &'a str,
+    relationship: &'static str,
 }
 #[derive(Serialize)]
 struct Search<'a> {
@@ -118,10 +129,9 @@ impl Hippocampus {
     pub async fn create_exchange(
         &self,
         scope: &AppUser,
-        title: &str,
-        input: &str,
-        output: &str,
+        exchange: &Exchange<'_>,
     ) -> Result<String, HippoUnavailable> {
+        let title = exchange.memory_title();
         let body = ExchangeMemory {
             workspace_id: &self.workspace,
             app_id: &scope.app_id,
@@ -130,8 +140,20 @@ impl Hippocampus {
             } else {
                 Some(&scope.user_id)
             },
-            title,
-            content: format!("Input:\n{input}\n\nAnswer:\n{output}"),
+            title: &title,
+            content: format!("Input:\n{}\n\nAnswer:\n{}", exchange.input, exchange.output),
+            resources: [ChatResource {
+                resource_type: "chat",
+                source_system: "cortex",
+                external_id: exchange.session.to_string(),
+                title: exchange.chat_title,
+                relationship: "created_in",
+            }],
+            tags: exchange
+                .topic
+                .filter(|t| !t.trim().is_empty())
+                .into_iter()
+                .collect(),
         };
         let url = self
             .base

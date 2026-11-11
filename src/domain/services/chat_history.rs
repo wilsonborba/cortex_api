@@ -3,7 +3,7 @@ use crate::{
         config::Config,
         process_numbers::{self, ProcessNumber},
     },
-    dal::local::chats::Chats,
+    dal::{local::chats::Chats, remote::hippocampus::Hippocampus},
     domain::models::{
         chat_history::*,
         events::{Memory, Source},
@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub struct ChatHistory {
     pub repo: Chats,
     pub config: Config,
+    pub hippocampus: Hippocampus,
 }
 fn error(error: StorageError) -> ProcessNumber {
     match error {
@@ -107,8 +108,48 @@ impl ChatHistory {
                 outputs.push(self.details(&scope, output).await?);
             }
         }
+        let mut memory_node_id = None;
+        // Context reads do not create resources. A remote outage must not hide SQL history.
+        for memory in self
+            .repo
+            .exchange_memory_ids(&scope, session)
+            .await
+            .map_err(error)?
+        {
+            let root = format!("memory:{memory}");
+            match self
+                .hippocampus
+                .graph(&scope, Some(&root), Some(1), Some(0))
+                .await
+            {
+                Ok(graph) => {
+                    memory_node_id = graph["nodes"]
+                        .as_array()
+                        .and_then(|nodes| {
+                            nodes.iter().find(|node| {
+                                node["node_type"] == "chat"
+                                    && node["metadata"]["source_system"] == "cortex"
+                                    && node["metadata"]["external_id"] == session.to_string()
+                                    && node["id"]
+                                        .as_str()
+                                        .is_some_and(|id| id.starts_with("resource:"))
+                            })
+                        })
+                        .and_then(|node| node["id"].as_str())
+                        .map(str::to_owned);
+                    if memory_node_id.is_some() {
+                        break;
+                    }
+                }
+                Err(crate::domain::models::memory_graph::GraphError::NotFound) => continue,
+                Err(_) => break,
+            }
+        }
         Ok(ChatPage {
-            chat,
+            chat: ChatWithMemory {
+                chat,
+                memory_node_id,
+            },
             inputs,
             outputs,
         })

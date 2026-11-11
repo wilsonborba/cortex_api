@@ -26,7 +26,12 @@ pub fn router(repo: Chats, config: Config) -> Router {
         .route("/chats", get(list))
         .route("/chats/{session_id}", get(page).patch(patch))
         .route("/chats/{session_id}/outputs/{output_id}", get(output))
-        .with_state(ChatHistory { repo, config })
+        .with_state(ChatHistory {
+            repo,
+            hippocampus: crate::dal::remote::hippocampus::Hippocampus::new(&config)
+                .expect("validated Hippocampus configuration"),
+            config,
+        })
 }
 fn failure(process: ProcessNumber) -> Response {
     let status = match process.number {

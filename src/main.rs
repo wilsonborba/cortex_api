@@ -177,6 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         pool: chat_pool.clone(),
                     },
                     config: config.clone(),
+                    hippocampus: hippocampus.clone(),
                 },
                 hippocampus: hippocampus.clone(),
             },

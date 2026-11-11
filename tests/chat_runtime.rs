@@ -1217,6 +1217,7 @@ fn full_app(rt: &Arc<ChatRuntime>) -> Router {
                     history: cortex_api::domain::services::chat_history::ChatHistory {
                         repo: rt.chats.clone(),
                         config: rt.config.clone(),
+                        hippocampus: hippocampus.clone(),
                     },
                     hippocampus,
                 },

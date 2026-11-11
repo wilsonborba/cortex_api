@@ -102,6 +102,7 @@ async fn hippocampus_first_then_sql_failure_keeps_chat_repeat_and_other_user() {
         history: ChatHistory {
             repo: repo.clone(),
             config: config.clone(),
+            hippocampus: Hippocampus::new(&config).unwrap(),
         },
         hippocampus: Hippocampus::new(&Config {
             hippocampus_url: url,
