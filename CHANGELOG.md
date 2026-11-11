@@ -1,6 +1,23 @@
 # Changelog
 
 
+## Unreleased
+
+
+### Bug Fixes
+
+- Use canonical memory context ids (#117)
+
+
+### Chores
+
+- Merge v2.1.0 back to release/v2.1.0
+
+- Merge v2.1.0 back to development
+
+- Merge v2.1.0 back to feature/main
+
+
 ## v2.1.0 - 2026-11-11
 
 
@@ -11,6 +28,14 @@
 - Merge v2.0.0 back to development
 
 - Merge v2.0.0 back to feature/main
+
+- Prepare v2.1.0
+
+- Merge v2.1.0 preparation
+
+- Prepare development for v2.1.0
+
+- Release v2.1.0
 
 
 ### Features

@@ -80,6 +80,10 @@ async fn create(State(state): State<Double>, Json(body): Json<Value>) -> Respons
     }
 }
 async fn graph(State(state): State<Double>, Path(root): Path<String>) -> Response {
+    assert!(
+        !root.starts_with("memory:"),
+        "memory context ids are unprefixed in the graph contract"
+    );
     let mode = state.mode.load(Ordering::SeqCst);
     if mode == 1 {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
