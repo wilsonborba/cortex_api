@@ -116,10 +116,9 @@ impl ChatHistory {
             .await
             .map_err(error)?
         {
-            let root = format!("memory:{memory}");
             match self
                 .hippocampus
-                .graph(&scope, Some(&root), Some(1), Some(0))
+                .graph(&scope, Some(&memory), Some(1), Some(0))
                 .await
             {
                 Ok(graph) => {
