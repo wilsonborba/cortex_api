@@ -1,7 +1,7 @@
 # Changelog
 
 
-## v2.0.0 - 2026-11-11
+## Unreleased
 
 
 ### Bug Fixes
@@ -13,6 +13,8 @@
 - Expected-time-first-event (#91)
 
 - Admin-event-user (#113)
+
+- Restore-authorized-prompt-guard (#115)
 
 
 ### Chores
@@ -128,6 +130,10 @@
 - Merge #85 select the measured plain context default
 
 - Merge #106 prepare the Rust production runtime and service scripts
+
+- Prepare v2.0.0 (#106)
+
+- Merge #106 v2.0.0 preparation
 
 
 ### Features

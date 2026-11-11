@@ -5,8 +5,8 @@ use crate::{
 use ort::{ep, session::Session, value::Tensor};
 use std::sync::Mutex;
 use tokenizers::{Encoding, PostProcessor, Tokenizer, TruncationDirection};
-/// ProtectAI DeBERTa prompt injection export: int64 input_ids, attention_mask and optional
-/// token_type_ids; float32 logits [1,2], ordered SAFE, INJECTION. CPU only.
+/// Prompt Guard 2 binary DeBERTa export: int64 input_ids, attention_mask and optional
+/// token_type_ids; float32 logits [1,2], ordered BENIGN, MALICIOUS. CPU only.
 pub struct OnnxInjectionClassifier {
     tokenizer: Tokenizer,
     session: Mutex<Session>,
@@ -85,7 +85,7 @@ impl OnnxInjectionClassifier {
         Ok(probability)
     }
 }
-/// Stable two-class softmax. Index 1 is INJECTION in the ProtectAI model.
+/// Stable two-class softmax. Index 1 is MALICIOUS in Prompt Guard 2.
 pub fn malicious_probability(logits: [f32; 2]) -> f32 {
     let max = logits[0].max(logits[1]);
     let benign = (logits[0] - max).exp();
