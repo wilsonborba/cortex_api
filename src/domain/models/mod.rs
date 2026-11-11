@@ -41,3 +41,5 @@ pub mod temporary;
 pub mod thinking;
 
 pub mod loyalty;
+
+pub mod exchange_memory;

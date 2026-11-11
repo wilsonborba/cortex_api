@@ -154,6 +154,13 @@ impl Chats {
         Ok(sqlx::query_as("SELECT * FROM chats WHERE user_id=$1 ORDER BY is_pinned DESC,updated_at DESC,session_id DESC").bind(user).fetch_all(&self.pool).await?)
     }
     /// Exchange and file memories of the chat (19.3).
+    pub async fn exchange_memory_ids(
+        &self,
+        scope: &AppUser,
+        session: Uuid,
+    ) -> Result<Vec<String>, StorageError> {
+        Ok(sqlx::query_scalar("SELECT DISTINCT o.memory_id FROM chat_outputs o JOIN chats c USING(session_id) WHERE c.session_id=$1 AND c.app_id=$2 AND c.user_id=$3 AND o.memory_id IS NOT NULL ORDER BY o.memory_id").bind(session).bind(&scope.app_id).bind(&scope.user_id).fetch_all(&self.pool).await?)
+    }
     pub async fn chat_memory_ids(
         &self,
         scope: &AppUser,

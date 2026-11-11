@@ -1,9 +1,11 @@
 use axum::{
     Json, Router,
-    extract::State,
+    body::{Body, to_bytes},
+    extract::{Path, State},
+    http::Request,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use cortex_api::{
     core::config::Config,
@@ -17,6 +19,7 @@ use cortex_api::{
     domain::{
         models::{
             chat_session::{NewChat, PreparedInput},
+            exchange_memory::Exchange,
             history::{FinishedOutput, FinishedStatus},
             identity::Caller,
             storage::AppUser,
@@ -32,7 +35,17 @@ use std::{
     },
     time::Duration,
 };
+use tower::ServiceExt;
 use uuid::Uuid;
+fn exchange(input: &str) -> Exchange<'_> {
+    Exchange {
+        session: Uuid::nil(),
+        chat_title: "Title",
+        input,
+        output: "answer",
+        topic: Some("research"),
+    }
+}
 #[derive(Clone, Default)]
 struct Double {
     calls: Arc<Mutex<Vec<Value>>>,
@@ -66,6 +79,42 @@ async fn create(State(state): State<Double>, Json(body): Json<Value>) -> Respons
         }
     }
 }
+async fn graph(State(state): State<Double>, Path(root): Path<String>) -> Response {
+    let mode = state.mode.load(Ordering::SeqCst);
+    if mode == 1 {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    if mode == 6 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let body = state.calls.lock().unwrap()[0].clone();
+    let mut resource = body["resources"][0].clone();
+    if mode == 5 {
+        resource["external_id"] = json!(Uuid::nil());
+    }
+    let memory = json!({"id":root,"node_type":"memory","label":"Synthetic exchange","metadata":{
+        "workspace_id":body["workspace_id"],"app_id":body["app_id"],"user_id": if mode == 4 { json!("other-user") } else { body["user_id"].clone() }
+    }});
+    Json(json!({"data":{"node":memory,"nodes":[memory,{
+        "id":"resource:synthetic-chat","node_type":"chat","label":"Synthetic chat","metadata":resource
+    }],"edges":[]}})).into_response()
+}
+async fn page(app: &Router, session: Uuid, user: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/chats/{session}"))
+                .header("x-uuid", user)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    (status, body)
+}
 async fn server() -> (Double, Config, tokio::task::JoinHandle<()>) {
     let state = Double::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -75,6 +124,7 @@ async fn server() -> (Double, Config, tokio::task::JoinHandle<()>) {
     };
     let app = Router::new()
         .route("/api/v1/memories", post(create))
+        .route("/api/v1/graph/nodes/{root}", get(graph))
         .with_state(state.clone());
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -92,7 +142,7 @@ async fn json_scope_content_and_failed_responses() {
     };
     assert_eq!(
         client
-            .create_exchange(&scope, "Title", "question", "answer")
+            .create_exchange(&scope, &exchange("question"))
             .await
             .unwrap(),
         "memory-1"
@@ -100,14 +150,14 @@ async fn json_scope_content_and_failed_responses() {
     let body = state.calls.lock().unwrap()[0].clone();
     assert_eq!(
         body,
-        json!({"workspace_id":"cortex","app_id":"cortex","user_id":"user-a","title":"Title","content":"Input:\nquestion\n\nAnswer:\nanswer"})
+        json!({"workspace_id":"cortex","app_id":"cortex","user_id":"user-a","title":"question","content":"Input:\nquestion\n\nAnswer:\nanswer","tags":["research"],"resources":[{"resource_type":"chat","source_system":"cortex","external_id":Uuid::nil().to_string(),"title":"Title","relationship":"created_in"}]})
     );
     let a2a = AppUser {
         app_id: "certifications".into(),
         user_id: String::new(),
     };
     client
-        .create_exchange(&a2a, "Title", "question", "answer")
+        .create_exchange(&a2a, &exchange("question"))
         .await
         .unwrap();
     assert!(state.calls.lock().unwrap()[1]["user_id"].is_null());
@@ -115,12 +165,21 @@ async fn json_scope_content_and_failed_responses() {
         state.mode.store(mode, Ordering::SeqCst);
         assert!(
             client
-                .create_exchange(&scope, "Title", "question", "answer")
+                .create_exchange(&scope, &exchange("question"))
                 .await
                 .is_err()
         );
     }
     assert_eq!(state.calls.lock().unwrap().len(), 5);
+    state.mode.store(0, Ordering::SeqCst);
+    client
+        .create_exchange(&scope, &exchange(" \n "))
+        .await
+        .unwrap();
+    assert_eq!(
+        state.calls.lock().unwrap().last().unwrap()["title"],
+        "Title"
+    );
     task.abort();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let config = Config {
@@ -136,7 +195,7 @@ async fn json_scope_content_and_failed_responses() {
     assert!(
         tokio::time::timeout(
             Duration::from_secs(1),
-            client.create_exchange(&scope, "Title", "q", "a")
+            client.create_exchange(&scope, &exchange("q"))
         )
         .await
         .unwrap()
@@ -206,6 +265,15 @@ async fn one_memory_per_done_exchange_mapping_temporary_and_failure() {
     };
     let scope = actor.storage_scope();
     let first = output(&repo, &config, &actor, "question", FinishedStatus::Done).await;
+    let app = cortex_api::presentation::chats::router(repo.clone(), config.clone());
+    let (status, history) = page(&app, first.input.session_id, "user-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(history["data"]["chat"]["memory_node_id"].is_null());
+    sqlx::query("UPDATE chat_inputs SET memory_topic='research' WHERE input_id=$1")
+        .bind(first.input.input_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let (left, right) = tokio::join!(
         service.remember(
             &scope,
@@ -224,6 +292,14 @@ async fn one_memory_per_done_exchange_mapping_temporary_and_failure() {
     assert_eq!(right.memory_id, left.memory_id);
     assert!(left.notice.is_none() && right.notice.is_none());
     assert_eq!(state.calls.lock().unwrap().len(), 1);
+    let body = state.calls.lock().unwrap()[0].clone();
+    assert_eq!(body["title"], "question");
+    assert_eq!(body["tags"], json!(["research"]));
+    assert_eq!(
+        body["resources"][0]["external_id"],
+        first.input.session_id.to_string()
+    );
+    assert_eq!(body["resources"][0]["relationship"], "created_in");
     assert_eq!(
         repo.output(&scope, first.output.output_id)
             .await
@@ -233,6 +309,23 @@ async fn one_memory_per_done_exchange_mapping_temporary_and_failure() {
             .as_deref(),
         Some("memory-1")
     );
+    let (status, history) = page(&app, first.input.session_id, "user-a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        history["data"]["chat"]["memory_node_id"],
+        "resource:synthetic-chat"
+    );
+    assert_eq!(
+        page(&app, first.input.session_id, "user-b").await.0,
+        StatusCode::NOT_FOUND
+    );
+    for mode in [1, 4, 5, 6] {
+        state.mode.store(mode, Ordering::SeqCst);
+        let (status, history) = page(&app, first.input.session_id, "user-a").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(history["data"]["chat"]["memory_node_id"].is_null());
+    }
+    state.mode.store(0, Ordering::SeqCst);
     let repeat = service
         .remember(
             &scope,

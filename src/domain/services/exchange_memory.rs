@@ -1,7 +1,7 @@
 use crate::{
     core::process_numbers::{self, ProcessNumber},
     dal::{local::chats::Chats, remote::hippocampus::Hippocampus},
-    domain::models::storage::AppUser,
+    domain::models::{exchange_memory::Exchange, storage::AppUser},
 };
 use uuid::Uuid;
 #[derive(Clone)]
@@ -69,9 +69,13 @@ impl ExchangeMemories {
             .hippocampus
             .create_exchange(
                 scope,
-                assignment.title(),
-                assignment.input(),
-                assignment.output(),
+                &Exchange {
+                    session,
+                    chat_title: assignment.title(),
+                    input: assignment.input(),
+                    output: assignment.output(),
+                    topic: assignment.topic(),
+                },
             )
             .await
             .map_err(|_| ())?;
