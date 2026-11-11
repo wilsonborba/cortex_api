@@ -407,28 +407,36 @@ identity, a failed ledger and values read from real Valkey buckets.
 
 ### Rust v2 input security
 
-The v2 shield uses normalized Rust rules and Prompt Guard 2 22M on CPU.
+The v2 shield uses normalized Rust rules and the ProtectAI DeBERTa prompt
+injection classifier on CPU.
 There is no skip flag. Missing classifier files reject the security check with
 process 1015. A blocked input returns process 1014 and the aligned block message.
 File and web checks drop failed chunks. The persona check scans saved text fields.
-Chat and persona route integration is still open.
+Chat, source chunks and persona routes use the same shield.
 
 The model, tokenizer and CPU runtime paths and threshold are in `src/core/config.rs`.
 The ONNX export must expose int64 `input_ids`, `attention_mask` and optionally
-`token_type_ids`, plus float32 `logits` with shape `[1, 2]`, ordered BENIGN,
-MALICIOUS. Each window has at most 512 tokens, with 64 tokens of overlap.
+`token_type_ids`, plus float32 `logits` with shape `[1, 2]`, ordered SAFE,
+INJECTION. Each window has at most 512 tokens, with 64 tokens of overlap.
 The adapter adds the tokenizer's special tokens to each window. Runtime 1.24 is
 loaded from the configured local path. Model files and runtime files stay in the
 ignored `models/` directory.
 
-Model access is gated. The night run token returned HTTP 403. Real model CPU
-speed has not been measured. After access and export, run
-`cargo test --test security measure_real_prompt_guard_cpu -- --ignored`.
-The report goes to ignored `docs/prompt-guard-cpu.md`.
+The model is [protectai/deberta-v3-base-prompt-injection-v2](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2),
+under Apache-2.0. The publisher ONNX export and tokenizer are used directly.
+The publisher supports English prompt injection only and has archived the project.
+It does not claim non-English or jailbreak detection. The deterministic rules still
+cover English, Portuguese and Thai. Synthetic smoke tests report scores and misses;
+they do not establish detection quality for all attacks.
+
+Run `cargo test --test security measure_real_classifier_cpu -- --ignored`
+with the real files installed. Reports go to ignored
+`docs/injection-classifier-cpu.md` and `.json`. The local model manifest records
+the pinned publisher revision and SHA256 hashes. There is no gated download.
 The tiny ONNX fixture in `tests/fixtures/` is only a transport test double.
 It is not a replacement classifier.
 
 Rule sources: [Vigil](https://github.com/deadbits/vigil-llm/tree/main/data/yara)
-and the [Meta model card](https://github.com/meta-llama/PurpleLlama/blob/main/Llama-Prompt-Guard-2/22M/MODEL_CARD.md).
+and the [ProtectAI model card](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2).
 The English Vigil patterns were adapted. The Portuguese and Thai patterns were
 added for the aligned languages. The Vigil license is in `LICENSES/`.

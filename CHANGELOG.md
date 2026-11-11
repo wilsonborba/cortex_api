@@ -121,6 +121,8 @@
 
 - Merge #113 admin-event-user
 
+- Merge #68 refresh loyalty weights from read-only sources
+
 
 ### Features
 
@@ -203,6 +205,8 @@
 - File-worker-job-locations (#80)
 
 - Refresh loyalty weights from read-only sources (#68)
+
+- Use the approved ungated ONNX injection classifier (#84)
 
 
 ### Tests
