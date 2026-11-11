@@ -5,20 +5,20 @@ use crate::{
 use ort::{ep, session::Session, value::Tensor};
 use std::sync::Mutex;
 use tokenizers::{Encoding, PostProcessor, Tokenizer, TruncationDirection};
-/// Local Prompt Guard 2 22M export: int64 input_ids, attention_mask and optional
-/// token_type_ids; float32 logits [1,2], ordered BENIGN, MALICIOUS. CPU only.
-pub struct PromptGuard {
+/// ProtectAI DeBERTa prompt injection export: int64 input_ids, attention_mask and optional
+/// token_type_ids; float32 logits [1,2], ordered SAFE, INJECTION. CPU only.
+pub struct OnnxInjectionClassifier {
     tokenizer: Tokenizer,
     session: Mutex<Session>,
 }
-impl PromptGuard {
+impl OnnxInjectionClassifier {
     pub fn load(config: &Config) -> Result<Self, ClassifierUnavailable> {
         let load = || -> Result<Self, Box<dyn std::error::Error>> {
             if !config.shield_model_path.is_file()
                 || !config.shield_tokenizer_path.is_file()
                 || !config.shield_runtime_path.is_file()
             {
-                return Err("Prompt Guard files unavailable".into());
+                return Err("Injection classifier files unavailable".into());
             }
             ort::init_from(&config.shield_runtime_path)?.commit();
             let mut tokenizer = Tokenizer::from_file(&config.shield_tokenizer_path)
@@ -39,7 +39,7 @@ impl PromptGuard {
                     .any(|n| !matches!(*n, "input_ids" | "attention_mask" | "token_type_ids"))
                 || !session.outputs().iter().any(|v| v.name() == "logits")
             {
-                return Err("Prompt Guard export contract mismatch".into());
+                return Err("Injection classifier export contract mismatch".into());
             }
             Ok(Self {
                 tokenizer,
@@ -85,14 +85,14 @@ impl PromptGuard {
         Ok(probability)
     }
 }
-/// Stable two-class softmax. Index 1 is MALICIOUS in Prompt Guard 2.
+/// Stable two-class softmax. Index 1 is INJECTION in the ProtectAI model.
 pub fn malicious_probability(logits: [f32; 2]) -> f32 {
     let max = logits[0].max(logits[1]);
     let benign = (logits[0] - max).exp();
     let malicious = (logits[1] - max).exp();
     malicious / (benign + malicious)
 }
-impl InjectionClassifier for PromptGuard {
+impl InjectionClassifier for OnnxInjectionClassifier {
     fn probability(&self, text: &str) -> Result<f32, ClassifierUnavailable> {
         // Encode the complete input before splitting. Early tokenizer truncation
         // can discard overflow. Add the model special tokens to every window.
@@ -124,7 +124,7 @@ impl InjectionClassifier for PromptGuard {
         Ok(probability)
     }
 }
-/// Used when the Prompt Guard files cannot load. Every check fails closed (9.5).
+/// Used when the classifier files cannot load. Every check fails closed (9.5).
 pub struct MissingClassifier;
 impl InjectionClassifier for MissingClassifier {
     fn probability(&self, _: &str) -> Result<f32, ClassifierUnavailable> {

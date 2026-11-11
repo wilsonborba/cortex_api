@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dal::{
                 local::{
                     chats::Chats,
-                    prompt_guard::{MissingClassifier, PromptGuard},
+                    injection_classifier::{MissingClassifier, OnnxInjectionClassifier},
                 },
                 remote::{
                     cache::RedisCache, event_journal::EventJournal, ollama::Ollama,
@@ -61,13 +61,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             },
         };
-        let classifier: std::sync::Arc<dyn InjectionClassifier> = match PromptGuard::load(&config) {
-            Ok(guard) => std::sync::Arc::new(guard),
-            Err(_) => {
-                tracing::warn!("Prompt Guard is not available; every input is refused");
-                std::sync::Arc::new(MissingClassifier)
-            }
-        };
+        let classifier: std::sync::Arc<dyn InjectionClassifier> =
+            match OnnxInjectionClassifier::load(&config) {
+                Ok(guard) => std::sync::Arc::new(guard),
+                Err(_) => {
+                    tracing::warn!("Injection classifier is not available; every input is refused");
+                    std::sync::Arc::new(MissingClassifier)
+                }
+            };
         let shield = std::sync::Arc::new(
             SecurityShield::new(&config, classifier)
                 .map_err(|_| "The shield config is not valid")?,

@@ -1,7 +1,7 @@
 pub mod chats;
 pub mod database;
 
-pub mod prompt_guard;
+pub mod injection_classifier;
 pub mod whisper;
 
 pub mod documents;
