@@ -1,6 +1,250 @@
 # Changelog
 
 
+## v2.0.0 - 2026-11-11
+
+
+### Bug Fixes
+
+- Measurement-image (#70)
+
+- Context-reserves (#71)
+
+- Expected-time-first-event (#91)
+
+- Admin-event-user (#113)
+
+- Restore-authorized-prompt-guard (#115)
+
+- Preserve-temporary-images-for-vision (#116)
+
+
+### Chores
+
+- Merge v1.0.0 back to release
+
+- Merge v1.0.0 back to development
+
+- Merge v1.0.0 back to feature/main
+
+- Add Rust project skeleton (#65)
+
+- Merge #65 add Rust project skeleton
+
+- Add response structure and process numbers (#66)
+
+- Merge #66 add response structure and process numbers
+
+- Merge #99 redis-foundation
+
+- Merge #92 postgres-storage
+
+- Merge #101 run-records
+
+- Merge #102 app-user-attribution
+
+- Merge #67 usage-balancer
+
+- Merge #70 ollama-driver
+
+- Merge #70 measurement-image
+
+- Merge #71 input-token-guard
+
+- Merge #71 context-reserves
+
+- Merge #69 user-usage
+
+- Merge #82 fixed-stages
+
+- Merge #83 context-assembly
+
+- Merge #84 security-shield
+
+- Merge #86 native-sse-events
+
+- Merge #87 redis-event-journal
+
+- Merge #97 atomic-chat-inputs
+
+- Merge #93 history-storage-cache
+
+- Merge #94 scoped-history-routes
+
+- Merge #95 exchange-memory-save
+
+- Merge #72 key-free-search-adapters
+
+- Merge #73 bounded-page-reader
+
+- Merge #74 fast-web-gather
+
+- Merge #75 bounded-query-rewrite
+
+- Merge #76 bounded-web-traversal
+
+- Merge #77 scoped-memory-recall
+
+- Merge #78 document-extraction
+
+- Merge #98 redis-temporary-chats
+
+- Merge #88 bounded-thinking
+
+- Merge #89 private-standard-logs
+
+- Merge #90 run-evidence-retention
+
+- Merge #91 scoped-telemetry
+
+- Merge #96 scoped-memory-graph
+
+- Merge #81 file-proxy
+
+- Merge #97 chat-runtime
+
+- Merge #87 #88 reconnect-cancel-stop-thinking
+
+- Merge #100 chat-delete
+
+- Merge #104 persona-routes
+
+- Merge #102 a2a-chat-inputs
+
+- Merge #105 personas-in-context
+
+- Merge #99 redis-down-consumers
+
+- Merge #103 user-isolation
+
+- Merge #91 expected-time-first-event
+
+- Merge #79 audio-transcription-and-vision-images
+
+- Merge #80 file-worker-job-locations
+
+- Merge #113 admin-event-user
+
+- Merge #68 refresh loyalty weights from read-only sources
+
+- Merge #84 use the approved ungated ONNX injection classifier
+
+- Merge #85 select the measured plain context default
+
+- Merge #106 prepare the Rust production runtime and service scripts
+
+- Prepare v2.0.0 (#106)
+
+- Merge #106 v2.0.0 preparation
+
+- Merge #115 restore-authorized-prompt-guard
+
+- Merge #116 preserve-temporary-images-for-vision
+
+- Prepare development for v2.0.0
+
+
+### Features
+
+- Redis-foundation (#99)
+
+- Postgres-storage (#92)
+
+- Run-records (#101)
+
+- App-user-attribution (#102)
+
+- Usage-balancer (#67)
+
+- Ollama-driver (#70)
+
+- Input-token-guard (#71)
+
+- User-usage (#69)
+
+- Fixed-stages (#82)
+
+- Context-assembly (#83)
+
+- Security-shield (#84)
+
+- Native-sse-events (#86)
+
+- Redis-event-journal (#87)
+
+- Atomic-chat-inputs (#97)
+
+- History-storage-cache (#93)
+
+- Scoped-history-routes (#94)
+
+- Exchange-memory-save (#95)
+
+- Key-free-search-adapters (#72)
+
+- Bounded-page-reader (#73)
+
+- Fast-web-gather (#74)
+
+- Bounded-query-rewrite (#75)
+
+- Bounded-web-traversal (#76)
+
+- Scoped-memory-recall (#77)
+
+- Document-extraction (#78)
+
+- Redis-temporary-chats (#98)
+
+- Bounded-thinking (#88)
+
+- Private-standard-logs (#89)
+
+- Run-evidence-retention (#90)
+
+- Scoped-telemetry (#91)
+
+- Scoped-memory-graph (#96)
+
+- File-proxy (#81)
+
+- Chat-runtime (#97)
+
+- Reconnect-cancel-stop-thinking (#87, #88)
+
+- Chat-delete (#100)
+
+- Persona-routes (#104)
+
+- A2a-chat-inputs (#102)
+
+- Personas-in-context (#105)
+
+- Audio-transcription-and-vision-images (#79)
+
+- File-worker-job-locations (#80)
+
+- Refresh loyalty weights from read-only sources (#68)
+
+- Use the approved ungated ONNX injection classifier (#84)
+
+- Select the measured plain context default (#85)
+
+- Prepare the Rust production runtime and service scripts (#106)
+
+
+### Tests
+
+- Redis-down-consumers (#99)
+
+- User-isolation (#103)
+
+
+### wip
+
+- Audio transcription and images to vision model (#79)
+
+
 ## v1.0.0 - 2026-11-09
 
 
@@ -25,6 +269,17 @@
 - Turn conversation tags into cluster nodes instead of dropping them
 
 - Filter the meaningless general:general topic tag from the graph
+
+
+### Chores
+
+- Prepare v1.0.0 (#64)
+
+- Consolidate v1.0.0
+
+- Prepare development for v1.0.0
+
+- Release v1.0.0
 
 
 ### Features

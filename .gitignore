@@ -34,3 +34,11 @@ var/whisper-models/
 .DS_Store
 .idea/
 .vscode/
+
+/target
+/docs/
+.env
+
+/models/
+
+/var/systemd/

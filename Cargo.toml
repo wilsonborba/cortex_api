@@ -1,0 +1,42 @@
+[package]
+name = "cortex-api"
+default-run = "cortex-api"
+version = "2.0.0"
+edition = "2024"
+
+[dependencies]
+futures-util = "0.3"
+axum = { version = "0.8", features = ["ws", "multipart"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+redis = { version = "0.32", features = ["tokio-comp", "connection-manager"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "uuid"] }
+tokio = { version = "1", features = ["full"] }
+whisper-rs = { version = "0.16", features = ["cuda"] }
+base64 = "0.22"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+toon-format = { version = "0.6.1", default-features = false }
+regex = "1.13.1"
+unicode-normalization = "0.1.26"
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-24"] }
+scraper = "0.29.0"
+url = "2.5.8"
+dom_smoothie = "0.18"
+text-splitter = "0.27"
+bm25 = { version = "2.3.2", features = ["language_detection"] }
+texting_robots = "0.2"
+pdfium-render = "=0.9.5"
+docx-rs = "=0.4.22"
+tesseract = "=0.15.2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
