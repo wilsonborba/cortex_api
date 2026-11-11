@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v2.0.0 - 2026-11-11
 
 
 ### Bug Fixes
@@ -126,6 +126,8 @@
 - Merge #84 use the approved ungated ONNX injection classifier
 
 - Merge #85 select the measured plain context default
+
+- Merge #106 prepare the Rust production runtime and service scripts
 
 
 ### Features
