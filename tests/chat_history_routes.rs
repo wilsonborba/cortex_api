@@ -81,7 +81,12 @@ async fn routes_order_page_rename_pin_and_refuse_other_users_even_admins() {
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
     let repo = Chats { pool: pool.clone() };
-    let config = Config::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = Config {
+        hippocampus_url: format!("http://{}", listener.local_addr().unwrap()),
+        ..Default::default()
+    };
+    let remote = tokio::spawn(async move { axum::serve(listener, Router::new()).await.unwrap() });
     let a = actor("user-a");
     let b = actor("user-b");
     let now = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
@@ -279,6 +284,7 @@ async fn routes_order_page_rename_pin_and_refuse_other_users_even_admins() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error["data"]["error_number"], 1003);
+    remote.abort();
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)

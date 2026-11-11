@@ -9,6 +9,7 @@ struct ExchangeRow {
     output_id: Uuid,
     title: String,
     input_text: String,
+    memory_topic: Option<String>,
     output_text: String,
     memory_id: Option<String>,
     status: String,
@@ -23,6 +24,9 @@ impl MemoryAssignment {
     }
     pub fn input(&self) -> &str {
         &self.row.input_text
+    }
+    pub fn topic(&self) -> Option<&str> {
+        self.row.memory_topic.as_deref()
     }
     pub fn output(&self) -> &str {
         &self.row.output_text
@@ -54,7 +58,7 @@ impl Chats {
         let mut tx = self.pool.begin().await?;
         // Lock the parent too. Chat deletion must take this same parent lock
         // before it reads memory IDs, so it cannot miss an assignment.
-        let row:ExchangeRow=sqlx::query_as("SELECT o.output_id,c.title,i.text AS input_text,o.text AS output_text,o.memory_id,o.status FROM chats c JOIN chat_outputs o USING(session_id) JOIN chat_inputs i ON i.input_id=o.input_id WHERE c.session_id=$1 AND c.app_id=$2 AND c.user_id=$3 AND o.output_id=$4 FOR UPDATE OF c,o").bind(session).bind(&scope.app_id).bind(&scope.user_id).bind(output).fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
+        let row:ExchangeRow=sqlx::query_as("SELECT o.output_id,c.title,i.text AS input_text,i.memory_topic,o.text AS output_text,o.memory_id,o.status FROM chats c JOIN chat_outputs o USING(session_id) JOIN chat_inputs i ON i.input_id=o.input_id WHERE c.session_id=$1 AND c.app_id=$2 AND c.user_id=$3 AND o.output_id=$4 FOR UPDATE OF c,o").bind(session).bind(&scope.app_id).bind(&scope.user_id).bind(output).fetch_optional(&mut *tx).await?.ok_or(StorageError::NotFound)?;
         if row.status != "done" {
             return Ok(None);
         }
