@@ -440,3 +440,12 @@ Rule sources: [Vigil](https://github.com/deadbits/vigil-llm/tree/main/data/yara)
 and the [ProtectAI model card](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2).
 The English Vigil patterns were adapted. The Portuguese and Thai patterns were
 added for the aligned languages. The Vigil license is in `LICENSES/`.
+
+### Rust v2 context formats
+
+Plain labelled text is the default selected by the real MSI context experiment
+in issue #85. JSON and TOON remain available in `Config::context_format`.
+Only the context sent to the model uses this setting. Service bodies stay JSON.
+The ignored `context_format_benchmark` runner uses the real chat router, CPU
+shield and MSI Ollama with fixed synthetic retrieval fixtures. Run it only in
+an owner-approved GPU window. Raw trials and the report stay in ignored docs.

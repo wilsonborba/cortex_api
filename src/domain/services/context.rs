@@ -12,6 +12,14 @@ pub fn encode(format: ContextFormat, texts: &[ContextText]) -> String {
     match format {
         ContextFormat::Json => serde_json::to_string(texts).expect("text values serialize"),
         ContextFormat::Toon => toon_format::encode_default(&texts).expect("text values encode"),
+        ContextFormat::Plain => texts
+            .iter()
+            .map(|text| match &text.source {
+                Some(source) => format!("[{}: {}] {}", text.label, source, text.text),
+                None => format!("[{}] {}", text.label, text.text),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 fn render(
