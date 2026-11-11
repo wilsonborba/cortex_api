@@ -164,7 +164,11 @@ impl Run {
                     history,
                     chat.files.iter().flat_map(|f| f.pages.clone()).collect(),
                 )
-                .with_persona(chat.persona_id.clone()));
+                .with_persona(chat.persona_id.clone())
+                .with_images(
+                    caller,
+                    chat.files.iter().filter_map(|f| f.image.clone()).collect(),
+                ));
         }
         let mut files = vec![];
         let mut images = vec![];

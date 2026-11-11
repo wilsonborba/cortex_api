@@ -68,6 +68,7 @@ struct Model {
     prompts: Mutex<Vec<String>>,
     /// (image count, model name) per call.
     images: Mutex<Vec<(usize, String)>>,
+    image_payloads: Mutex<Vec<Vec<String>>>,
 }
 impl ModelDriver for Model {
     fn call<'a>(
@@ -82,6 +83,10 @@ impl ModelDriver for Model {
                 .lock()
                 .unwrap()
                 .push(format!("{}\n{}", input.system, input.prompt));
+            self.image_payloads
+                .lock()
+                .unwrap()
+                .push(input.images.clone());
             self.images.lock().unwrap().push((
                 input.images.len(),
                 output.name(&Config::default()).to_owned(),
@@ -1454,6 +1459,103 @@ async fn two_users_and_an_admin_are_isolated_on_every_user_data_route() {
     }
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin_db)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires the approved test PostgreSQL and Valkey; only scoped temporary records are written"]
+async fn temporary_image_upload_and_followup_reach_vision_without_persistent_writes() {
+    use base64::Engine;
+    use cortex_api::domain::models::{
+        cache::CacheKey, extraction::DocumentFile, files::Upload, identity::Caller,
+    };
+    dotenvy::dotenv().ok();
+    let pool = database::connect(Target::Test).await.unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM chats WHERE user_id='alice'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let cache = RedisCache::from_environment();
+    let (log, address) = remote().await;
+    let model = Arc::new(Model::default());
+    let rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
+    let caller = Caller {
+        app_id: "cortex".into(),
+        user_id: Some("alice".into()),
+        is_admin: false,
+    };
+    let bytes = b"fixture png bytes".to_vec();
+    let expected = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let Upload::Saved(file) = rt
+        .files
+        .upload(
+            &caller,
+            DocumentFile {
+                name: "photo.png".into(),
+                content_type: "image/png".into(),
+                bytes: Arc::new(bytes),
+            },
+            true,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("temporary upload failed")
+    };
+    let file_id: Uuid = file.parse().unwrap();
+    assert_eq!(
+        rt.temporary
+            .file(&caller, file_id)
+            .await
+            .unwrap()
+            .image
+            .as_deref(),
+        Some(expected.as_str())
+    );
+    let other = Caller {
+        user_id: Some("bob".into()),
+        ..caller.clone()
+    };
+    assert!(rt.temporary.file(&other, file_id).await.is_err());
+    let (status, body) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"Read the image.","temporary":true,"file_ids":[file]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let body: Value = serde_json::from_str(&body).unwrap();
+    let session = body["data"]["session_id"].as_str().unwrap();
+    let (status, body) = call(
+        &rt,
+        &format!("/chats/{session}/inputs"),
+        Some("alice"),
+        json!({"text":"Read it again."}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        *model.images.lock().unwrap(),
+        vec![(1, Config::default().vision_model.clone()); 2]
+    );
+    assert_eq!(
+        *model.image_payloads.lock().unwrap(),
+        vec![vec![expected]; 2]
+    );
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM chats WHERE user_id='alice'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    assert!(!log.lock().unwrap().iter().any(|(kind, _)| kind == "memory"));
+    cache
+        .remove(&CacheKey::TemporaryChat(session.into()))
+        .await
+        .unwrap();
+    cache
+        .remove(&CacheKey::TemporaryChat(file_id.to_string()))
         .await
         .unwrap();
 }

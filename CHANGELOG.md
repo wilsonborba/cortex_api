@@ -16,6 +16,8 @@
 
 - Restore-authorized-prompt-guard (#115)
 
+- Preserve-temporary-images-for-vision (#116)
+
 
 ### Chores
 
@@ -134,6 +136,8 @@
 - Prepare v2.0.0 (#106)
 
 - Merge #106 v2.0.0 preparation
+
+- Merge #115 restore-authorized-prompt-guard
 
 
 ### Features
