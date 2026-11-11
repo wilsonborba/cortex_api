@@ -59,6 +59,7 @@ async fn redis_down_refuses_start_file_and_continue() {
     let file = TemporaryFile {
         file_id: Uuid::nil(),
         name: "sample.txt".into(),
+        image: None,
         pages: vec![],
     };
     assert_eq!(
@@ -91,6 +92,7 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
             TemporaryFile {
                 file_id: Uuid::nil(),
                 name: "sample.txt".into(),
+                image: None,
                 pages: vec![ContextText {
                     label: "sample.txt".into(),
                     source: None,
@@ -201,4 +203,12 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
     assert!(chats.append(&actor, id, next(), now).await.is_err());
     cache.remove(&key).await.unwrap();
     cache.remove(&file_key).await.unwrap();
+}
+
+#[test]
+fn older_temporary_text_files_remain_readable() {
+    let file: TemporaryFile =
+        serde_json::from_value(json!({"file_id":Uuid::nil(),"name":"old.txt","pages":[]})).unwrap();
+    assert!(file.image.is_none());
+    assert!(serde_json::to_value(file).unwrap().get("image").is_none());
 }

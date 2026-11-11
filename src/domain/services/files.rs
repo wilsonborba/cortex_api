@@ -53,7 +53,10 @@ impl FileProxy {
         // Upload has no output stream, so the progress events are dropped.
         let (events, _, _) = channel(&self.config, None);
         // Audio is transcribed (7.1); a failed transcription still saves the file (8.4).
-        let text = if is_audio(&file) {
+        let is_image = file.content_type.to_ascii_lowercase().starts_with("image/");
+        let text = if is_image {
+            String::new()
+        } else if is_audio(&file) {
             self.transcriber
                 .transcribe(caller, &file.name, file.bytes.clone(), &events)
                 .await
@@ -62,6 +65,9 @@ impl FileProxy {
             self.extractor.extract(file.clone(), &events).await.text()
         };
         if temporary {
+            use base64::Engine;
+            let image = is_image
+                .then(|| base64::engine::general_purpose::STANDARD.encode(file.bytes.as_slice()));
             let pages = (!text.is_empty())
                 .then(|| ContextText {
                     label: file.name.clone(),
@@ -78,6 +84,7 @@ impl FileProxy {
                         file_id: uuid::Uuid::nil(),
                         name: file.name,
                         pages,
+                        image,
                     },
                 )
                 .await?;

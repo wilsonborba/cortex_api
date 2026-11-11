@@ -6,12 +6,14 @@ use crate::domain::models::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Temporary file content is extracted text only. Raw bytes are never saved.
+/// Temporary text and optional vision payload stay only in the scoped Redis record.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TemporaryFile {
     pub file_id: Uuid,
     pub name: String,
     pub pages: Vec<ContextText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TemporaryOutput {
