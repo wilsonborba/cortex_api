@@ -1,6 +1,20 @@
 # Changelog
 
 
+## Unreleased
+
+
+### Chores
+
+- Merge v2.1.1 back to release/v2.1.1
+
+- Merge v2.1.1 back to development
+
+- Merge v2.1.1 back to feature/main
+
+- Add safe exchange repair command (#118)
+
+
 ## v2.1.1 - 2026-11-11
 
 
@@ -18,6 +32,14 @@
 - Merge v2.1.0 back to development
 
 - Merge v2.1.0 back to feature/main
+
+- Prepare v2.1.1
+
+- Merge v2.1.1 preparation
+
+- Prepare development for v2.1.1
+
+- Release v2.1.1
 
 
 ## v2.1.0 - 2026-11-11
