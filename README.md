@@ -13,9 +13,13 @@ Private credentials belong in `.env`. Non-secret settings belong in
 - `cargo run -- --production`: port 8003, production stores and Hippo port 8001.
 - `cargo run --bin migrate -- test`: explicit test database migrations.
 - `cargo run --bin migrate -- cortex`: explicit production Cortex migrations.
-- `./scripts/install.sh --prepare`: locked release build and system service file.
-- `./scripts/install.sh --activate`: administrator step, installs the prepared unit
-  and restarts the existing service. Run only in the coordinated cutover window.
+- `./scripts/install.sh --prepare`: locked release build, staged binaries and units.
+  `CARGO_TARGET_DIR` is supported. Run this step in the production checkout.
+- `./scripts/install.sh --check`: verify staged artifact hashes and source files.
+- `./scripts/install.sh --activate`: administrator step. Installs the staged
+  binaries before restart, then verifies each running executable hash.
+  Missing, changed or stale prepared artifacts are rejected before service changes.
+  Run only in the coordinated deployment window.
 
 Installation never migrates a database. Back up Hippo and stop both legacy APIs
 before its schema migration. The original annotated `v1.0.0` tag stays available

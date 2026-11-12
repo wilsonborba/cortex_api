@@ -42,3 +42,7 @@ var/whisper-models/
 /models/
 
 /var/systemd/
+
+/var/deploy/
+/var/deploy.*/
+/var/deploy.lock
