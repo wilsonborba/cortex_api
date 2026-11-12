@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v2.1.2 - 2026-11-12
 
 
 ### Bug Fixes
@@ -11,6 +11,8 @@
 - Merge repair write guard (#118)
 
 - Install verified prepared binary before restart (#120)
+
+- Merge prepared artifact installation (#120)
 
 
 ### Chores
@@ -24,6 +26,8 @@
 - Add safe exchange repair command (#118)
 
 - Merge exchange repair command (#118)
+
+- Prepare v2.1.2
 
 
 ### Tests
