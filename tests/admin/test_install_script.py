@@ -140,6 +140,24 @@ elif args[0]=='is-active':sys.exit(0 if args[-1] in pids else 1)
         self.run_script('--prepare', success=False)
         self.assertFalse((self.repo / 'var/deploy').exists())
 
+    def test_checks_work_across_system_languages(self):
+        for name in ['a_b.rs', 'ab.rs']:
+            (self.repo / 'src' / name).write_text('// synthetic')
+        subprocess.run(['git', '-C', str(self.repo), 'add', 'src'], check=True)
+        self.env['LC_ALL'] = 'C.UTF-8'
+        self.run_script('--prepare')
+        self.env['LC_ALL'] = 'en_SG.UTF-8'
+        self.run_script('--check')
+
+    def test_changed_embedded_migration_is_rejected(self):
+        (self.repo / 'migrations').mkdir()
+        migration = self.repo / 'migrations/001.sql'
+        migration.write_text('SELECT 1;')
+        subprocess.run(['git', '-C', str(self.repo), 'add', 'migrations'], check=True)
+        self.run_script('--prepare')
+        migration.write_text('SELECT 2;')
+        self.run_script('--activate', success=False)
+
     def test_activation_requires_administrator(self):
         self.run_script('--prepare')
         self.env['TEST_ADMIN'] = '0'

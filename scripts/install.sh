@@ -15,8 +15,8 @@ flock -n 9 || { printf 'Another deployment is in progress.\n' >&2; exit 1; }
 binaries=(cortex-api)
 units=(cortex-api)
 source_hash() {
-  git ls-files -z -- Cargo.toml Cargo.lock build.rs src .cargo "scripts/install.sh" |
-    sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f1
+  git ls-files -z -- Cargo.toml Cargo.lock build.rs src migrations .cargo "scripts/install.sh" |
+    LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f1
 }
 if [ "$mode" = --prepare ]; then
   service_user=$(stat -c %U "$root")
