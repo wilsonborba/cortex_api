@@ -1,6 +1,19 @@
 # Changelog
 
 
+## Unreleased
+
+
+### Bug Fixes
+
+- Use stable source checks across locales (#120)
+
+
+### Chores
+
+- Merge v2.1.2 back to feature/main
+
+
 ## v2.1.2 - 2026-11-12
 
 
@@ -28,6 +41,10 @@
 - Merge exchange repair command (#118)
 
 - Prepare v2.1.2
+
+- Release v2.1.2
+
+- Promote v2.1.2
 
 
 ### Tests
