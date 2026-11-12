@@ -184,10 +184,12 @@ def main(argv=None):
     mode.add_argument('--dry-run', action='store_true')
     mode.add_argument('--apply', action='store_true')
     parser.add_argument('--delete-orphans', action='store_true')
-    parser.add_argument('--production', action='store_true')
+    parser.add_argument('--production', action='store_true', help='Required for CLI apply; Cortex API must be stopped')
     parser.add_argument('--hippocampus-url', required=True, help='API base URL without credentials')
     args = parser.parse_args(argv)
     try:
+        if args.apply and not args.production:
+            raise RuntimeError('CLI apply requires explicit production mode; use doubles for tests')
         try:
             from dotenv import dotenv_values
             for key, value in dotenv_values(Path(__file__).resolve().parents[1] / '.env').items():

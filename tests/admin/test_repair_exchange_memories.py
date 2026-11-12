@@ -1,4 +1,5 @@
 import copy
+import contextlib
 import importlib.util
 from pathlib import Path
 import unittest
@@ -77,6 +78,10 @@ class HttpContractTests(unittest.TestCase):
         self.assertEqual(calls[1][2],{'resource_type':'chat','source_system':'cortex','external_id':'synthetic-session','title':'Synthetic title'})
         self.assertEqual(calls[2][2]['relationship'],'created_in')
         self.assertNotIn('title',calls[2][2])
+    def test_cli_apply_refuses_a_test_source_against_an_operator_endpoint(self):
+        with patch.object(repair,'source_rows') as source,contextlib.redirect_stderr(io.StringIO()):
+            code=repair.main(['--apply','--delete-orphans','--hippocampus-url','https://api.example.test'])
+        self.assertEqual(code,1);source.assert_not_called()
     def test_sql_credentials_are_environment_only(self):
         value='postgresql://synthetic_user:synthetic_password@database.example.test/cortex_api_test'
         with patch.dict(os.environ,{'CORTEX_TEST_DATABASE_URL':value}),patch.object(repair.subprocess,'run') as run:
