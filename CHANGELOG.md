@@ -4,6 +4,15 @@
 ## Unreleased
 
 
+### Bug Fixes
+
+- Require explicit operator mode for repair writes (#118)
+
+- Merge repair write guard (#118)
+
+- Install verified prepared binary before restart (#120)
+
+
 ### Chores
 
 - Merge v2.1.1 back to release/v2.1.1
@@ -13,6 +22,15 @@
 - Merge v2.1.1 back to feature/main
 
 - Add safe exchange repair command (#118)
+
+- Merge exchange repair command (#118)
+
+
+### Tests
+
+- Verify repair credentials and API fields (#118)
+
+- Merge repair contract verification (#118)
 
 
 ## v2.1.1 - 2026-11-11
