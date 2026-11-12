@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from urllib.parse import urlencode, urlsplit, quote
+from urllib.parse import urlencode, urlsplit, quote, unquote, parse_qs
 from urllib.request import Request, urlopen
 
 WORKSPACE = APP = 'cortex'
@@ -66,7 +66,7 @@ class Hippo:
         resource = {'resource_type': 'chat', 'source_system': APP, 'external_id': row['session_id'], 'title': row['chat_title']}
         self.call('POST', 'resources', resource)
         self.call('POST', 'memories/' + quote(memory_id, safe='') + '/resources',
-                  {**resource, 'relationship': 'created_in'})
+                  {key: value for key, value in {**resource, 'relationship': 'created_in'}.items() if key != 'title'})
 
     def delete(self, memory):
         self.call('POST', 'memories/delete', {'workspace_id': WORKSPACE, 'app_id': APP,
@@ -155,7 +155,15 @@ def source_rows(production):
     if not value or urlsplit(value).path.strip('/') != expected:
         raise RuntimeError('The selected database environment key is missing or not valid')
     env = os.environ.copy()
-    env['PGDATABASE'] = value
+    parts = urlsplit(value)
+    env['PGDATABASE'] = expected
+    for key, part in [('PGHOST', parts.hostname), ('PGPORT', parts.port),
+                      ('PGUSER', parts.username), ('PGPASSWORD', parts.password)]:
+        if part is not None:
+            env[key] = unquote(str(part))
+    for key, target in [('sslmode', 'PGSSLMODE'), ('connect_timeout', 'PGCONNECT_TIMEOUT')]:
+        if key in parse_qs(parts.query):
+            env[target] = parse_qs(parts.query)[key][0]
     query = """SELECT json_build_object(
       'rows', COALESCE((SELECT json_agg(r) FROM (
         SELECT o.memory_id,c.session_id::text,c.user_id,c.title AS chat_title,i.text AS input_text

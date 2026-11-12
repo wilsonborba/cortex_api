@@ -5,6 +5,8 @@ import unittest
 import io
 import json
 from unittest.mock import patch
+from types import SimpleNamespace
+import os
 spec = importlib.util.spec_from_file_location('repair', Path(__file__).resolve().parents[2] / 'scripts/repair_exchange_memories.py')
 repair = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(repair)
@@ -74,6 +76,16 @@ class HttpContractTests(unittest.TestCase):
         self.assertIn('app_id=cortex',calls[0][1])
         self.assertEqual(calls[1][2],{'resource_type':'chat','source_system':'cortex','external_id':'synthetic-session','title':'Synthetic title'})
         self.assertEqual(calls[2][2]['relationship'],'created_in')
+        self.assertNotIn('title',calls[2][2])
+    def test_sql_credentials_are_environment_only(self):
+        value='postgresql://synthetic_user:synthetic_password@database.example.test/cortex_api_test'
+        with patch.dict(os.environ,{'CORTEX_TEST_DATABASE_URL':value}),patch.object(repair.subprocess,'run') as run:
+            run.return_value=SimpleNamespace(returncode=0,stdout='{"rows":[],"referenced_ids":[],"file_memory_ids":[]}')
+            repair.source_rows(False)
+            args,kwargs=run.call_args
+            self.assertNotIn('synthetic_password',' '.join(args[0]))
+            self.assertEqual(kwargs['env']['PGPASSWORD'],'synthetic_password')
+            self.assertEqual(kwargs['env']['PGDATABASE'],'cortex_api_test')
     def test_report_has_ids_and_counts_without_chat_text(self):
         result=repair.repair(RepairTests().source(),Double())
         text=json.dumps(result)
