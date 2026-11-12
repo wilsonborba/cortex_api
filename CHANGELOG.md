@@ -1,6 +1,38 @@
 # Changelog
 
 
+## Unreleased
+
+
+### Bug Fixes
+
+- Require explicit operator mode for repair writes (#118)
+
+- Merge repair write guard (#118)
+
+- Install verified prepared binary before restart (#120)
+
+
+### Chores
+
+- Merge v2.1.1 back to release/v2.1.1
+
+- Merge v2.1.1 back to development
+
+- Merge v2.1.1 back to feature/main
+
+- Add safe exchange repair command (#118)
+
+- Merge exchange repair command (#118)
+
+
+### Tests
+
+- Verify repair credentials and API fields (#118)
+
+- Merge repair contract verification (#118)
+
+
 ## v2.1.1 - 2026-11-11
 
 
@@ -18,6 +50,14 @@
 - Merge v2.1.0 back to development
 
 - Merge v2.1.0 back to feature/main
+
+- Prepare v2.1.1
+
+- Merge v2.1.1 preparation
+
+- Prepare development for v2.1.1
+
+- Release v2.1.1
 
 
 ## v2.1.0 - 2026-11-11
