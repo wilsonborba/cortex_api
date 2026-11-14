@@ -26,7 +26,10 @@ pub fn router(state: MemoryGraph) -> Router {
         .route("/memory-graph", get(graph))
         .route("/memory-graph/overview", get(overview))
         .route("/memory-graph/items", get(items))
-        .route("/memory-graph/nodes/{node_id}", get(node))
+        .route(
+            "/memory-graph/nodes/{node_id}",
+            get(node).delete(delete_node),
+        )
         .with_state(state)
 }
 fn failure(error: GraphError) -> Response {
@@ -119,4 +122,31 @@ async fn items(
         .await
         .map(|v| Envelope::new("Memory items loaded", v))
         .map_err(failure)
+}
+
+/// Delete one memory of the caller (#122). The id must be in the caller's
+/// index, so a user never deletes another user's memory.
+async fn delete_node(
+    State(state): State<MemoryGraph>,
+    context: CallerContext,
+    Path(node_id): Path<String>,
+    Query(query): Query<OverviewQuery>,
+) -> Result<Envelope<Value>, Response> {
+    let caller = context
+        .for_app(&query.app_id, true)
+        .map_err(IntoResponse::into_response)?;
+    let scope = caller.storage_scope();
+    let index = state.index(&scope).await.map_err(failure)?;
+    if index.detail(&node_id).is_none() {
+        return Err(failure(GraphError::NotFound));
+    }
+    state
+        .hippocampus
+        .delete_memories(&scope, std::slice::from_ref(&node_id))
+        .await
+        .map_err(|_| failure(GraphError::Unavailable))?;
+    Ok(Envelope::new(
+        "Memory deleted",
+        serde_json::json!({ "node_id": node_id }),
+    ))
 }

@@ -6,7 +6,7 @@ use axum::{
     body::{Body, to_bytes},
     extract::{Path, Query},
     http::{Request, StatusCode},
-    routing::get,
+    routing::{get, post},
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use cortex_api::{
@@ -488,6 +488,9 @@ fn detail_connections_usage_and_tiny_map() {
     );
 }
 
+/// Delete calls received by the Hippocampus double.
+static DELETED: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
 /// Hippocampus double that answers per user from [graph].
 async fn hippocampus() -> Config {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -502,6 +505,13 @@ async fn hippocampus() -> Config {
                 assert_eq!(q["limit"], "2000");
                 assert_eq!(q["depth"], "1");
                 Json(json!({"data": graph(&q["user_id"])}))
+            }),
+        )
+        .route(
+            "/api/v1/memories/delete",
+            post(|Json(body): Json<Value>| async move {
+                DELETED.lock().unwrap().push(body);
+                Json(json!({"data": {"deleted": 1}}))
             }),
         )
         .route(
@@ -742,4 +752,54 @@ fn timing_at_2000_memories() {
     assert_eq!(page["total"], 2000);
     println!("2000 memories: index and overview {overview_ms} ms, items page {items_ms} ms");
     assert!(overview_ms < 500 && items_ms < 300);
+}
+
+async fn send(state: &MemoryGraph, method: &str, path: &str, user: &str) -> (StatusCode, Value) {
+    let app = with_response_contract(router(state.clone()));
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ))
+        .header("x-uuid", user);
+    let response = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    (
+        response.status(),
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn delete_one_memory_only_in_the_caller_scope() {
+    let config = hippocampus().await;
+    let state = MemoryGraph::new(Hippocampus::new(&config).unwrap(), config.clone());
+    DELETED.lock().unwrap().clear();
+    // Another user: 404 and no delete call.
+    let (status, body) = send(
+        &state,
+        "DELETE",
+        "/memory-graph/nodes/m-note?app_id=cortex",
+        "bob",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["data"]["error_number"], 1039);
+    assert!(DELETED.lock().unwrap().is_empty());
+    // The owner: one bulk call with the scope.
+    let (status, body) = send(
+        &state,
+        "DELETE",
+        "/memory-graph/nodes/m-note?app_id=cortex",
+        "alice",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"], "Memory deleted");
+    assert_eq!(body["data"]["node_id"], "m-note");
+    let calls = DELETED.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["memory_ids"], json!(["m-note"]));
+    assert_eq!(calls[0]["app_id"], "cortex");
+    assert_eq!(calls[0]["user_id"], "alice");
 }
