@@ -1204,10 +1204,10 @@ fn full_app(rt: &Arc<ChatRuntime>) -> Router {
             ))
             .merge(cortex_api::presentation::files::router(rt.files.clone()))
             .merge(cortex_api::presentation::memory_graph::router(
-                cortex_api::domain::services::memory_graph::MemoryGraph {
-                    hippocampus: hippocampus.clone(),
-                    config: rt.config.clone(),
-                },
+                cortex_api::domain::services::memory_graph::MemoryGraph::new(
+                    hippocampus.clone(),
+                    rt.config.clone(),
+                ),
             ))
             .merge(cortex_api::presentation::personas::router(
                 rt.personas.clone(),

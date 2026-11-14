@@ -1,6 +1,8 @@
 use crate::{
     core::config::Config,
+    dal::remote::cache::RedisCache,
     domain::models::{
+        cache::CacheKey,
         exchange_memory::Exchange,
         extraction::DocumentFile,
         files::{FileContent, FileMemory},
@@ -15,6 +17,9 @@ pub struct Hippocampus {
     client: reqwest::Client,
     base: reqwest::Url,
     workspace: String,
+    /// The memory overview cache: a saved or deleted memory removes the key
+    /// of that user (#121).
+    overview_cache: Option<RedisCache>,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct HippoUnavailable;
@@ -124,7 +129,24 @@ impl Hippocampus {
             client,
             base,
             workspace: config.memory_workspace.into(),
+            overview_cache: None,
         })
+    }
+    pub fn with_overview_cache(mut self, cache: RedisCache) -> Self {
+        self.overview_cache = Some(cache);
+        self
+    }
+    /// Removes the cached memory overview of the user after a memory write.
+    /// A cache failure only means the old overview lives up to 30 seconds.
+    async fn forget_overview(&self, scope: &AppUser) {
+        if let Some(cache) = &self.overview_cache {
+            let _ = cache
+                .remove(&CacheKey::MemoryOverview {
+                    app: scope.app_id.clone(),
+                    user: scope.user_id.clone(),
+                })
+                .await;
+        }
     }
     pub async fn create_exchange(
         &self,
@@ -169,6 +191,7 @@ impl Hippocampus {
         if !response.status().is_success() {
             return Err(HippoUnavailable);
         }
+        self.forget_overview(scope).await;
         let value: serde_json::Value = response.json().await.map_err(|_| HippoUnavailable)?;
         value["data"]["id"]
             .as_str()
@@ -271,6 +294,7 @@ impl Hippocampus {
         if !response.status().is_success() {
             return Err(HippoUnavailable);
         }
+        self.forget_overview(scope).await;
         let value: serde_json::Value = response.json().await.map_err(|_| HippoUnavailable)?;
         let present = |key: &str| value["data"][key].as_str().filter(|id| !id.is_empty());
         present("memory_id")
@@ -383,6 +407,7 @@ impl Hippocampus {
             .await
             .map_err(|_| HippoUnavailable)?;
         if response.status().is_success() {
+            self.forget_overview(scope).await;
             Ok(())
         } else {
             Err(HippoUnavailable)

@@ -121,6 +121,10 @@ pub struct Config {
     pub allowed_apps: Vec<&'static str>,
     pub memory_workspace: &'static str,
     pub memory_graph_max_depth: usize,
+    /// Memories read for the memory overview: one scope graph call (#121).
+    pub memory_overview_max_nodes: usize,
+    /// Lifetime of the cached memory overview (#121).
+    pub memory_overview_cache_ttl: std::time::Duration,
     pub run_database: String,
     pub run_test_database: String,
     pub document_timeout: std::time::Duration,
@@ -267,6 +271,8 @@ impl Default for Config {
             ],
             memory_workspace: "cortex",
             memory_graph_max_depth: 3,
+            memory_overview_max_nodes: 2000,
+            memory_overview_cache_ttl: std::time::Duration::from_secs(30),
             run_database: "cortex_runs".into(),
             run_test_database: "cortex_runs_test".into(),
             document_timeout: std::time::Duration::from_secs(5),
