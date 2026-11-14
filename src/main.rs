@@ -56,7 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await?;
     let hippocampus = cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
-        .map_err(|_| "The Hippocampus URL is not valid")?;
+        .map_err(|_| "The Hippocampus URL is not valid")?
+        .with_overview_cache(cortex_api::dal::remote::cache::RedisCache::from_environment());
     let (runtime, personas) = {
         use cortex_api::{
             dal::{
@@ -196,6 +197,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cortex_api::domain::services::memory_graph::MemoryGraph {
                 hippocampus: hippocampus.clone(),
                 config: config.clone(),
+                records: Some(cortex_api::dal::local::memory_records::MemoryRecords {
+                    pool: chat_pool.clone(),
+                }),
+                cache: cortex_api::dal::remote::cache::RedisCache::from_environment(),
             },
         ))
         .merge(cortex_api::presentation::files::router(files))

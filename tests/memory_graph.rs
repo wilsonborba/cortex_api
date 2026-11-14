@@ -76,10 +76,10 @@ async fn server() -> (Calls, Config) {
     (calls, config)
 }
 async fn call(config: &Config, path: &str, user: Option<&str>) -> (StatusCode, Value) {
-    let app = with_response_contract(router(MemoryGraph {
-        hippocampus: Hippocampus::new(config).unwrap(),
-        config: config.clone(),
-    }));
+    let app = with_response_contract(router(MemoryGraph::new(
+        Hippocampus::new(config).unwrap(),
+        config.clone(),
+    )));
     let mut req = Request::get(path).extension(axum::extract::ConnectInfo(
         "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
     ));

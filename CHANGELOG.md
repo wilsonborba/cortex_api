@@ -1,6 +1,19 @@
 # Changelog
 
 
+## Unreleased
+
+
+### Chores
+
+- Merge v2.1.3 back to feature/main
+
+
+### Features
+
+- Memory overview service for a readable memory screen (#121)
+
+
 ## v2.1.3 - 2026-11-12
 
 
@@ -18,6 +31,10 @@
 - Merge v2.1.2 back to feature/main
 
 - Prepare v2.1.3
+
+- Release v2.1.3
+
+- Promote v2.1.3
 
 
 ## v2.1.2 - 2026-11-12
