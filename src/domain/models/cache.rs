@@ -4,10 +4,18 @@ pub enum CacheKey {
     History(String),
     TemporaryChat(String),
     Events(String),
-    Usage { user: String, hour: String },
+    Usage {
+        user: String,
+        hour: String,
+    },
     Timing(String),
     Loyalty(String),
     WaitQueue(String),
+    /// Memory overview of one app user (#121).
+    MemoryOverview {
+        app: String,
+        user: String,
+    },
 }
 impl CacheKey {
     pub fn name(&self) -> String {
@@ -19,6 +27,9 @@ impl CacheKey {
             Self::Timing(kind) => format!("cortex:timing:{kind}"),
             Self::Loyalty(user) => format!("cortex:loyalty:{user}"),
             Self::WaitQueue(queue) => format!("cortex:queue:{queue}"),
+            Self::MemoryOverview { app, user } => {
+                format!("cortex:memory_overview:{app}:{user}")
+            }
         }
     }
 }

@@ -1,6 +1,29 @@
 # Changelog
 
 
+## v2.2.0 - 2026-11-14
+
+
+### Chores
+
+- Merge v2.1.3 back to development
+
+- Merge v2.1.3 back to feature/main
+
+- Prepare development for v2.2.0
+
+
+### Features
+
+- Memory overview service for a readable memory screen (#121)
+
+- Merge memory overview service (#121)
+
+- Delete one memory from the memory detail (#122)
+
+- Merge delete one memory route (#122)
+
+
 ## v2.1.3 - 2026-11-12
 
 
@@ -18,6 +41,10 @@
 - Merge v2.1.2 back to feature/main
 
 - Prepare v2.1.3
+
+- Release v2.1.3
+
+- Promote v2.1.3
 
 
 ## v2.1.2 - 2026-11-12

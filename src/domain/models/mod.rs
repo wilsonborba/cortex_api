@@ -3,6 +3,7 @@ pub mod driver;
 pub mod files;
 pub mod identity;
 pub mod memory_graph;
+pub mod memory_overview;
 pub mod model_catalog;
 pub mod personas;
 pub mod pipeline;

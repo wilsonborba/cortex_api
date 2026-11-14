@@ -1,6 +1,9 @@
 use crate::{
     core::config::Config,
-    dal::remote::hippocampus::Hippocampus,
+    dal::{
+        local::memory_records::MemoryRecords,
+        remote::{cache::RedisCache, hippocampus::Hippocampus},
+    },
     domain::models::{
         memory_graph::{GraphError, GraphQuery},
         storage::AppUser,
@@ -11,8 +14,23 @@ use serde_json::Value;
 pub struct MemoryGraph {
     pub hippocampus: Hippocampus,
     pub config: Config,
+    /// Cortex chat rows for memory sources and usage (#121). Without it every
+    /// memory is a saved note with no usage.
+    pub records: Option<MemoryRecords>,
+    /// Overview cache (30 s per app and user).
+    pub cache: RedisCache,
 }
 impl MemoryGraph {
+    /// Graph routes only: no chat rows and no cache.
+    pub fn new(hippocampus: Hippocampus, config: Config) -> Self {
+        let cache = RedisCache::new(None, config.cache_operation_timeout);
+        Self {
+            hippocampus,
+            config,
+            records: None,
+            cache,
+        }
+    }
     /// One Hippocampus call for the whole scope, or for one node with its context.
     pub async fn load(
         &self,
