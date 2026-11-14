@@ -13,6 +13,10 @@
 
 - Memory overview service for a readable memory screen (#121)
 
+- Merge memory overview service (#121)
+
+- Delete one memory from the memory detail (#122)
+
 
 ## v2.1.3 - 2026-11-12
 
