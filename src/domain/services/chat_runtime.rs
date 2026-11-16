@@ -530,6 +530,7 @@ impl StageServices<Turn> for Run {
                 Ok(outcome) => {
                     // A failed or cancelled answer keeps its partial text (14.1).
                     turn.answer = outcome.text;
+                    turn.inspection = outcome.inspection.map(Arc::new);
                     let mut value = StageValue::ok(turn);
                     if let Some(error) = outcome.error {
                         value.status = driver_status(error);
@@ -565,6 +566,15 @@ impl StageServices<Turn> for Run {
             } else if rt.history.save(&scope, &done).await.is_err() {
                 value.status = StageStatus::Failed(process_numbers::HISTORY_FAILED);
             } else if matches!(status, FinishedStatus::Done) {
+                if let Some(inspection) = &turn.inspection
+                    && rt
+                        .chats
+                        .save_inspection(&scope, done.output_id, inspection)
+                        .await
+                        .is_err()
+                {
+                    tracing::warn!("Answer inspection could not be saved");
+                }
                 let saved = rt
                     .memories
                     .remember(&scope, done.session_id, done.output_id, false)

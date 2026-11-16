@@ -24,6 +24,34 @@ pub struct AnswerInspection {
     pub tokens: Vec<InspectionToken>,
 }
 impl AnswerInspection {
+    pub fn matches(&self, text: &str) -> bool {
+        if self.reason.is_some() {
+            return self.tokens.is_empty();
+        }
+        let mut offset = 0;
+        for token in &self.tokens {
+            if token.start_byte != offset
+                || token.end_byte != offset + token.bytes.len()
+                || token.end_byte > i32::MAX as usize
+                || !token.logprob.is_finite()
+                || token.logprob > 0.0
+                || token.bytes.len() > MAX_TOKEN_BYTES
+                || token.alternatives.len() > ALTERNATIVES
+                || token.alternatives.iter().any(|a| {
+                    !a.logprob.is_finite() || a.logprob > 0.0 || a.bytes.len() > MAX_TOKEN_BYTES
+                })
+            {
+                return false;
+            }
+            offset = token.end_byte;
+        }
+        !self.tokens.is_empty()
+            && self
+                .tokens
+                .iter()
+                .flat_map(|t| t.bytes.iter().copied())
+                .eq(text.bytes())
+    }
     pub fn unavailable(model: &str, reason: &str) -> Self {
         Self {
             model: model.into(),

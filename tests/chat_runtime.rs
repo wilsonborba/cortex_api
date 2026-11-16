@@ -128,8 +128,16 @@ impl ModelDriver for Model {
                     }
                 }
             }
+            let inspection = if input.role == "answer" {
+                let mut capture =
+                    cortex_api::domain::models::inspection::InspectionCapture::default();
+                capture.push(Some(&json!([{"bytes":text.as_bytes(),"logprob":-0.2}])), 32);
+                Some(capture.finish("synthetic-model", &text, true))
+            } else {
+                None
+            };
             Ok(CallOutcome {
-                inspection: None,
+                inspection,
                 text,
                 usage: ModelCall {
                     images: None,
@@ -716,6 +724,24 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .unwrap();
     let temp_output: Uuid = temp["data"]["output_id"].as_str().unwrap().parse().unwrap();
     assert!(temp["data"]["memory_id"].is_null());
+    let stored_inspections: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM output_inspections WHERE output_id=$1")
+            .bind(temp_output)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored_inspections, 0,
+        "Temporary output metadata must not persist"
+    );
+    let permanent_inspections: i64 = sqlx::query_scalar("SELECT count(*) FROM output_inspections")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        permanent_inspections > 0,
+        "Permanent final-answer metadata must persist"
+    );
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
         .fetch_one(&pool)
         .await

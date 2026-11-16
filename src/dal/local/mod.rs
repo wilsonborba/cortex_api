@@ -7,3 +7,5 @@ pub mod whisper;
 
 pub mod documents;
 pub mod exchange_memory;
+
+pub mod output_inspection;
