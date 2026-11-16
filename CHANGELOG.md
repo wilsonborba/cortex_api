@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v2.3.0 - 2026-11-16
 
 
 ### Bug Fixes
@@ -16,6 +16,10 @@
 - Merge v2.2.0 back to development
 
 - Merge v2.2.0 back to feature/main
+
+- Update for #125
+
+- Prepare development for v2.3.0
 
 
 ### Features
