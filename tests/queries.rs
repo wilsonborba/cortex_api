@@ -82,6 +82,7 @@ impl ModelDriver for Driver {
             }
             let now = chrono::Utc::now();
             Ok(CallOutcome {
+                inspection: None,
                 text: "first\nsecond\nthird\nfourth\nfifth".into(),
                 usage: ModelCall {
                     images: None,

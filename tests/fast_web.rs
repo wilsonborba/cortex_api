@@ -142,6 +142,7 @@ impl ModelDriver for AnswerDouble {
                     .unwrap();
             }
             Ok(CallOutcome {
+                inspection: None,
                 text: "Bangkok is the capital.".into(),
                 usage: ModelCall {
                     images: None,

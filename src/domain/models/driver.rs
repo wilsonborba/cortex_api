@@ -63,6 +63,7 @@ pub enum DriverError {
     Cancelled,
 }
 pub struct CallOutcome {
+    pub inspection: Option<crate::domain::models::inspection::AnswerInspection>,
     pub text: String,
     pub usage: ModelCall,
     pub error: Option<DriverError>,
