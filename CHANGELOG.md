@@ -4,6 +4,11 @@
 ## Unreleased
 
 
+### Bug Fixes
+
+- Continue with a raw ChatML prompt so the model extends the prefix (#125)
+
+
 ### Chores
 
 - Merge v2.2.0 back to release/v2.2.0
@@ -20,6 +25,10 @@
 - Merge #123
 
 - Store relational output traces and scoped reads (#124)
+
+- Merge #124
+
+- Continue a saved answer from a recorded alternative (#125)
 
 
 ## v2.2.0 - 2026-11-14

@@ -52,6 +52,12 @@ pub struct NextInput {
     pub memory_topic: Option<String>,
     #[serde(default)]
     pub thinking: bool,
+    /// Continue a saved answer with a recorded alternative (cortex_api#125).
+    #[serde(default)]
+    pub continue_from: Option<crate::domain::models::inspection::ContinueFrom>,
+    /// Built on the server from saved data; never read from the client.
+    #[serde(skip)]
+    pub continuation: Option<std::sync::Arc<crate::domain::models::inspection::Continuation>>,
 }
 impl NewChat {
     pub fn input(&self) -> NextInput {
@@ -64,6 +70,8 @@ impl NewChat {
             use_memory: self.use_memory,
             memory_topic: self.memory_topic.clone(),
             thinking: self.thinking,
+            continue_from: None,
+            continuation: None,
         }
     }
 }

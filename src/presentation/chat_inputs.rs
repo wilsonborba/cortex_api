@@ -134,8 +134,28 @@ async fn next(
     // The app comes from the chat, never from the input body (21.2).
     context.check_peer().map_err(IntoResponse::into_response)?;
     let user = context.user().to_owned();
+    let mut body = body;
     let app = match runtime.chats.owned_chat(&user, session).await {
-        Ok(Some(chat)) => chat.app_id,
+        Ok(Some(chat)) => {
+            let scope = crate::domain::models::storage::AppUser {
+                app_id: chat.app_id.clone(),
+                user_id: user.clone(),
+            };
+            body = runtime
+                .prepare_continuation(&scope, session, body)
+                .await
+                .map_err(failure)?;
+            chat.app_id
+        }
+        // Temporary chats save no inspection data, so they cannot continue.
+        Ok(None) if body.continue_from.is_some() => {
+            runtime
+                .temporary
+                .app_of(&user, session)
+                .await
+                .map_err(failure)?;
+            return Err(failure(process_numbers::INVALID_DATA));
+        }
         Ok(None) => runtime
             .temporary
             .app_of(&user, session)

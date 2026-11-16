@@ -32,6 +32,8 @@ struct Message {
 #[derive(Default, Deserialize)]
 struct Frame {
     message: Option<Message>,
+    /// Text of a raw `/api/generate` frame (continuations).
+    response: Option<String>,
     #[serde(default)]
     done: bool,
     error: Option<String>,
@@ -184,16 +186,17 @@ impl Ollama {
                 collected.text.is_empty() && probability_option_error(&error);
             return Err(DriverError::Ollama);
         }
-        if let Some(message) = frame.message
-            && !message.content.is_empty()
+        let content = frame.message.map(|m| m.content).or(frame.response);
+        if let Some(content) = content
+            && !content.is_empty()
         {
             if collected.first_ms.is_none() {
                 collected.first_ms = Some(start.elapsed().as_millis() as u64);
             }
-            collected.text.push_str(&message.content);
+            collected.text.push_str(&content);
             let _ = events.send(DriverEvent::Token {
                 role: role.into(),
-                text: message.content,
+                text: content,
             });
         }
         if frame.prompt_eval_count.is_some() {
@@ -241,18 +244,32 @@ impl Ollama {
         collected: &mut Collected,
         start: Instant,
     ) -> Result<(), DriverError> {
-        let mut messages = vec![];
-        if !input.system.is_empty() {
-            messages.push(json!({"role":"system","content":input.system}));
-        }
-        messages.push(json!({"role":"user","content":input.prompt,"images":input.images}));
         collected.sent = true;
-        let mut body = json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":{"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens}});
+        let options = json!({"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens});
+        // A continuation (cortex_api#125) must extend the saved prefix. Chat
+        // templates close the assistant turn, so a raw ChatML prompt is used.
+        let (path, mut body) = match &input.prefix {
+            Some(prefix) => (
+                "/api/generate",
+                json!({"model":model,"prompt":chatml(&input.system,&input.prompt,prefix),"raw":true,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":options}),
+            ),
+            None => {
+                let mut messages = vec![];
+                if !input.system.is_empty() {
+                    messages.push(json!({"role":"system","content":input.system}));
+                }
+                messages.push(json!({"role":"user","content":input.prompt,"images":input.images}));
+                (
+                    "/api/chat",
+                    json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":options}),
+                )
+            }
+        };
         if input.role == "answer" && collected.probabilities {
             body["logprobs"] = json!(true);
             body["top_logprobs"] = json!(crate::domain::models::inspection::ALTERNATIVES);
         }
-        let url = format!("{}/api/chat", base.trim_end_matches('/'));
+        let url = format!("{}{path}", base.trim_end_matches('/'));
         let response = self
             .client
             .post(&url)
@@ -288,7 +305,7 @@ impl Ollama {
                 body.as_object_mut().unwrap().remove("logprobs");
                 body.as_object_mut().unwrap().remove("top_logprobs");
                 collected.probabilities = false;
-                self.post_to(base, "/api/chat", &body).await?
+                self.post_to(base, path, &body).await?
             } else {
                 return Err(DriverError::Ollama);
             }
@@ -319,6 +336,18 @@ impl Ollama {
         }
         Err(DriverError::Ollama)
     }
+}
+/// ChatML prompt that ends inside the assistant turn, so the model continues
+/// `prefix`. The configured Qwen text and vision models use ChatML.
+fn chatml(system: &str, prompt: &str, prefix: &str) -> String {
+    let mut text = String::new();
+    if !system.is_empty() {
+        text.push_str(&format!("<|im_start|>system\n{system}<|im_end|>\n"));
+    }
+    text.push_str(&format!(
+        "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{prefix}"
+    ));
+    text
 }
 fn probability_option_error(error: &str) -> bool {
     let error = error.to_lowercase();

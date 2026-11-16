@@ -161,10 +161,138 @@ impl InspectionCapture {
     }
 }
 
+/// Client request to continue a saved answer with a recorded alternative.
+/// The client sends only ids; the server builds the prefix from saved bytes.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContinueFrom {
+    pub output_id: uuid::Uuid,
+    pub token_position: usize,
+    /// 1-based rank in the saved alternatives of that token.
+    pub alternative_rank: usize,
+}
+/// Saved link from a continued answer to its source answer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct ContinuedFrom {
+    pub output_id: uuid::Uuid,
+    pub token_position: i32,
+    pub alternative_rank: i16,
+    pub source_byte: i32,
+}
+/// Prefix for a continuation and the recorded tokens that make it.
+#[derive(Clone, Debug)]
+pub struct Continuation {
+    pub source: ContinueFrom,
+    pub source_byte: usize,
+    pub prefix: String,
+    pub tokens: Vec<InspectionToken>,
+}
+impl Continuation {
+    /// Saved tokens before `token_position`, then the chosen alternative with
+    /// its own recorded probability and the recorded alternatives of that
+    /// position. Returns None when the data is missing or the prefix is not
+    /// valid UTF-8.
+    pub fn build(source: ContinueFrom, inspection: &AnswerInspection, text: &str) -> Option<Self> {
+        if inspection.reason.is_some() || !inspection.matches(text) {
+            return None;
+        }
+        let token = inspection.tokens.get(source.token_position)?;
+        let rank = source.alternative_rank.checked_sub(1)?;
+        let alternative = token.alternatives.get(rank)?;
+        let mut bytes = text.as_bytes()[..token.start_byte].to_vec();
+        bytes.extend_from_slice(&alternative.bytes);
+        let prefix = String::from_utf8(bytes).ok()?;
+        if prefix.trim().is_empty() {
+            return None;
+        }
+        let mut tokens = inspection.tokens[..source.token_position].to_vec();
+        tokens.push(InspectionToken {
+            start_byte: token.start_byte,
+            end_byte: token.start_byte + alternative.bytes.len(),
+            bytes: alternative.bytes.clone(),
+            logprob: alternative.logprob,
+            alternatives: token.alternatives.clone(),
+        });
+        Some(Self {
+            source,
+            source_byte: token.start_byte,
+            prefix,
+            tokens,
+        })
+    }
+    /// Full answer text: prefix plus generated text.
+    pub fn answer(&self, generated: &str) -> String {
+        format!("{}{generated}", self.prefix)
+    }
+    /// Prefix tokens plus the generated tokens moved after the prefix.
+    pub fn inspection(&self, generated: AnswerInspection) -> AnswerInspection {
+        if generated.reason.is_some() {
+            return generated;
+        }
+        let shift = self.prefix.len();
+        let mut tokens = self.tokens.clone();
+        tokens.extend(generated.tokens.into_iter().map(|t| InspectionToken {
+            start_byte: t.start_byte + shift,
+            end_byte: t.end_byte + shift,
+            ..t
+        }));
+        AnswerInspection {
+            model: generated.model,
+            reason: None,
+            tokens,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn saved() -> (String, AnswerInspection) {
+        let text = "A casa.".to_string();
+        let mut capture = InspectionCapture::default();
+        capture.push(Some(&json!([
+            {"token":"A","logprob":-0.1,"top_logprobs":[{"token":"A","logprob":-0.1}]},
+            {"token":" casa","logprob":-0.7,"top_logprobs":[{"token":" casa","logprob":-0.7},{"token":" cabana","logprob":-1.1}]},
+            {"token":".","logprob":-0.01}
+        ])),10);
+        (text.clone(), capture.finish("fixture", &text, true))
+    }
+    #[test]
+    fn continuation_uses_saved_bytes_and_the_recorded_alternative() {
+        let (text, saved) = saved();
+        let from = ContinueFrom {
+            output_id: uuid::Uuid::nil(),
+            token_position: 1,
+            alternative_rank: 2,
+        };
+        let c = Continuation::build(from, &saved, &text).unwrap();
+        assert_eq!(c.prefix, "A cabana");
+        assert_eq!(c.source_byte, 1);
+        assert_eq!(c.tokens.len(), 2);
+        assert_eq!(c.tokens[1].logprob, -1.1);
+        let mut capture = InspectionCapture::default();
+        capture.push(Some(&json!([{"token":" velha","logprob":-0.3}])), 10);
+        let generated = capture.finish("fixture", " velha", true);
+        let full = c.inspection(generated);
+        assert!(full.matches(&c.answer(" velha")));
+    }
+    #[test]
+    fn continuation_rejects_bad_positions_ranks_and_missing_data() {
+        let (text, saved) = saved();
+        let at = |p, r| ContinueFrom {
+            output_id: uuid::Uuid::nil(),
+            token_position: p,
+            alternative_rank: r,
+        };
+        assert!(Continuation::build(at(9, 1), &saved, &text).is_none());
+        assert!(Continuation::build(at(1, 0), &saved, &text).is_none());
+        assert!(Continuation::build(at(1, 3), &saved, &text).is_none());
+        assert!(Continuation::build(at(1, 1), &saved, "other").is_none());
+        let missing = AnswerInspection::unavailable("fixture", "not_recorded");
+        assert!(Continuation::build(at(1, 1), &missing, &text).is_none());
+    }
     #[test]
     fn raw_bytes_preserve_split_unicode_and_original_probabilities() {
         let text = "ก💡";

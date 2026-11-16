@@ -33,6 +33,9 @@ pub struct OutputDetails {
     pub output: ChatOutput,
     pub sources: Vec<Source>,
     pub memories: Vec<Memory>,
+    /// Source answer when this answer continues a saved answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continued_from: Option<crate::domain::models::inspection::ContinuedFrom>,
 }
 #[derive(Serialize)]
 pub struct ChatWithMemory {

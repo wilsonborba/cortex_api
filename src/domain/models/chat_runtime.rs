@@ -32,6 +32,8 @@ pub struct AcceptedTurn {
     pub history: Vec<Exchange>,
     /// Temporary chat files. Permanent chat files are read in Gather.
     pub temporary_files: Vec<ContextText>,
+    /// Saved prefix when this answer continues a saved answer (cortex_api#125).
+    pub continuation: Option<Arc<crate::domain::models::inspection::Continuation>>,
 }
 impl AcceptedTurn {
     pub fn with_persona(self, persona_id: Option<String>) -> Self {

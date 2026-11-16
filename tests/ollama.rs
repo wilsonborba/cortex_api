@@ -49,7 +49,17 @@ async fn ps(State(s): State<Double>) -> Json<Value> {
         json!({"models":s.loaded.lock().unwrap().as_ref().map(|name|vec![json!({"name":name,"context_length":8192})]).unwrap_or_default()}),
     )
 }
-async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Json<Value> {
+async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Response {
+    if body["raw"] == true {
+        // A continuation streams raw `response` frames.
+        s.bodies.lock().unwrap().push(body.clone());
+        let lines = [
+            json!({"response":" floor","logprobs":[{"token":" floor","logprob":-0.5,"top_logprobs":[{"token":" floor","logprob":-0.5}]}]}),
+            json!({"response":"","done":true,"eval_count":1}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        return text.into_response();
+    }
     let model = body["model"].as_str().unwrap();
     if body["keep_alive"] == 0 {
         s.operations.lock().unwrap().push(format!("unload:{model}"));
@@ -59,7 +69,7 @@ async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Json<Valu
         s.operations.lock().unwrap().push(format!("load:{model}"));
         *s.loaded.lock().unwrap() = Some(model.into());
     }
-    Json(json!({"done":true}))
+    Json(json!({"done":true})).into_response()
 }
 async fn chat(State(s): State<Double>, Json(body): Json<Value>) -> Response {
     s.bodies.lock().unwrap().push(body.clone());
@@ -175,6 +185,7 @@ fn input(images: bool, role: &str) -> CallInput {
         },
         temperature: 0.0,
         max_tokens: 32,
+        prefix: None,
     }
 }
 async fn setup() -> (
@@ -397,4 +408,26 @@ async fn model_probability_capability() {
         trace.tokens.len(),
         trace.reason.as_deref().unwrap_or("available")
     );
+}
+
+#[tokio::test]
+async fn continuation_uses_a_raw_prompt_that_ends_with_the_saved_prefix() {
+    let (driver, _, _, state, task) = setup().await;
+    let (tx, _) = mpsc::unbounded_channel();
+    let (_cancel, rx) = watch::channel(false);
+    let mut call = input(false, "answer");
+    call.prefix = Some("Mira found the map beneath the cabin".into());
+    let outcome = driver.call(&output(false), call, tx, rx).await.unwrap();
+    assert!(outcome.error.is_none());
+    assert_eq!(outcome.text, " floor");
+    let trace = outcome.inspection.unwrap();
+    assert!(trace.reason.is_none());
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["raw"], true);
+    assert!(bodies[0].get("messages").is_none());
+    let prompt = bodies[0]["prompt"].as_str().unwrap();
+    assert!(prompt.ends_with("<|im_start|>assistant\nMira found the map beneath the cabin"));
+    assert_eq!(bodies[0]["top_logprobs"], 5);
+    task.abort();
 }
