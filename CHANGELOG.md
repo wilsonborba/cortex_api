@@ -30,6 +30,8 @@
 
 - Continue a saved answer from a recorded alternative (#125)
 
+- Merge #125
+
 
 ## v2.2.0 - 2026-11-14
 
