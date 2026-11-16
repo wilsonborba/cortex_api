@@ -47,6 +47,8 @@ pub struct CallInput {
     pub images: Vec<String>,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// Saved answer prefix. The model continues it as its own message.
+    pub prefix: Option<String>,
 }
 #[derive(Clone)]
 pub enum DriverEvent {
@@ -63,6 +65,7 @@ pub enum DriverError {
     Cancelled,
 }
 pub struct CallOutcome {
+    pub inspection: Option<crate::domain::models::inspection::AnswerInspection>,
     pub text: String,
     pub usage: ModelCall,
     pub error: Option<DriverError>,

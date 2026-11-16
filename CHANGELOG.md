@@ -1,6 +1,42 @@
 # Changelog
 
 
+## v2.3.0 - 2026-11-16
+
+
+### Bug Fixes
+
+- Continue with a raw ChatML prompt so the model extends the prefix (#125)
+
+
+### Chores
+
+- Merge v2.2.0 back to release/v2.2.0
+
+- Merge v2.2.0 back to development
+
+- Merge v2.2.0 back to feature/main
+
+- Update for #125
+
+- Prepare development for v2.3.0
+
+
+### Features
+
+- Capture genuine answer token alternatives (#123)
+
+- Merge #123
+
+- Store relational output traces and scoped reads (#124)
+
+- Merge #124
+
+- Continue a saved answer from a recorded alternative (#125)
+
+- Merge #125
+
+
 ## v2.2.0 - 2026-11-14
 
 
@@ -11,6 +47,10 @@
 - Merge v2.1.3 back to feature/main
 
 - Prepare development for v2.2.0
+
+- Prepare v2.2.0
+
+- Release v2.2.0
 
 
 ### Features

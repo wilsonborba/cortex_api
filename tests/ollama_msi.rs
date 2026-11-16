@@ -71,6 +71,7 @@ async fn measure_8192_context_through_the_real_queue() {
             },
             temperature: 0.0,
             max_tokens: 128,
+            prefix: None,
         };
         let result = tokio::time::timeout(
             Duration::from_secs(600),

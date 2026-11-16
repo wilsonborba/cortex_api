@@ -32,6 +32,8 @@ pub struct AcceptedTurn {
     pub history: Vec<Exchange>,
     /// Temporary chat files. Permanent chat files are read in Gather.
     pub temporary_files: Vec<ContextText>,
+    /// Saved prefix when this answer continues a saved answer (cortex_api#125).
+    pub continuation: Option<Arc<crate::domain::models::inspection::Continuation>>,
 }
 impl AcceptedTurn {
     pub fn with_persona(self, persona_id: Option<String>) -> Self {
@@ -61,6 +63,7 @@ pub struct Turn {
     pub used_memories: Vec<Memory>,
     pub thinking: Option<Arc<ThinkingResult>>,
     pub answer: String,
+    pub inspection: Option<Arc<crate::domain::models::inspection::AnswerInspection>>,
     pub personas: crate::domain::services::personas::PersonaContext,
 }
 impl Turn {
@@ -79,6 +82,7 @@ impl Turn {
             used_memories: vec![],
             thinking: None,
             answer: String::new(),
+            inspection: None,
             personas: Default::default(),
         }
     }

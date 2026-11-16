@@ -142,6 +142,7 @@ impl ModelDriver for AnswerDouble {
                     .unwrap();
             }
             Ok(CallOutcome {
+                inspection: None,
                 text: "Bangkok is the capital.".into(),
                 usage: ModelCall {
                     images: None,
@@ -231,6 +232,7 @@ async fn fast_gather_assembly_one_answer_and_native_source_events() {
                 images: vec![],
                 temperature: 0.0,
                 max_tokens: 1024,
+                prefix: None,
             },
             tx,
             signal,
