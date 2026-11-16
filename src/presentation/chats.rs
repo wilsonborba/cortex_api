@@ -26,6 +26,10 @@ pub fn router(repo: Chats, config: Config) -> Router {
         .route("/chats", get(list))
         .route("/chats/{session_id}", get(page).patch(patch))
         .route("/chats/{session_id}/outputs/{output_id}", get(output))
+        .route(
+            "/chats/{session_id}/outputs/{output_id}/inspection",
+            get(inspection),
+        )
         .with_state(ChatHistory {
             repo,
             hippocampus: crate::dal::remote::hippocampus::Hippocampus::new(&config)
@@ -89,5 +93,17 @@ async fn patch(
         .patch(&user, session, patch)
         .await
         .map(|chat| Envelope::new("Chat changed", chat))
+        .map_err(failure)
+}
+
+async fn inspection(
+    UserId(user): UserId,
+    State(state): State<ChatHistory>,
+    Path((session, output)): Path<(Uuid, Uuid)>,
+) -> Result<Envelope<impl serde::Serialize>, Response> {
+    state
+        .inspection(&user, session, output)
+        .await
+        .map(|data| Envelope::new("Answer inspection loaded", data))
         .map_err(failure)
 }

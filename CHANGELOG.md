@@ -17,6 +17,10 @@
 
 - Capture genuine answer token alternatives (#123)
 
+- Merge #123
+
+- Store relational output traces and scoped reads (#124)
+
 
 ## v2.2.0 - 2026-11-14
 

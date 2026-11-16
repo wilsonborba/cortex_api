@@ -40,6 +40,24 @@ impl ChatHistory {
         };
         Ok((chat, scope))
     }
+    pub async fn inspection(
+        &self,
+        user: &str,
+        session: Uuid,
+        output: Uuid,
+    ) -> Result<crate::domain::models::inspection::AnswerInspection, ProcessNumber> {
+        let (_, scope) = self.owned(user, session).await?;
+        let saved = self
+            .repo
+            .output(&scope, output)
+            .await
+            .map_err(error)?
+            .ok_or(process_numbers::OUTPUT_NOT_FOUND)?;
+        if saved.session_id != session {
+            return Err(process_numbers::OUTPUT_NOT_FOUND);
+        }
+        self.repo.inspection(&scope, output).await.map_err(error)
+    }
     pub async fn list(&self, user: &str, query: ListQuery) -> Result<Vec<Chat>, ProcessNumber> {
         match query.status {
             None => self.repo.list_chats(user).await,

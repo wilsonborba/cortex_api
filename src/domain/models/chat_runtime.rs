@@ -61,6 +61,7 @@ pub struct Turn {
     pub used_memories: Vec<Memory>,
     pub thinking: Option<Arc<ThinkingResult>>,
     pub answer: String,
+    pub inspection: Option<Arc<crate::domain::models::inspection::AnswerInspection>>,
     pub personas: crate::domain::services::personas::PersonaContext,
 }
 impl Turn {
@@ -79,6 +80,7 @@ impl Turn {
             used_memories: vec![],
             thinking: None,
             answer: String::new(),
+            inspection: None,
             personas: Default::default(),
         }
     }
