@@ -69,6 +69,8 @@ struct Model {
     /// (image count, model name) per call.
     images: Mutex<Vec<(usize, String)>>,
     image_payloads: Mutex<Vec<Vec<String>>>,
+    /// Continuation prefix per call (cortex_api#125).
+    prefixes: Mutex<Vec<Option<String>>>,
 }
 impl ModelDriver for Model {
     fn call<'a>(
@@ -87,6 +89,7 @@ impl ModelDriver for Model {
                 .lock()
                 .unwrap()
                 .push(input.images.clone());
+            self.prefixes.lock().unwrap().push(input.prefix.clone());
             self.images.lock().unwrap().push((
                 input.images.len(),
                 output.name(&Config::default()).to_owned(),
@@ -128,7 +131,16 @@ impl ModelDriver for Model {
                     }
                 }
             }
+            let inspection = if input.role == "answer" {
+                let mut capture =
+                    cortex_api::domain::models::inspection::InspectionCapture::default();
+                capture.push(Some(&json!([{"bytes":text.as_bytes(),"logprob":-0.2}])), 32);
+                Some(capture.finish("synthetic-model", &text, true))
+            } else {
+                None
+            };
             Ok(CallOutcome {
+                inspection,
                 text,
                 usage: ModelCall {
                     images: None,
@@ -715,6 +727,24 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .unwrap();
     let temp_output: Uuid = temp["data"]["output_id"].as_str().unwrap().parse().unwrap();
     assert!(temp["data"]["memory_id"].is_null());
+    let stored_inspections: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM output_inspections WHERE output_id=$1")
+            .bind(temp_output)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored_inspections, 0,
+        "Temporary output metadata must not persist"
+    );
+    let permanent_inspections: i64 = sqlx::query_scalar("SELECT count(*) FROM output_inspections")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        permanent_inspections > 0,
+        "Permanent final-answer metadata must persist"
+    );
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
         .fetch_one(&pool)
         .await
@@ -1557,6 +1587,151 @@ async fn temporary_image_upload_and_followup_reach_vision_without_persistent_wri
         .unwrap();
     cache
         .remove(&CacheKey::TemporaryChat(file_id.to_string()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema and UUID keys"]
+async fn continue_a_saved_answer_from_a_recorded_alternative() {
+    use cortex_api::domain::models::{inspection::InspectionCapture, storage::AppUser};
+    dotenvy::dotenv().ok();
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_continue_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let cache = RedisCache::from_environment();
+    let (_log, address) = remote().await;
+    let model = Arc::new(Model::default());
+    let rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
+    let (status, text) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"Synthetic question"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    let first: Value = serde_json::from_str(&text).unwrap();
+    let session: Uuid = first["data"]["session_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let source: Uuid = first["data"]["output_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Replace the fixture inspection with tokens that have alternatives.
+    sqlx::query("DELETE FROM output_inspections WHERE output_id=$1")
+        .bind(source)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut capture = InspectionCapture::default();
+    capture.push(Some(&json!([
+        {"token":"The","logprob":-0.1},
+        {"token":" code","logprob":-0.3,"top_logprobs":[{"token":" code","logprob":-0.3},{"token":" key","logprob":-1.4}]},
+        {"token":" is 42.","logprob":-0.2}
+    ])), 32);
+    let scope = AppUser {
+        app_id: "cortex".into(),
+        user_id: "alice".into(),
+    };
+    rt.chats
+        .save_inspection(
+            &scope,
+            source,
+            &capture.finish("synthetic-model", "The code is 42.", true),
+        )
+        .await
+        .unwrap();
+    let path = format!("/chats/{session}/inputs");
+    let request = |position: usize, rank: usize| json!({"continue_from":{"output_id":source,"token_position":position,"alternative_rank":rank}});
+    // Invalid rank, invalid position and another user save nothing.
+    for (user, body, expected) in [
+        ("alice", request(1, 3), StatusCode::BAD_REQUEST),
+        ("alice", request(9, 1), StatusCode::BAD_REQUEST),
+        ("bob", request(1, 2), StatusCode::NOT_FOUND),
+    ] {
+        let (status, text) = call(&rt, &path, Some(user), body).await;
+        assert_eq!(status, expected, "{text}");
+    }
+    let calls = model.prefixes.lock().unwrap().len();
+    let (status, text) = call(&rt, &path, Some("alice"), request(1, 2)).await;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    let data: Value = serde_json::from_str::<Value>(&text).unwrap()["data"].clone();
+    assert_eq!(data["text"], "The keyThe code is 42.");
+    let prefixes = model.prefixes.lock().unwrap().clone();
+    assert_eq!(
+        prefixes.len(),
+        calls + 1,
+        "one answer call, no thinking call"
+    );
+    assert_eq!(prefixes.last().unwrap().as_deref(), Some("The key"));
+    let output: Uuid = data["output_id"].as_str().unwrap().parse().unwrap();
+    let response = send(
+        &rt,
+        "GET",
+        &format!("/chats/{session}/outputs/{output}"),
+        "alice",
+        None,
+    )
+    .await;
+    let details = json_body(response).await;
+    assert_eq!(
+        details["data"]["continued_from"]["output_id"],
+        source.to_string()
+    );
+    assert_eq!(details["data"]["continued_from"]["token_position"], 1);
+    assert_eq!(details["data"]["continued_from"]["alternative_rank"], 2);
+    assert_eq!(details["data"]["continued_from"]["source_byte"], 3);
+    let saved = rt.chats.inspection(&scope, output).await.unwrap();
+    assert!(saved.reason.is_none());
+    assert!(saved.matches("The keyThe code is 42."));
+    assert_eq!(saved.tokens[1].logprob, -1.4);
+    let question: String = sqlx::query_scalar(
+        "SELECT i.text FROM chat_inputs i JOIN chat_outputs o USING(input_id) WHERE o.output_id=$1",
+    )
+    .bind(output)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(question, "Synthetic question");
+    // A temporary chat has no saved alternatives and cannot continue.
+    let (status, text) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"Temporary question","temporary":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    let temporary: Value = serde_json::from_str(&text).unwrap();
+    let temporary_session = temporary["data"]["session_id"].as_str().unwrap();
+    let (status, _) = call(
+        &rt,
+        &format!("/chats/{temporary_session}/inputs"),
+        Some("alice"),
+        request(1, 2),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
         .await
         .unwrap();
 }

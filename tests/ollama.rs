@@ -30,6 +30,10 @@ struct Double {
     operations: Arc<Mutex<Vec<String>>>,
     bodies: Arc<Mutex<Vec<Value>>>,
     fail: Arc<AtomicBool>,
+    trace: Arc<AtomicBool>,
+    reject_probabilities: Arc<AtomicBool>,
+    reject_after_text: Arc<AtomicBool>,
+    reject_stream: Arc<AtomicBool>,
     stall: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
     maximum: Arc<AtomicUsize>,
@@ -45,7 +49,17 @@ async fn ps(State(s): State<Double>) -> Json<Value> {
         json!({"models":s.loaded.lock().unwrap().as_ref().map(|name|vec![json!({"name":name,"context_length":8192})]).unwrap_or_default()}),
     )
 }
-async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Json<Value> {
+async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Response {
+    if body["raw"] == true {
+        // A continuation streams raw `response` frames.
+        s.bodies.lock().unwrap().push(body.clone());
+        let lines = [
+            json!({"response":" floor","logprobs":[{"token":" floor","logprob":-0.5,"top_logprobs":[{"token":" floor","logprob":-0.5}]}]}),
+            json!({"response":"","done":true,"eval_count":1}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        return text.into_response();
+    }
     let model = body["model"].as_str().unwrap();
     if body["keep_alive"] == 0 {
         s.operations.lock().unwrap().push(format!("unload:{model}"));
@@ -55,12 +69,25 @@ async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Json<Valu
         s.operations.lock().unwrap().push(format!("load:{model}"));
         *s.loaded.lock().unwrap() = Some(model.into());
     }
-    Json(json!({"done":true}))
+    Json(json!({"done":true})).into_response()
 }
 async fn chat(State(s): State<Double>, Json(body): Json<Value>) -> Response {
     s.bodies.lock().unwrap().push(body.clone());
+    if s.reject_probabilities.load(Ordering::SeqCst) && body.get("logprobs").is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"logprobs not supported"})),
+        )
+            .into_response();
+    }
     if s.fail.load(Ordering::SeqCst) {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if s.reject_stream.load(Ordering::SeqCst) && body.get("logprobs").is_some() {
+        return Response::builder()
+            .header("content-type", "application/x-ndjson")
+            .body(Body::from("{\"error\":\"logprobs not supported\"}\n"))
+            .unwrap();
     }
     assert_eq!(body["options"]["num_ctx"], 8192);
     assert_eq!(body["options"]["num_predict"], 32);
@@ -73,14 +100,26 @@ async fn chat(State(s): State<Double>, Json(body): Json<Value>) -> Response {
     let active = s.active.fetch_add(1, Ordering::SeqCst) + 1;
     s.maximum.fetch_max(active, Ordering::SeqCst);
     let guard = Busy(s.active.clone());
-    let first = serde_json::to_vec(&json!({"message":{"content":"A💡"},"done":false})).unwrap();
+    let mut first_value = json!({"message":{"content":"A💡"},"done":false});
+    let mut second_value = json!({"message":{"content":" B"},"done":false});
+    if s.trace.load(Ordering::SeqCst) {
+        first_value["logprobs"] = json!([{"token":"A💡","bytes":"A💡".as_bytes(),"logprob":-0.2,"top_logprobs":[{"token":"X","logprob":-2.0}]}]);
+        second_value["logprobs"] =
+            json!([{"token":" B","logprob":-0.5,"top_logprobs":[{"token":" C","logprob":-1.5}]}]);
+    }
+    if s.reject_after_text.load(Ordering::SeqCst) {
+        second_value = json!({"error":"logprobs not supported"});
+    }
+    let first = serde_json::to_vec(&first_value).unwrap();
+    let mut second = serde_json::to_vec(&second_value).unwrap();
+    second.push(b'\n');
     let split = first.iter().position(|b| *b == 0xf0).unwrap() + 1;
     let mut rest = first[split..].to_vec();
     rest.push(b'\n');
     let frames = Arc::new(vec![
         first[..split].to_vec(),
         rest,
-        b"{\"message\":{\"content\":\" B\"},\"done\":false}\n".to_vec(),
+        second,
         b"{\"done\":true,\"prompt_eval_count\":11,\"eval_count\":3,\"eval_duration\":100000000}\n"
             .to_vec(),
     ]);
@@ -146,6 +185,7 @@ fn input(images: bool, role: &str) -> CallInput {
         },
         temperature: 0.0,
         max_tokens: 32,
+        prefix: None,
     }
 }
 async fn setup() -> (
@@ -293,5 +333,101 @@ async fn model_fault_has_a_number_and_does_not_hold_the_slot() {
             .error
             .is_none()
     );
+    task.abort();
+}
+
+#[tokio::test]
+async fn captures_only_answer_probabilities_without_an_extra_call() {
+    let (driver, _, _, state, task) = setup().await;
+    state.trace.store(true, Ordering::SeqCst);
+    let outcome = run(&driver, &output(false), false, "answer").await;
+    let trace = outcome.inspection.unwrap();
+    assert!(trace.reason.is_none());
+    assert_eq!(trace.tokens.len(), 2);
+    assert_eq!(trace.tokens[1].start_byte, "A💡".len());
+    assert_eq!(state.bodies.lock().unwrap().len(), 1);
+    assert_eq!(state.bodies.lock().unwrap()[0]["top_logprobs"], 5);
+    let plan = run(&driver, &output(false), false, "plan").await;
+    assert!(plan.inspection.is_none());
+    assert!(state.bodies.lock().unwrap()[1].get("logprobs").is_none());
+    task.abort();
+}
+#[tokio::test]
+async fn unsupported_options_retry_once_before_text_only() {
+    let (driver, _, _, state, task) = setup().await;
+    state.reject_probabilities.store(true, Ordering::SeqCst);
+    let outcome = run(&driver, &output(false), false, "answer").await;
+    assert!(outcome.error.is_none());
+    assert_eq!(outcome.text, "A💡 B");
+    assert_eq!(
+        outcome.inspection.unwrap().reason.as_deref(),
+        Some("not_supported")
+    );
+    assert_eq!(state.bodies.lock().unwrap().len(), 2);
+    assert!(state.bodies.lock().unwrap()[1].get("logprobs").is_none());
+    task.abort();
+}
+#[tokio::test]
+async fn never_retries_a_partial_answer() {
+    let (driver, _, _, state, task) = setup().await;
+    state.reject_after_text.store(true, Ordering::SeqCst);
+    let outcome = run(&driver, &output(false), false, "answer").await;
+    assert!(outcome.error.is_some());
+    assert_eq!(outcome.text, "A💡");
+    assert_eq!(state.bodies.lock().unwrap().len(), 1);
+    task.abort();
+}
+
+#[tokio::test]
+async fn stream_option_rejection_retries_before_text() {
+    let (driver, _, _, state, task) = setup().await;
+    state.reject_stream.store(true, Ordering::SeqCst);
+    let outcome = run(&driver, &output(false), false, "answer").await;
+    assert!(outcome.error.is_none());
+    assert_eq!(outcome.text, "A💡 B");
+    assert_eq!(state.bodies.lock().unwrap().len(), 2);
+    assert_eq!(
+        outcome.inspection.unwrap().reason.as_deref(),
+        Some("not_supported")
+    );
+    task.abort();
+}
+
+#[tokio::test]
+#[ignore = "Explicit operator model capability check; no database or user data"]
+async fn model_probability_capability() {
+    assert_eq!(std::env::var("CORTEX_INSPECTION_PROBE").as_deref(), Ok("1"));
+    let config = Config::default();
+    let scheduler = Scheduler::new(Arc::new(Ledger::default()));
+    let driver = Ollama::new(config, scheduler);
+    let result = run(&driver, &output(false), false, "answer").await;
+    assert!(result.error.is_none());
+    let trace = result.inspection.unwrap();
+    println!(
+        "recorded_probability_tokens={} availability={}",
+        trace.tokens.len(),
+        trace.reason.as_deref().unwrap_or("available")
+    );
+}
+
+#[tokio::test]
+async fn continuation_uses_a_raw_prompt_that_ends_with_the_saved_prefix() {
+    let (driver, _, _, state, task) = setup().await;
+    let (tx, _) = mpsc::unbounded_channel();
+    let (_cancel, rx) = watch::channel(false);
+    let mut call = input(false, "answer");
+    call.prefix = Some("Mira found the map beneath the cabin".into());
+    let outcome = driver.call(&output(false), call, tx, rx).await.unwrap();
+    assert!(outcome.error.is_none());
+    assert_eq!(outcome.text, " floor");
+    let trace = outcome.inspection.unwrap();
+    assert!(trace.reason.is_none());
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["raw"], true);
+    assert!(bodies[0].get("messages").is_none());
+    let prompt = bodies[0]["prompt"].as_str().unwrap();
+    assert!(prompt.ends_with("<|im_start|>assistant\nMira found the map beneath the cabin"));
+    assert_eq!(bodies[0]["top_logprobs"], 5);
     task.abort();
 }

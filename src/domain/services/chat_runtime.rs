@@ -203,22 +203,57 @@ impl Run {
                 )
             }
         };
-        let history = match &prepared.new_chat {
+        let recent = match &prepared.new_chat {
             Some(_) => vec![],
             None => rt
                 .history
                 .recent(&prepared.scope, prepared.input.session_id)
                 .await
-                .map_err(|_| process_numbers::HISTORY_FAILED)?
-                .iter()
-                .map(|e| e.context())
-                .collect(),
+                .map_err(|_| process_numbers::HISTORY_FAILED)?,
         };
+        let continuation = match turn.request.as_ref() {
+            TurnRequest::Next(_, body) => body.continuation.clone(),
+            TurnRequest::New(_) => None,
+        };
+        // A continuation sees only the exchanges before its source answer.
+        let recent = match &continuation {
+            Some(c) => {
+                let source = rt
+                    .chats
+                    .continuation_source(
+                        &prepared.scope,
+                        prepared.input.session_id,
+                        c.source.output_id,
+                    )
+                    .await
+                    .map_err(|_| process_numbers::HISTORY_FAILED)?
+                    .map(|(input_id, ..)| input_id);
+                recent
+                    .iter()
+                    .position(|e| Some(e.input_id) == source)
+                    .map(|at| recent[at + 1..].to_vec())
+                    .unwrap_or_default()
+            }
+            None => recent,
+        };
+        let history = recent.iter().map(|e| e.context()).collect();
         rt.chats
             .save_accepted(&prepared)
             .await
             .map_err(|_| process_numbers::HISTORY_FAILED)?;
-        Ok(self
+        if let Some(c) = &continuation {
+            let link = crate::domain::models::inspection::ContinuedFrom {
+                output_id: c.source.output_id,
+                token_position: c.source.token_position as i32,
+                alternative_rank: c.source.alternative_rank as i16,
+                source_byte: c.source_byte as i32,
+            };
+            rt.chats
+                .save_continuation(&prepared.scope, prepared.ids().output_id, &link)
+                .await
+                .map_err(|_| process_numbers::HISTORY_FAILED)?;
+        }
+        let mut accepted = self
             .accepted(
                 turn,
                 prepared.ids(),
@@ -228,7 +263,9 @@ impl Run {
                 vec![],
             )
             .with_persona(persona_id)
-            .with_images(caller, images))
+            .with_images(caller, images);
+        accepted.continuation = continuation;
+        Ok(accepted)
     }
     fn accepted(
         &self,
@@ -253,6 +290,7 @@ impl Run {
             images: vec![],
             history,
             temporary_files,
+            continuation: None,
         }
     }
     /// All files of the chat are candidates, ranked by BM25 (14.3, 7.2).
@@ -486,6 +524,7 @@ impl StageServices<Turn> for Run {
                         model: &accepted.model,
                         context: &context,
                         images: accepted.images.clone(),
+                        prefix: None,
                     },
                     &self.events,
                     self.stop.clone(),
@@ -512,6 +551,11 @@ impl StageServices<Turn> for Run {
             let context = turn.context.clone().expect("assembled");
             let empty = ThinkingResult::default();
             let thinking = turn.thinking.clone();
+            let continuation = accepted.continuation.clone();
+            if let Some(c) = &continuation {
+                // Clients show the saved prefix first, then the new tokens.
+                self.events.send(NativeEvent::Token(c.prefix.clone()));
+            }
             let outcome = self
                 .runtime
                 .thinking
@@ -520,6 +564,7 @@ impl StageServices<Turn> for Run {
                         model: &accepted.model,
                         context: &context,
                         images: accepted.images.clone(),
+                        prefix: continuation.as_ref().map(|c| c.prefix.clone()),
                     },
                     thinking.as_deref().unwrap_or(&empty),
                     &self.events,
@@ -529,7 +574,16 @@ impl StageServices<Turn> for Run {
             match outcome {
                 Ok(outcome) => {
                     // A failed or cancelled answer keeps its partial text (14.1).
-                    turn.answer = outcome.text;
+                    match &continuation {
+                        Some(c) => {
+                            turn.answer = c.answer(&outcome.text);
+                            turn.inspection = outcome.inspection.map(|i| Arc::new(c.inspection(i)));
+                        }
+                        None => {
+                            turn.answer = outcome.text;
+                            turn.inspection = outcome.inspection.map(Arc::new);
+                        }
+                    }
                     let mut value = StageValue::ok(turn);
                     if let Some(error) = outcome.error {
                         value.status = driver_status(error);
@@ -565,6 +619,15 @@ impl StageServices<Turn> for Run {
             } else if rt.history.save(&scope, &done).await.is_err() {
                 value.status = StageStatus::Failed(process_numbers::HISTORY_FAILED);
             } else if matches!(status, FinishedStatus::Done) {
+                if let Some(inspection) = &turn.inspection
+                    && rt
+                        .chats
+                        .save_inspection(&scope, done.output_id, inspection)
+                        .await
+                        .is_err()
+                {
+                    tracing::warn!("Answer inspection could not be saved");
+                }
                 let saved = rt
                     .memories
                     .remember(&scope, done.session_id, done.output_id, false)
@@ -585,6 +648,41 @@ impl StageServices<Turn> for Run {
     }
 }
 impl ChatRuntime {
+    /// Resolve `continue_from` of a permanent chat input from saved data only
+    /// (cortex_api#125). The new input repeats the source question. Thinking
+    /// and web search are off: the model continues the saved text.
+    pub async fn prepare_continuation(
+        &self,
+        scope: &crate::domain::models::storage::AppUser,
+        session: uuid::Uuid,
+        mut body: crate::domain::models::chat_session::NextInput,
+    ) -> Result<crate::domain::models::chat_session::NextInput, ProcessNumber> {
+        use crate::domain::models::inspection::Continuation;
+        let Some(from) = body.continue_from else {
+            return Ok(body);
+        };
+        let (_, question, use_memory, memory_topic, text) = self
+            .chats
+            .continuation_source(scope, session, from.output_id)
+            .await
+            .map_err(|_| process_numbers::HISTORY_FAILED)?
+            .ok_or(process_numbers::OUTPUT_NOT_FOUND)?;
+        let saved = self
+            .chats
+            .inspection(scope, from.output_id)
+            .await
+            .map_err(|_| process_numbers::HISTORY_FAILED)?;
+        let continuation =
+            Continuation::build(from, &saved, &text).ok_or(process_numbers::INVALID_DATA)?;
+        body.text = question;
+        body.file_ids = vec![];
+        body.needs_web = false;
+        body.thinking = false;
+        body.use_memory = use_memory;
+        body.memory_topic = memory_topic;
+        body.continuation = Some(Arc::new(continuation));
+        Ok(body)
+    }
     /// Start one output. It runs on the server even if the client goes away
     /// (10.4). Stream events go to `stream`; `done` gets the final state.
     pub fn start(

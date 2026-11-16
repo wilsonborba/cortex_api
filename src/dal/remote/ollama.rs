@@ -32,12 +32,15 @@ struct Message {
 #[derive(Default, Deserialize)]
 struct Frame {
     message: Option<Message>,
+    /// Text of a raw `/api/generate` frame (continuations).
+    response: Option<String>,
     #[serde(default)]
     done: bool,
     error: Option<String>,
     prompt_eval_count: Option<u64>,
     eval_count: Option<u64>,
     eval_duration: Option<u64>,
+    logprobs: Option<Value>,
 }
 #[derive(Clone)]
 pub struct Ollama {
@@ -52,6 +55,10 @@ struct Collected {
     eval_ns: Option<u64>,
     first_ms: Option<u64>,
     sent: bool,
+    inspection: crate::domain::models::inspection::InspectionCapture,
+    inspection_limit: usize,
+    probabilities: bool,
+    option_rejected: bool,
 }
 impl Ollama {
     pub fn new(config: Config, queue: Scheduler) -> Self {
@@ -169,19 +176,27 @@ impl Ollama {
         start: Instant,
     ) -> Result<bool, DriverError> {
         let frame: Frame = serde_json::from_slice(line).map_err(|_| DriverError::Ollama)?;
-        if frame.error.is_some() {
+        if role == "answer" {
+            collected
+                .inspection
+                .push(frame.logprobs.as_ref(), collected.inspection_limit);
+        }
+        if let Some(error) = frame.error {
+            collected.option_rejected =
+                collected.text.is_empty() && probability_option_error(&error);
             return Err(DriverError::Ollama);
         }
-        if let Some(message) = frame.message
-            && !message.content.is_empty()
+        let content = frame.message.map(|m| m.content).or(frame.response);
+        if let Some(content) = content
+            && !content.is_empty()
         {
             if collected.first_ms.is_none() {
                 collected.first_ms = Some(start.elapsed().as_millis() as u64);
             }
-            collected.text.push_str(&message.content);
+            collected.text.push_str(&content);
             let _ = events.send(DriverEvent::Token {
                 role: role.into(),
-                text: message.content,
+                text: content,
             });
         }
         if frame.prompt_eval_count.is_some() {
@@ -204,13 +219,99 @@ impl Ollama {
         collected: &mut Collected,
         start: Instant,
     ) -> Result<(), DriverError> {
-        let mut messages = vec![];
-        if !input.system.is_empty() {
-            messages.push(json!({"role":"system","content":input.system}));
+        let result = self
+            .generate_attempt(base, model, input, events, collected, start)
+            .await;
+        if result.is_err()
+            && collected.option_rejected
+            && collected.text.is_empty()
+            && collected.probabilities
+            && input.role == "answer"
+        {
+            collected.probabilities = false;
+            self.generate_attempt(base, model, input, events, collected, start)
+                .await
+        } else {
+            result
         }
-        messages.push(json!({"role":"user","content":input.prompt,"images":input.images}));
+    }
+    async fn generate_attempt(
+        &self,
+        base: &str,
+        model: &str,
+        input: &CallInput,
+        events: &mpsc::UnboundedSender<DriverEvent>,
+        collected: &mut Collected,
+        start: Instant,
+    ) -> Result<(), DriverError> {
         collected.sent = true;
-        let response=self.post_to(base,"/api/chat",&json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":{"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens}})).await?;
+        let options = json!({"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens});
+        // A continuation (cortex_api#125) must extend the saved prefix. Chat
+        // templates close the assistant turn, so a raw ChatML prompt is used.
+        let (path, mut body) = match &input.prefix {
+            Some(prefix) => (
+                "/api/generate",
+                json!({"model":model,"prompt":chatml(&input.system,&input.prompt,prefix),"raw":true,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":options}),
+            ),
+            None => {
+                let mut messages = vec![];
+                if !input.system.is_empty() {
+                    messages.push(json!({"role":"system","content":input.system}));
+                }
+                messages.push(json!({"role":"user","content":input.prompt,"images":input.images}));
+                (
+                    "/api/chat",
+                    json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":options}),
+                )
+            }
+        };
+        if input.role == "answer" && collected.probabilities {
+            body["logprobs"] = json!(true);
+            body["top_logprobs"] = json!(crate::domain::models::inspection::ALTERNATIVES);
+        }
+        let url = format!("{}{path}", base.trim_end_matches('/'));
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| DriverError::Ollama)?;
+        let response = if !response.status().is_success() {
+            let status = response.status();
+            let error = response
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.get("error")
+                        .and_then(Value::as_str)
+                        .map(str::to_lowercase)
+                })
+                .unwrap_or_default();
+            if input.role == "answer"
+                && matches!(status.as_u16(), 400 | 422 | 500 | 501)
+                && error.contains("logprob")
+                && [
+                    "unsupported",
+                    "not supported",
+                    "unknown",
+                    "invalid",
+                    "not implemented",
+                ]
+                .iter()
+                .any(|w| error.contains(w))
+            {
+                body.as_object_mut().unwrap().remove("logprobs");
+                body.as_object_mut().unwrap().remove("top_logprobs");
+                collected.probabilities = false;
+                self.post_to(base, path, &body).await?
+            } else {
+                return Err(DriverError::Ollama);
+            }
+        } else {
+            response
+        };
         let mut stream = response.bytes_stream();
         let mut buffer = vec![];
         while let Some(chunk) = stream.next().await {
@@ -235,6 +336,31 @@ impl Ollama {
         }
         Err(DriverError::Ollama)
     }
+}
+/// ChatML prompt that ends inside the assistant turn, so the model continues
+/// `prefix`. The configured Qwen text and vision models use ChatML.
+fn chatml(system: &str, prompt: &str, prefix: &str) -> String {
+    let mut text = String::new();
+    if !system.is_empty() {
+        text.push_str(&format!("<|im_start|>system\n{system}<|im_end|>\n"));
+    }
+    text.push_str(&format!(
+        "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{prefix}"
+    ));
+    text
+}
+fn probability_option_error(error: &str) -> bool {
+    let error = error.to_lowercase();
+    error.contains("logprob")
+        && [
+            "unsupported",
+            "not supported",
+            "unknown",
+            "invalid",
+            "not implemented",
+        ]
+        .iter()
+        .any(|w| error.contains(w))
 }
 async fn cancelled(cancel: &mut watch::Receiver<bool>) {
     loop {
@@ -288,6 +414,10 @@ impl ModelDriver for Ollama {
                 eval_ns: None,
                 first_ms: None,
                 sent: false,
+                inspection: Default::default(),
+                inspection_limit: input.max_tokens as usize,
+                probabilities: true,
+                option_rejected: false,
             };
             let result = tokio::select! {biased;_=cancelled(&mut cancel)=>Err(DriverError::Cancelled),result=async{if let Some(permit)=&permit{load_ms=self.prepare(permit,model,&events).await?;}self.generate(&base,model,&input,&events,&mut collected,start).await}=>result};
             let finished_at = Utc::now();
@@ -311,7 +441,7 @@ impl ModelDriver for Ollama {
             let usage = ModelCall {
                 images: Some(images),
                 audio: None,
-                role: input.role,
+                role: input.role.clone(),
                 model: model.into(),
                 input_tokens,
                 output_tokens,
@@ -338,7 +468,13 @@ impl ModelDriver for Ollama {
                 .eval_ns
                 .filter(|ns| *ns > 0)
                 .map(|ns| output_tokens as f64 * 1_000_000_000.0 / ns as f64);
+            let inspection = (input.role == "answer").then(|| {
+                collected
+                    .inspection
+                    .finish(model, &collected.text, collected.probabilities)
+            });
             Ok(CallOutcome {
+                inspection,
                 text: collected.text,
                 usage,
                 error: result.err(),

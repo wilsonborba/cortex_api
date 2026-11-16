@@ -44,3 +44,5 @@ pub mod thinking;
 pub mod loyalty;
 
 pub mod exchange_memory;
+
+pub mod inspection;

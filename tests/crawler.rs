@@ -159,6 +159,7 @@ impl ModelDriver for Driver {
             }
             let end = chrono::Utc::now();
             Ok(CallOutcome {
+                inspection: None,
                 text: "rust memory\nrust safety\nrust borrowing\nrust pointers".into(),
                 usage: ModelCall {
                     images: None,

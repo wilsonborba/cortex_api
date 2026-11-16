@@ -99,6 +99,7 @@ impl Thinking {
             images: input.images.clone(),
             temperature: self.config.query_temperature,
             max_tokens,
+            prefix: None,
         })
     }
     async fn call(
@@ -277,13 +278,14 @@ impl Thinking {
         if *cancel.borrow() {
             return Err(DriverError::Cancelled);
         }
-        let call = self.call_input(
+        let mut call = self.call_input(
             input,
             &thinking.notes,
             "answer",
             &self.config.thinking_final_instruction,
             self.config.answer_token_reserve as u32,
         )?;
+        call.prefix = input.prefix.clone();
         if !thinking.calls.is_empty() {
             let mut step = StepProgress::new(StageName::Answer, StepName::ThinkingStep);
             step.params.insert("role".into(), "answer".into());
