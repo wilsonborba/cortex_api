@@ -68,6 +68,7 @@ impl ModelDriver for Double {
             };
             let now = chrono::Utc::now();
             Ok(CallOutcome {
+                inspection: None,
                 text,
                 usage: ModelCall {
                     images: Some(u32::from(output.is_vision())),

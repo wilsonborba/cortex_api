@@ -129,6 +129,7 @@ impl ModelDriver for Model {
                 }
             }
             Ok(CallOutcome {
+                inspection: None,
                 text,
                 usage: ModelCall {
                     images: None,
