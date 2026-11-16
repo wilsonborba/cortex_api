@@ -4,6 +4,11 @@
 ## Unreleased
 
 
+### Bug Fixes
+
+- Continue with a raw ChatML prompt so the model extends the prefix (#125)
+
+
 ### Chores
 
 - Merge v2.2.0 back to release/v2.2.0
