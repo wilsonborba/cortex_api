@@ -1,6 +1,6 @@
 use super::chats::Chats;
 use crate::domain::models::{
-    inspection::{Alternative, AnswerInspection, InspectionToken},
+    inspection::{Alternative, AnswerInspection, ContinuedFrom, InspectionToken},
     storage::{AppUser, StorageError},
 };
 use uuid::Uuid;
@@ -132,5 +132,38 @@ impl Chats {
             reason,
             tokens,
         })
+    }
+    /// Source input of a saved answer in the same session: text and memory flags.
+    pub async fn continuation_source(
+        &self,
+        scope: &AppUser,
+        session: Uuid,
+        output: Uuid,
+    ) -> Result<Option<(Uuid, String, bool, Option<String>, String)>, StorageError> {
+        Ok(sqlx::query_as("SELECT i.input_id,i.text,i.use_memory,i.memory_topic,o.text FROM chat_outputs o JOIN chat_inputs i ON i.input_id=o.input_id JOIN chats c ON c.session_id=o.session_id WHERE o.output_id=$1 AND o.session_id=$2 AND o.status='done' AND c.app_id=$3 AND c.user_id=$4")
+            .bind(output).bind(session).bind(&scope.app_id).bind(&scope.user_id).fetch_optional(&self.pool).await?)
+    }
+    pub async fn save_continuation(
+        &self,
+        scope: &AppUser,
+        output: Uuid,
+        from: &ContinuedFrom,
+    ) -> Result<(), StorageError> {
+        let rows=sqlx::query("INSERT INTO output_continuations(output_id,source_output_id,token_position,alternative_rank,source_byte) SELECT $1,$2,$3,$4,$5 FROM chat_outputs o JOIN chats c USING(session_id) JOIN chat_outputs s ON s.session_id=o.session_id WHERE o.output_id=$1 AND s.output_id=$2 AND c.app_id=$6 AND c.user_id=$7")
+            .bind(output).bind(from.output_id).bind(from.token_position).bind(from.alternative_rank).bind(from.source_byte).bind(&scope.app_id).bind(&scope.user_id)
+            .execute(&self.pool).await?.rows_affected();
+        if rows == 1 {
+            Ok(())
+        } else {
+            Err(StorageError::NotFound)
+        }
+    }
+    pub async fn continued_from(
+        &self,
+        scope: &AppUser,
+        output: Uuid,
+    ) -> Result<Option<ContinuedFrom>, StorageError> {
+        Ok(sqlx::query_as("SELECT k.source_output_id AS output_id,k.token_position,k.alternative_rank,k.source_byte FROM output_continuations k JOIN chat_outputs o USING(output_id) JOIN chats c ON c.session_id=o.session_id WHERE k.output_id=$1 AND c.app_id=$2 AND c.user_id=$3")
+            .bind(output).bind(&scope.app_id).bind(&scope.user_id).fetch_optional(&self.pool).await?)
     }
 }

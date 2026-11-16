@@ -246,6 +246,10 @@ impl Ollama {
             messages.push(json!({"role":"system","content":input.system}));
         }
         messages.push(json!({"role":"user","content":input.prompt,"images":input.images}));
+        // The model continues the last assistant message (cortex_api#125).
+        if let Some(prefix) = &input.prefix {
+            messages.push(json!({"role":"assistant","content":prefix}));
+        }
         collected.sent = true;
         let mut body = json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":{"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens}});
         if input.role == "answer" && collected.probabilities {

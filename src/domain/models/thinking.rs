@@ -10,6 +10,8 @@ pub struct ThinkingInput<'a> {
     pub model: &'a OutputModel,
     pub context: &'a AssembledContext,
     pub images: Vec<String>,
+    /// Continuation prefix for the answer call only.
+    pub prefix: Option<String>,
 }
 #[derive(Default)]
 pub struct ThinkingResult {

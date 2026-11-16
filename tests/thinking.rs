@@ -137,6 +137,7 @@ async fn none_path_and_second_round_cap_stream_every_role_with_one_model() {
             model: &model,
             context: &context,
             images: vec!["fixture image".into()],
+            prefix: None,
         };
         let (sink, mut rx, events) = channel(&config, None);
         let (_stop, stop) = watch::channel(false);
@@ -211,6 +212,7 @@ async fn full_180_second_limit_is_a_notice_and_keeps_attempt_usage() {
         model: &model,
         context: &context,
         images: vec![],
+        prefix: None,
     };
     let (sink, _rx, events) = channel(&config, None);
     let (_stop, stop) = watch::channel(false);
@@ -241,6 +243,7 @@ async fn stop_thinking_keeps_notes_and_continues_but_cancel_stops_output() {
             model: &model,
             context: &context,
             images: vec![],
+            prefix: None,
         };
         let (sink, mut rx, events) = channel(&config, None);
         let (stop_tx, stop) = watch::channel(false);

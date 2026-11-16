@@ -47,6 +47,8 @@ pub struct CallInput {
     pub images: Vec<String>,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// Saved answer prefix. The model continues it as its own message.
+    pub prefix: Option<String>,
 }
 #[derive(Clone)]
 pub enum DriverEvent {

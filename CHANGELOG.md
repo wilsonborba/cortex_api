@@ -21,6 +21,10 @@
 
 - Store relational output traces and scoped reads (#124)
 
+- Merge #124
+
+- Continue a saved answer from a recorded alternative (#125)
+
 
 ## v2.2.0 - 2026-11-14
 

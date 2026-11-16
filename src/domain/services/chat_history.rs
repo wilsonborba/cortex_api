@@ -93,10 +93,16 @@ impl ChatHistory {
                 title: m.title,
             })
             .collect();
+        let continued_from = self
+            .repo
+            .continued_from(scope, output.output_id)
+            .await
+            .map_err(error)?;
         Ok(OutputDetails {
             output,
             sources,
             memories,
+            continued_from,
         })
     }
     pub async fn page(

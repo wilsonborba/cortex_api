@@ -175,6 +175,7 @@ fn input(images: bool, role: &str) -> CallInput {
         },
         temperature: 0.0,
         max_tokens: 32,
+        prefix: None,
     }
 }
 async fn setup() -> (
