@@ -37,6 +37,7 @@ pub mod robots;
 pub mod crawler;
 pub mod extraction;
 pub mod recall;
+pub mod research_catalog;
 pub mod run_evidence;
 pub mod telemetry_reads;
 pub mod temporary;
