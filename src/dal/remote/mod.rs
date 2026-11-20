@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod ollama;
 pub mod openalex;
+pub mod reddit;
 pub mod runs;
 pub mod usage;
 
