@@ -67,4 +67,5 @@ pub mod files;
 pub mod logs;
 pub mod memory_graph;
 pub mod personas;
+pub mod remote_cli;
 pub mod telemetry_reads;
