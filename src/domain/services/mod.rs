@@ -39,6 +39,7 @@ pub mod robots;
 pub mod crawler;
 pub mod extraction;
 pub mod recall;
+pub mod remote_cli;
 pub mod research_catalog;
 pub mod research_limits;
 pub mod research_router;
