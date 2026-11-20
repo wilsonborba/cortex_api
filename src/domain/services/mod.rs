@@ -38,6 +38,7 @@ pub mod crawler;
 pub mod extraction;
 pub mod recall;
 pub mod research_catalog;
+pub mod research_limits;
 pub mod research_router;
 pub mod run_evidence;
 pub mod telemetry_reads;
