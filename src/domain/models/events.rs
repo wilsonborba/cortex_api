@@ -91,6 +91,12 @@ pub struct StageProgress {
     /// Present on the first stage event. Null means no completed runs exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_ms: Option<Option<u64>>,
+    /// Present on the first stage event once the input is accepted and saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+    /// Present on the first stage event once the input is accepted and saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_id: Option<Uuid>,
 }
 impl StageProgress {
     pub fn start(stage: StageName) -> Self {
@@ -101,6 +107,8 @@ impl StageProgress {
             error_number: None,
             notice_number: None,
             expected_ms: None,
+            session_id: None,
+            output_id: None,
         }
     }
     pub fn end(stage: StageName, record: StageRecord) -> Self {
@@ -111,6 +119,8 @@ impl StageProgress {
             error_number: record.error_number,
             notice_number: record.notice_number,
             expected_ms: None,
+            session_id: None,
+            output_id: None,
         }
     }
 }

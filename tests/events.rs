@@ -137,6 +137,8 @@ async fn doubled_output_has_native_sse_order_ids_envelope_and_no_internal_work()
         assert!(value["data"].is_object());
         if index == 0 {
             assert_eq!(value["data"]["expected_ms"], 40000);
+            assert!(value["data"].get("session_id").is_none());
+            assert!(value["data"].get("output_id").is_none());
         }
         if event == "token" {
             assert_eq!(value["data"]["text"], "ภาษาไทย😀");
