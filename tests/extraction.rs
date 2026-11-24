@@ -117,6 +117,56 @@ fn text_pdf(pdfium: &Pdfium) -> Vec<u8> {
     }
     doc.save_to_bytes().unwrap()
 }
+fn paged_pdf(pdfium: &Pdfium, texts: &[&str]) -> Vec<u8> {
+    let mut doc = pdfium.create_new_pdf().unwrap();
+    let font = doc.fonts_mut().helvetica();
+    for text in texts {
+        let mut page = doc
+            .pages_mut()
+            .create_page_at_end(PdfPagePaperSize::a4())
+            .unwrap();
+        page.objects_mut()
+            .create_text_object(
+                PdfPoints::new(40.0),
+                PdfPoints::new(700.0),
+                text,
+                font,
+                PdfPoints::new(24.0),
+            )
+            .unwrap();
+    }
+    doc.save_to_bytes().unwrap()
+}
+#[tokio::test]
+async fn pdf_page_selection_extracts_only_selected_pages_and_rejects_out_of_range() {
+    let config = Config::default();
+    let extractor = DocumentExtractor::new(&config);
+    let (sink, _rx, events) = channel(&config, None);
+    let file = file(
+        "pages.pdf",
+        "application/pdf",
+        paged_pdf(&pdfium(&config), &["PAGE ONE", "PAGE TWO", "PAGE THREE"]),
+    );
+    let selected = extractor
+        .extract_pdf_pages(file.clone(), &sink, Some(vec![2..=2]))
+        .await;
+    assert!(selected.error.is_none());
+    assert_eq!(selected.pages.len(), 1);
+    assert_eq!(selected.pages[0].number, 2);
+    assert!(selected.pages[0].text.contains("PAGE TWO"));
+    assert!(!selected.text().contains("PAGE ONE"));
+    assert!(!selected.text().contains("PAGE THREE"));
+
+    let invalid = extractor
+        .extract_pdf_pages(file, &sink, Some(vec![4..=4]))
+        .await;
+    assert_eq!(
+        invalid.error.unwrap().number,
+        process_numbers::INVALID_DATA.number
+    );
+    drop(sink);
+    events.await.unwrap();
+}
 fn scanned_pdf(pdfium: &Pdfium, count: usize) -> Vec<u8> {
     let text = text_pdf(pdfium);
     let source = pdfium.load_pdf_from_byte_slice(&text, None).unwrap();

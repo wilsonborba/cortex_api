@@ -52,6 +52,14 @@ impl DocumentExtractor {
         }
     }
     pub async fn extract(&self, file: DocumentFile, events: &EventSink) -> ExtractedFile {
+        self.extract_pdf_pages(file, events, None).await
+    }
+    pub async fn extract_pdf_pages(
+        &self,
+        file: DocumentFile,
+        events: &EventSink,
+        selected_pages: Option<Vec<std::ops::RangeInclusive<u32>>>,
+    ) -> ExtractedFile {
         let config = self.config.clone();
         let events = events.clone();
         let name = file.name.clone();
@@ -68,10 +76,22 @@ impl DocumentExtractor {
                     file.bytes.to_vec(),
                 )
                 .await
-                .map(|t| t.pages);
+                .map(|t| t.pages)
+                .and_then(|mut pages| {
+                    if let Some(ranges) = &selected_pages {
+                        let total = pages.iter().map(|page| page.number).max().unwrap_or(0);
+                        if ranges.iter().any(|range| *range.end() > total) {
+                            return Err(process_numbers::INVALID_DATA);
+                        }
+                        pages
+                            .retain(|page| ranges.iter().any(|range| range.contains(&page.number)));
+                    }
+                    Ok(pages)
+                });
             return finished(name, result, start);
         }
         let ocr_worker = self.ocr_worker.clone();
+        let selected_pages_for_local = selected_pages.clone();
         let result = tokio::task::spawn_blocking(move || {
             if file.bytes.len() > config.file_bytes {
                 return Err(process_numbers::FILE_SIZE);
@@ -94,12 +114,13 @@ impl DocumentExtractor {
                         ocr: false,
                     }])
                 }
-                "application/pdf" => documents::pdf(
+                "application/pdf" => documents::pdf_selected(
                     &config,
                     &file.name,
                     &file.bytes,
                     &events,
                     ocr_worker.as_ref(),
+                    selected_pages_for_local.as_deref(),
                 ),
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
                     documents::progress(&events, StepName::FileReadPage, &file.name, 1, 1);

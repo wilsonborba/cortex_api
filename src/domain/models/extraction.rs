@@ -6,6 +6,23 @@ pub struct DocumentFile {
     pub content_type: String,
     pub bytes: Arc<Vec<u8>>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextRange {
+    pub start_utf16: usize,
+    pub end_utf16: usize,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileSelection {
+    All,
+    PdfPages(Vec<std::ops::RangeInclusive<u32>>),
+    TextPassages(Vec<TextRange>),
+    AudioIntervals(Vec<AudioRange>),
+}
 pub struct TextPage {
     pub number: u32,
     pub text: String,

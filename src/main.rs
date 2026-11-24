@@ -128,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &config, url,
                             ),
                             queue: queue.clone(),
+                            config: config.clone(),
                         },
                     ),
                 },
