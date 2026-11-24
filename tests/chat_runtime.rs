@@ -526,6 +526,12 @@ async fn refused_inputs_save_nothing_and_call_no_model() {
 #[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema and UUID keys"]
 async fn permanent_and_temporary_chats_run_every_stage() {
     dotenvy::dotenv().ok();
+    let Some((test_redis_url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping permanent_and_temporary_chats_run_every_stage: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
     let admin = database::connect(Target::Test).await.unwrap();
     let schema = format!("test_runtime_{}", Uuid::new_v4().simple());
     sqlx::query(&format!("CREATE SCHEMA {schema}"))
@@ -541,7 +547,6 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .await
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
-    let cache = RedisCache::from_environment();
     let (log, address) = remote().await;
     let model = Arc::new(Model::default());
     let rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
@@ -847,7 +852,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
     );
 
     // Cleanup: SQL schema and every fixture key.
-    let client = redis::Client::open(std::env::var("CORTEX_REDIS_URL").unwrap()).unwrap();
+    let client = redis::Client::open(test_redis_url).unwrap();
     let mut redis = client.get_multiplexed_async_connection().await.unwrap();
     let a2a_outputs: Vec<Uuid> =
         sqlx::query_scalar("SELECT output_id FROM chat_outputs UNION SELECT session_id FROM chats")
@@ -892,6 +897,12 @@ async fn json_body(response: Response) -> Value {
 #[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema and UUID keys"]
 async fn reconnect_running_list_cancel_and_stop_thinking() {
     dotenvy::dotenv().ok();
+    let Some((test_redis_url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping reconnect_running_list_cancel_and_stop_thinking: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
     let admin = database::connect(Target::Test).await.unwrap();
     let schema = format!("test_reconnect_{}", Uuid::new_v4().simple());
     sqlx::query(&format!("CREATE SCHEMA {schema}"))
@@ -907,7 +918,6 @@ async fn reconnect_running_list_cancel_and_stop_thinking() {
         .await
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
-    let cache = RedisCache::from_environment();
     let (_log, address) = remote().await;
     let rt = runtime(
         pool.clone(),
@@ -1113,7 +1123,7 @@ async fn reconnect_running_list_cancel_and_stop_thinking() {
     assert_eq!(status, "done");
     assert!(!text.is_empty());
 
-    let client = redis::Client::open(std::env::var("CORTEX_REDIS_URL").unwrap()).unwrap();
+    let client = redis::Client::open(test_redis_url).unwrap();
     let mut redis = client.get_multiplexed_async_connection().await.unwrap();
     for id in [session, output, second, third] {
         let keys: Vec<String> = redis::cmd("KEYS")
@@ -1296,6 +1306,12 @@ async fn as_user(
 #[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema and UUID keys"]
 async fn two_users_and_an_admin_are_isolated_on_every_user_data_route() {
     dotenvy::dotenv().ok();
+    let Some((test_redis_url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping two_users_and_an_admin_are_isolated_on_every_user_data_route: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
     let admin_db = database::connect(Target::Test).await.unwrap();
     let schema = format!("test_isolation_{}", Uuid::new_v4().simple());
     sqlx::query(&format!("CREATE SCHEMA {schema}"))
@@ -1311,7 +1327,6 @@ async fn two_users_and_an_admin_are_isolated_on_every_user_data_route() {
         .await
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
-    let cache = RedisCache::from_environment();
     let (log, address) = remote().await;
     let rt = runtime(
         pool.clone(),
@@ -1468,7 +1483,7 @@ async fn two_users_and_an_admin_are_isolated_on_every_user_data_route() {
             .all(|r| !r.contains(secret) && !r.contains("temporary"))
     );
 
-    let client = redis::Client::open(std::env::var("CORTEX_REDIS_URL").unwrap()).unwrap();
+    let client = redis::Client::open(test_redis_url).unwrap();
     let mut redis = client.get_multiplexed_async_connection().await.unwrap();
     for id in [&s, &o, &t, &to] {
         let keys: Vec<String> = redis::cmd("KEYS")
@@ -1504,12 +1519,17 @@ async fn temporary_image_upload_and_followup_reach_vision_without_persistent_wri
         cache::CacheKey, extraction::DocumentFile, files::Upload, identity::Caller,
     };
     dotenvy::dotenv().ok();
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping temporary_image_upload_and_followup_reach_vision_without_persistent_writes: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
     let pool = database::connect(Target::Test).await.unwrap();
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM chats WHERE user_id='alice'")
         .fetch_one(&pool)
         .await
         .unwrap();
-    let cache = RedisCache::from_environment();
     let (log, address) = remote().await;
     let model = Arc::new(Model::default());
     let rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
@@ -1598,6 +1618,12 @@ async fn temporary_image_upload_and_followup_reach_vision_without_persistent_wri
 async fn continue_a_saved_answer_from_a_recorded_alternative() {
     use cortex_api::domain::models::{inspection::InspectionCapture, storage::AppUser};
     dotenvy::dotenv().ok();
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping continue_a_saved_answer_from_a_recorded_alternative: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
     let admin = database::connect(Target::Test).await.unwrap();
     let schema = format!("test_continue_{}", Uuid::new_v4().simple());
     sqlx::query(&format!("CREATE SCHEMA {schema}"))
@@ -1613,7 +1639,6 @@ async fn continue_a_saved_answer_from_a_recorded_alternative() {
         .await
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
-    let cache = RedisCache::from_environment();
     let (_log, address) = remote().await;
     let model = Arc::new(Model::default());
     let rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
@@ -1743,6 +1768,12 @@ async fn continue_a_saved_answer_from_a_recorded_alternative() {
 async fn first_stream_event_carries_ids_and_cancels_before_done() {
     use futures_util::StreamExt;
     dotenvy::dotenv().ok();
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping first_stream_event_carries_ids_and_cancels_before_done: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
     let admin = database::connect(Target::Test).await.unwrap();
     let schema = format!("test_first_ids_{}", Uuid::new_v4().simple());
     sqlx::query(&format!("CREATE SCHEMA {schema}"))
@@ -1758,7 +1789,6 @@ async fn first_stream_event_carries_ids_and_cancels_before_done() {
         .await
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
-    let cache = RedisCache::from_environment();
     let (_log, address) = remote().await;
     let rt = runtime(
         pool.clone(),

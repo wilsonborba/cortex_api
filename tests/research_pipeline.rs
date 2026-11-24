@@ -512,7 +512,10 @@ async fn chat_runtime_end_to_end_uses_catalog_router_and_saves_only_labeled_read
         research_host_spacing: Duration::from_millis(1),
         ..Default::default()
     };
-    let cache = RedisCache::from_environment();
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping research_pipeline test: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
     let store = Arc::new(
         RunStore::new(
             &config,

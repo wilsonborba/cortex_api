@@ -131,11 +131,16 @@ impl UsageSource for EmptyRecords {
     }
 }
 #[tokio::test]
-#[ignore = "requires the approved Valkey namespace; unique fixture keys only"]
+#[ignore = "requires CORTEX_TEST_REDIS_URL; unique fixture keys only"]
 async fn route_values_match_real_redis_buckets() {
     use cortex_api::dal::remote::{cache::RedisCache, usage::RedisLedger};
     dotenvy::dotenv().ok();
-    let cache = RedisCache::from_environment();
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping route_values_match_real_redis_buckets: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
     let ledger = Arc::new(RedisLedger::new(
         cache.clone(),
         Arc::new(EmptyRecords),

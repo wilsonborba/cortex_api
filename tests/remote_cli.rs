@@ -484,8 +484,10 @@ async fn remote_cli_postgres_and_valkey_multi_instance_persistence_and_sse_fanou
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
 
-    let cache = RedisCache::from_environment();
-    assert!(cache.is_configured(), "CORTEX_REDIS_URL must be configured");
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping remote_cli test: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
     let config = Config::default();
 
     // Instance 1

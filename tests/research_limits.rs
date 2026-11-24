@@ -653,11 +653,13 @@ async fn real_research_path_honors_robots_and_conditional_cache() {
 }
 
 #[tokio::test]
-#[ignore = "requires approved Valkey namespace"]
+#[ignore = "requires CORTEX_TEST_REDIS_URL"]
 async fn valkey_limit_store_enforces_shared_quota_and_cooldown_across_instances() {
     dotenvy::dotenv().ok();
-    let cache = RedisCache::from_environment();
-    assert!(cache.is_configured(), "CORTEX_REDIS_URL must be configured");
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping valkey_limit_store test: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
     let unique = Uuid::new_v4().simple().to_string();
     let scope = format!("test-provider-{unique}");
     let host = format!("test-{unique}.example");
