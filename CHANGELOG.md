@@ -1,6 +1,19 @@
 # Changelog
 
 
+## Unreleased
+
+
+### Bug Fixes
+
+- Align source selection range grammar (#136)
+
+
+### Features
+
+- Apply bounded selections to temporary uploads
+
+
 ## v2.3.0 - 2026-11-16
 
 
@@ -20,6 +33,10 @@
 - Update for #125
 
 - Prepare development for v2.3.0
+
+- Prepare v2.3.0
+
+- Release v2.3.0
 
 
 ### Features
