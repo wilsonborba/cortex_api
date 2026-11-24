@@ -69,3 +69,33 @@ pub mod memory_graph;
 pub mod personas;
 pub mod remote_cli;
 pub mod telemetry_reads;
+
+pub struct AppServices {
+    pub config: crate::core::config::Config,
+    pub runtime: std::sync::Arc<crate::domain::services::chat_runtime::ChatRuntime>,
+    pub personas: crate::domain::services::personas::Personas,
+    pub chat_delete: crate::domain::services::chat_delete::ChatDelete,
+    pub telemetry_reads: crate::domain::services::telemetry_reads::TelemetryReads,
+    pub memory_graph: crate::domain::services::memory_graph::MemoryGraph,
+    pub chats: crate::dal::local::chats::Chats,
+    pub logs: crate::core::logs::LogHub,
+    pub ledger: std::sync::Arc<dyn crate::domain::models::usage::UsageLedger>,
+    pub remote_cli: crate::domain::services::remote_cli::RemoteCliService,
+}
+
+/// Application router used by the live server binary and end-to-end router tests.
+pub fn app_router(services: AppServices) -> Router {
+    let files = services.runtime.files.clone();
+    let routes = models::router(services.config.clone())
+        .merge(chat_inputs::router(services.runtime))
+        .merge(personas::router(services.personas))
+        .merge(chat_delete::router(services.chat_delete))
+        .merge(telemetry_reads::router(services.telemetry_reads))
+        .merge(memory_graph::router(services.memory_graph))
+        .merge(files::router(files))
+        .merge(logs::router(services.logs))
+        .merge(telemetry::router(services.ledger, &services.config))
+        .merge(chats::router(services.chats, services.config))
+        .merge(remote_cli::routes(services.remote_cli));
+    with_response_contract(routes)
+}

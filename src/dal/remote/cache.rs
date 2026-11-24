@@ -88,6 +88,25 @@ impl RedisCache {
         let _: i64 = self.execute(redis::cmd("DEL").arg(key.name())).await?;
         Ok(())
     }
+    pub fn is_configured(&self) -> bool {
+        self.client.is_some()
+    }
+    pub async fn publish(&self, channel: &CacheKey, message: &str) -> Result<i64, CacheError> {
+        self.execute(redis::cmd("PUBLISH").arg(channel.name()).arg(message))
+            .await
+    }
+    pub async fn subscribe(&self, channel: &CacheKey) -> Result<redis::aio::PubSub, CacheError> {
+        let client = self.client.as_ref().ok_or(CacheError::Unavailable)?;
+        let mut pubsub = tokio::time::timeout(self.timeout, client.get_async_pubsub())
+            .await
+            .map_err(|_| CacheError::Unavailable)?
+            .map_err(|_| CacheError::Unavailable)?;
+        tokio::time::timeout(self.timeout, pubsub.subscribe(channel.name()))
+            .await
+            .map_err(|_| CacheError::Unavailable)?
+            .map_err(|_| CacheError::Unavailable)?;
+        Ok(pubsub)
+    }
 }
 
 impl RedisCache {

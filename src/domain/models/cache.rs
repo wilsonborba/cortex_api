@@ -16,6 +16,12 @@ pub enum CacheKey {
         app: String,
         user: String,
     },
+    /// Active remote CLI presence lease (#132).
+    RemoteCliPresence(String),
+    /// Remote CLI command fan-out channel (#132).
+    RemoteCliCliChannel(String),
+    /// Remote CLI controller event fan-out channel (#132).
+    RemoteCliCtrlChannel(String),
 }
 impl CacheKey {
     pub fn name(&self) -> String {
@@ -30,6 +36,9 @@ impl CacheKey {
             Self::MemoryOverview { app, user } => {
                 format!("cortex:memory_overview:{app}:{user}")
             }
+            Self::RemoteCliPresence(id) => format!("cortex:remote_cli:presence:{id}"),
+            Self::RemoteCliCliChannel(id) => format!("cortex:remote_cli:cli:{id}"),
+            Self::RemoteCliCtrlChannel(id) => format!("cortex:remote_cli:ctrl:{id}"),
         }
     }
 }
