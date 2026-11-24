@@ -206,6 +206,7 @@ fn build_real_app_router(
         logs,
         ledger,
         remote_cli,
+        agent_runs: cortex_api::domain::services::agent_runs::AgentRunService::in_memory(120_000),
     })
 }
 

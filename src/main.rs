@@ -269,10 +269,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
             cache: cortex_api::dal::remote::cache::RedisCache::from_environment(),
         },
-        chats: cortex_api::dal::local::chats::Chats { pool: chat_pool },
+        chats: cortex_api::dal::local::chats::Chats {
+            pool: chat_pool.clone(),
+        },
         logs,
         ledger,
         remote_cli,
+        agent_runs: cortex_api::domain::services::agent_runs::AgentRunService::new(
+            std::sync::Arc::new(
+                cortex_api::dal::local::agent_runs::PostgresAgentRunStore::new(chat_pool.clone()),
+            ),
+            120_000,
+            4,
+            2,
+            8192,
+        ),
     });
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address = %config.listen, "Server started");

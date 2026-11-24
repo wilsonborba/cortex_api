@@ -59,6 +59,7 @@ pub mod telemetry;
 
 pub mod events;
 
+pub mod agent_runs;
 pub mod chat_delete;
 pub mod chat_inputs;
 pub mod chats;
@@ -81,6 +82,7 @@ pub struct AppServices {
     pub logs: crate::core::logs::LogHub,
     pub ledger: std::sync::Arc<dyn crate::domain::models::usage::UsageLedger>,
     pub remote_cli: crate::domain::services::remote_cli::RemoteCliService,
+    pub agent_runs: crate::domain::services::agent_runs::AgentRunService,
 }
 
 /// Application router used by the live server binary and end-to-end router tests.
@@ -97,5 +99,6 @@ pub fn app_router(services: AppServices) -> Router {
         .merge(telemetry::router(services.ledger, &services.config))
         .merge(chats::router(services.chats, services.config))
         .merge(remote_cli::routes(services.remote_cli));
+    let routes = routes.merge(agent_runs::router(services.agent_runs));
     with_response_contract(routes)
 }
