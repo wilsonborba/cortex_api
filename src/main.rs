@@ -167,55 +167,75 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         (runtime, personas)
     };
-    let files = runtime.files.clone();
-    let routes = cortex_api::presentation::models::router(config.clone())
-        .merge(cortex_api::presentation::chat_inputs::router(runtime))
-        .merge(cortex_api::presentation::personas::router(personas))
-        .merge(cortex_api::presentation::chat_delete::router(
-            cortex_api::domain::services::chat_delete::ChatDelete {
-                history: cortex_api::domain::services::chat_history::ChatHistory {
-                    repo: cortex_api::dal::local::chats::Chats {
-                        pool: chat_pool.clone(),
-                    },
-                    config: config.clone(),
-                    hippocampus: hippocampus.clone(),
+    let remote_cli = cortex_api::domain::services::remote_cli::RemoteCliService::new(
+        std::sync::Arc::new(
+            cortex_api::dal::local::remote_cli::PostgresRemoteCliStore::new(chat_pool.clone()),
+        ),
+        cortex_api::dal::remote::cache::RedisCache::from_environment(),
+        &config,
+    );
+    let _remote_cli_cleanup = {
+        let remote_cli = remote_cli.clone();
+        let command_ttl = config.remote_cli_command_ttl;
+        tokio::spawn(async move {
+            let period = (command_ttl / 2).max(std::time::Duration::from_secs(2));
+            let mut timer = tokio::time::interval(period);
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                timer.tick().await;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let _ = remote_cli.expire_pending_commands(now_ms).await;
+                let _ = remote_cli.purge_expired_sessions(now_ms).await;
+            }
+        })
+    };
+    let app = cortex_api::presentation::app_router(cortex_api::presentation::AppServices {
+        config: config.clone(),
+        runtime,
+        personas,
+        chat_delete: cortex_api::domain::services::chat_delete::ChatDelete {
+            history: cortex_api::domain::services::chat_history::ChatHistory {
+                repo: cortex_api::dal::local::chats::Chats {
+                    pool: chat_pool.clone(),
                 },
+                config: config.clone(),
                 hippocampus: hippocampus.clone(),
             },
-        ))
-        .merge(cortex_api::presentation::telemetry_reads::router(
-            cortex_api::domain::services::telemetry_reads::TelemetryReads {
-                store,
-                timing: cortex_api::dal::remote::timing::TimingStore::new(
-                    &config,
+            hippocampus,
+        },
+        telemetry_reads: cortex_api::domain::services::telemetry_reads::TelemetryReads {
+            store,
+            timing: cortex_api::dal::remote::timing::TimingStore::new(
+                &config,
+                cortex_api::dal::remote::cache::RedisCache::from_environment(),
+            ),
+            config: config.clone(),
+        },
+        memory_graph: cortex_api::domain::services::memory_graph::MemoryGraph {
+            hippocampus: cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
+                .map_err(|_| "The Hippocampus URL is not valid")?
+                .with_overview_cache(
                     cortex_api::dal::remote::cache::RedisCache::from_environment(),
                 ),
-                config: config.clone(),
-            },
-        ))
-        .merge(cortex_api::presentation::memory_graph::router(
-            cortex_api::domain::services::memory_graph::MemoryGraph {
-                hippocampus: hippocampus.clone(),
-                config: config.clone(),
-                records: Some(cortex_api::dal::local::memory_records::MemoryRecords {
-                    pool: chat_pool.clone(),
-                }),
-                cache: cortex_api::dal::remote::cache::RedisCache::from_environment(),
-            },
-        ))
-        .merge(cortex_api::presentation::files::router(files))
-        .merge(cortex_api::presentation::logs::router(logs))
-        .merge(cortex_api::presentation::telemetry::router(ledger, &config))
-        .merge(cortex_api::presentation::chats::router(
-            cortex_api::dal::local::chats::Chats { pool: chat_pool },
-            config.clone(),
-        ));
+            config: config.clone(),
+            records: Some(cortex_api::dal::local::memory_records::MemoryRecords {
+                pool: chat_pool.clone(),
+            }),
+            cache: cortex_api::dal::remote::cache::RedisCache::from_environment(),
+        },
+        chats: cortex_api::dal::local::chats::Chats { pool: chat_pool },
+        logs,
+        ledger,
+        remote_cli,
+    });
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address = %config.listen, "Server started");
     axum::serve(
         listener,
-        cortex_api::presentation::with_response_contract(routes)
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
     Ok(())

@@ -212,6 +212,22 @@ pub const FILE_WORKER_FAILED: ProcessNumber = ProcessNumber {
     number: 1050,
     message: "The file worker did not answer",
 };
+pub const REMOTE_SESSION_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1051,
+    message: "The remote session was not found",
+};
+pub const REMOTE_SESSION_FORBIDDEN: ProcessNumber = ProcessNumber {
+    number: 1052,
+    message: "The remote session belongs to another user",
+};
+pub const REMOTE_APPROVAL_ANSWERED: ProcessNumber = ProcessNumber {
+    number: 1053,
+    message: "The approval request was already answered",
+};
+pub const REMOTE_CLI_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1054,
+    message: "The remote session store is not available",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -264,6 +280,10 @@ pub const REGISTRY: &[ProcessNumber] = &[
     AUDIO_LIMIT,
     AUDIO_FAILED,
     FILE_WORKER_FAILED,
+    REMOTE_SESSION_NOT_FOUND,
+    REMOTE_SESSION_FORBIDDEN,
+    REMOTE_APPROVAL_ANSWERED,
+    REMOTE_CLI_UNAVAILABLE,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

@@ -9,4 +9,5 @@ pub mod documents;
 pub mod exchange_memory;
 
 pub mod output_inspection;
+pub mod remote_cli;
 pub mod research_sources;
