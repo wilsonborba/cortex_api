@@ -48,7 +48,10 @@ async fn openalex_metadata_is_labeled_and_not_confused_with_read_content() {
     assert_eq!(meta_only.len(), 2);
     assert_eq!(meta_only[0].stage, EvidenceStage::MetadataOnly);
     assert!(meta_only[0].limitation_label.contains("metadata_only"));
-    assert_eq!(meta_only[0].work.abstract_text.as_deref(), Some("Climate model"));
+    assert_eq!(
+        meta_only[0].work.abstract_text.as_deref(),
+        Some("Climate model")
+    );
 
     // Read-when-available mode without oa_url still honestly reports MetadataOnly
     let try_read = svc.gather("climate", 2, true).await.unwrap();

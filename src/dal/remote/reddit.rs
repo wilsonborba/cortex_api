@@ -62,8 +62,8 @@ impl RedditClient {
             .map_err(|_| "Missing CORTEX_REDDIT_CLIENT_ID".to_string())?;
         let client_secret = std::env::var("CORTEX_REDDIT_CLIENT_SECRET")
             .map_err(|_| "Missing CORTEX_REDDIT_CLIENT_SECRET".to_string())?;
-        let user_agent = std::env::var("CORTEX_REDDIT_USER_AGENT")
-            .unwrap_or_else(|_| "asodya/1.0".to_string());
+        let user_agent =
+            std::env::var("CORTEX_REDDIT_USER_AGENT").unwrap_or_else(|_| "asodya/1.0".to_string());
         Self::new(
             "https://www.reddit.com",
             "https://oauth.reddit.com",
@@ -82,6 +82,7 @@ impl RedditClient {
     ) -> Result<Self, String> {
         let ua = user_agent.into();
         let http = reqwest::Client::builder()
+            .use_native_tls()
             .timeout(Duration::from_secs(10))
             .user_agent(ua.clone())
             .build()
@@ -126,6 +127,7 @@ impl RedditClient {
             .http
             .get(format!("{}/search", self.api_base))
             .bearer_auth(token)
+            .header(reqwest::header::ACCEPT, "application/json")
             .query(&[
                 ("q", query),
                 ("limit", &limit.clamp(1, 25).to_string()),

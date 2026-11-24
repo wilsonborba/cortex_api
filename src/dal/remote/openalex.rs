@@ -1,3 +1,4 @@
+use crate::dal::remote::web_page::page_url;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -105,13 +106,10 @@ impl OpenAlexClient {
         query: &str,
         per_page: usize,
     ) -> Result<Vec<OpenAlexWork>, String> {
-        let mut req = self
-            .http
-            .get(format!("{}/works", self.base_url))
-            .query(&[
-                ("search", query),
-                ("per-page", &per_page.clamp(1, 25).to_string()),
-            ]);
+        let mut req = self.http.get(format!("{}/works", self.base_url)).query(&[
+            ("search", query),
+            ("per-page", &per_page.clamp(1, 25).to_string()),
+        ]);
         if let Some(ref key) = self.api_key {
             req = req.query(&[("api_key", key.as_str())]);
         }
@@ -119,10 +117,14 @@ impl OpenAlexClient {
             req = req.query(&[("mailto", mail.as_str())]);
         }
 
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| format!("OpenAlex request failed: {e}"))?;
+        let resp = req.send().await.map_err(|e| {
+            // Never log or format the raw error because its URL contains api_key.
+            if e.is_timeout() {
+                "OpenAlex request timed out".to_string()
+            } else {
+                "OpenAlex request failed".to_string()
+            }
+        })?;
         let status = resp.status();
         if !status.is_success() {
             return Err(format!("OpenAlex returned HTTP {}", status.as_u16()));
@@ -130,7 +132,7 @@ impl OpenAlexClient {
         let body: OpenAlexSearchResponse = resp
             .json()
             .await
-            .map_err(|e| format!("OpenAlex JSON decode failed: {e}"))?;
+            .map_err(|_| "OpenAlex JSON decode failed".to_string())?;
 
         Ok(body
             .results
@@ -154,20 +156,25 @@ impl OpenAlexClient {
     }
 
     pub async fn fetch_oa_content(&self, url: &str, max_bytes: usize) -> Result<String, String> {
+        let valid_url =
+            page_url(url).map_err(|_| "OpenAlex content URL is not allowed".to_string())?;
         let resp = self
             .http
-            .get(url)
+            .get(valid_url)
             .send()
             .await
-            .map_err(|e| format!("OpenAlex content fetch failed: {e}"))?;
+            .map_err(|_| "OpenAlex content fetch failed".to_string())?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("OpenAlex content returned HTTP {}", status.as_u16()));
+            return Err(format!(
+                "OpenAlex content returned HTTP {}",
+                status.as_u16()
+            ));
         }
         let bytes = resp
             .bytes()
             .await
-            .map_err(|e| format!("OpenAlex content read failed: {e}"))?;
+            .map_err(|_| "OpenAlex content read failed".to_string())?;
         let slice = &bytes[..bytes.len().min(max_bytes)];
         Ok(String::from_utf8_lossy(slice).into_owned())
     }

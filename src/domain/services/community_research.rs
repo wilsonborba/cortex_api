@@ -20,9 +20,16 @@ pub struct CommunityEvidence {
 /// - Pantip / Bloggang: allowed public path only, otherwise unavailable (never scraped).
 /// - Blognone: public feeds with explicit attribution.
 /// - Reddit: authenticated OAuth API labeled as community evidence.
-pub fn evaluate_community_source(host: &str, has_allowed_public_path: bool) -> CommunityAccessOutcome {
+pub fn evaluate_community_source(
+    host: &str,
+    has_allowed_public_path: bool,
+) -> CommunityAccessOutcome {
     let h = host.trim().to_ascii_lowercase();
-    if h == "pantip.com" || h.ends_with(".pantip.com") || h == "bloggang.com" || h.ends_with(".bloggang.com") {
+    if h == "pantip.com"
+        || h.ends_with(".pantip.com")
+        || h == "bloggang.com"
+        || h.ends_with(".bloggang.com")
+    {
         if has_allowed_public_path {
             return CommunityAccessOutcome::Allowed {
                 attribution: format!("{h} (allowed public path, community discussion)"),
@@ -47,6 +54,7 @@ pub fn evaluate_community_source(host: &str, has_allowed_public_path: bool) -> C
     }
 }
 
+#[derive(Clone)]
 pub struct CommunityResearchService {
     reddit: RedditClient,
 }
@@ -68,7 +76,8 @@ impl CommunityResearchService {
                 let canonical_url = format!("https://www.reddit.com{}", post.permalink);
                 CommunityEvidence {
                     post,
-                    evidence_label: "community_evidence: reddit discussion (not authoritative fact)".into(),
+                    evidence_label:
+                        "community_evidence: reddit discussion (not authoritative fact)".into(),
                     canonical_url,
                 }
             })

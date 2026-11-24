@@ -1,6 +1,6 @@
 use crate::domain::{
     models::{context::ContextText, events::Source, pipeline::SourceNotice},
-    services::research_limits::CoverageReport,
+    services::{research_limits::CoverageReport, research_router::EvidenceItem},
 };
 #[derive(Default)]
 pub struct GatheredWeb {
@@ -9,6 +9,8 @@ pub struct GatheredWeb {
     pub notices: Vec<SourceNotice>,
     pub pages_read: u32,
     pub coverage: CoverageReport,
+    pub selected_hosts: Vec<String>,
+    pub evidence: Vec<EvidenceItem>,
 }
 
 pub struct WebInput<'a> {
