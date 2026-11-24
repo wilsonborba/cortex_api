@@ -1,10 +1,14 @@
-use crate::domain::models::{context::ContextText, events::Source, pipeline::SourceNotice};
+use crate::domain::{
+    models::{context::ContextText, events::Source, pipeline::SourceNotice},
+    services::research_limits::CoverageReport,
+};
 #[derive(Default)]
 pub struct GatheredWeb {
     pub texts: Vec<ContextText>,
     pub sources: Vec<Source>,
     pub notices: Vec<SourceNotice>,
     pub pages_read: u32,
+    pub coverage: CoverageReport,
 }
 
 pub struct WebInput<'a> {

@@ -73,11 +73,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             domain::{
                 models::security::InjectionClassifier,
                 services::{
-                    balancer::Scheduler, chat_runtime::ChatRuntime, crawler::WebRetriever,
-                    exchange_memory::ExchangeMemories, extraction::DocumentExtractor,
-                    files::FileProxy, history::History, recall::MemoryRecall,
-                    run_evidence::RunEvidence, search::WebSearch, security::SecurityShield,
-                    temporary::TemporaryChats, thinking::Thinking,
+                    balancer::Scheduler,
+                    chat_runtime::ChatRuntime,
+                    crawler::WebRetriever,
+                    exchange_memory::ExchangeMemories,
+                    extraction::DocumentExtractor,
+                    files::FileProxy,
+                    history::History,
+                    recall::MemoryRecall,
+                    research_limits::{
+                        ResearchPageCache, ResearchPolitenessGuard, ValkeyLimitStore,
+                    },
+                    run_evidence::RunEvidence,
+                    search::WebSearch,
+                    security::SecurityShield,
+                    temporary::TemporaryChats,
+                    thinking::Thinking,
                 },
             },
         };
@@ -142,7 +153,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 PageReader::new(&config).map_err(|_| "The web page reader is not valid")?,
                 shield.clone(),
                 driver.clone(),
-            ),
+            )
+            .with_politeness(
+                std::sync::Arc::new(ResearchPolitenessGuard::from_config(
+                    &config,
+                    std::sync::Arc::new(ValkeyLimitStore::new(RedisCache::from_environment())),
+                )),
+                std::sync::Arc::new(ResearchPageCache::new(
+                    RedisCache::from_environment(),
+                    config.research_cache_ttl,
+                )),
+            )
+            .with_robots_on_direct_reads(true),
             thinking: Thinking::new(&config, driver),
             memories: ExchangeMemories {
                 repo: chats.clone(),

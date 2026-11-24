@@ -228,6 +228,14 @@ pub const REMOTE_CLI_UNAVAILABLE: ProcessNumber = ProcessNumber {
     number: 1054,
     message: "The remote session store is not available",
 };
+pub const WEB_SOURCE_BLOCKED: ProcessNumber = ProcessNumber {
+    number: 1055,
+    message: "The web source blocked access",
+};
+pub const WEB_RATE_LIMITED: ProcessNumber = ProcessNumber {
+    number: 1056,
+    message: "The web source rate limit was reached",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -284,6 +292,8 @@ pub const REGISTRY: &[ProcessNumber] = &[
     REMOTE_SESSION_FORBIDDEN,
     REMOTE_APPROVAL_ANSWERED,
     REMOTE_CLI_UNAVAILABLE,
+    WEB_SOURCE_BLOCKED,
+    WEB_RATE_LIMITED,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {
