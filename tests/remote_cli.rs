@@ -188,6 +188,7 @@ fn build_real_app_router(
                 repo: chats.clone(),
                 config: config.clone(),
                 hippocampus: hippocampus.clone(),
+                runs: None,
             },
             hippocampus: hippocampus.clone(),
         },

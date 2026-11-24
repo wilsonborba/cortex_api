@@ -86,6 +86,7 @@ pub struct AppServices {
 /// Application router used by the live server binary and end-to-end router tests.
 pub fn app_router(services: AppServices) -> Router {
     let files = services.runtime.files.clone();
+    let runs = services.runtime.runs.clone();
     let routes = models::router(services.config.clone())
         .merge(chat_inputs::router(services.runtime))
         .merge(personas::router(services.personas))
@@ -95,7 +96,11 @@ pub fn app_router(services: AppServices) -> Router {
         .merge(files::router(files))
         .merge(logs::router(services.logs))
         .merge(telemetry::router(services.ledger, &services.config))
-        .merge(chats::router(services.chats, services.config))
+        .merge(chats::router_with_runs(
+            services.chats,
+            services.config,
+            Some(runs),
+        ))
         .merge(remote_cli::routes(services.remote_cli));
     with_response_contract(routes)
 }

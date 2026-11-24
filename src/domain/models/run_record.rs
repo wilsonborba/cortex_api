@@ -12,6 +12,7 @@ pub struct RunRecord {
     pub mode: RunMode,
     pub total_ms: u64,
     pub stages: Vec<StageRecord>,
+    #[serde(default)]
     pub calls: Vec<ModelCall>,
     pub counts: RunCounts,
 }

@@ -28,6 +28,7 @@ struct Double {
     docs: Arc<Mutex<BTreeMap<String, Value>>>,
     puts: Arc<AtomicUsize>,
     finds: Arc<AtomicUsize>,
+    bulk_reads: Arc<AtomicUsize>,
     conflict: Arc<Mutex<Option<String>>>,
 }
 async fn read(State(s): State<Double>, Path(id): Path<String>) -> Response {
@@ -69,6 +70,23 @@ async fn find(State(s): State<Double>, Json(body): Json<Value>) -> Json<Value> {
         .unwrap_or(bookmark);
     Json(json!({"docs":docs,"bookmark":next}))
 }
+async fn all_docs(State(s): State<Double>, Json(body): Json<Value>) -> Json<Value> {
+    s.bulk_reads.fetch_add(1, Ordering::SeqCst);
+    let docs = s.docs.lock().unwrap();
+    let rows: Vec<_> = body["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| {
+            let id = key.as_str().unwrap();
+            match docs.get(id) {
+                Some(doc) => json!({"id":id,"key":id,"value":{"rev":doc["_rev"]},"doc":doc}),
+                None => json!({"key":id,"error":"not_found"}),
+            }
+        })
+        .collect();
+    Json(json!({"total_rows":rows.len(),"offset":0,"rows":rows}))
+}
 async fn remove(
     State(s): State<Double>,
     Path(id): Path<String>,
@@ -97,6 +115,7 @@ async fn server() -> (Double, Arc<RunStore>, tokio::task::JoinHandle<()>) {
     let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/runs", socket.local_addr().unwrap());
     let app = Router::new()
+        .route("/runs/_all_docs", post(all_docs))
         .route("/runs/_find", post(find))
         .route("/runs/{id}", get(read).put(put).delete(remove))
         .with_state(state.clone());
@@ -139,6 +158,24 @@ fn record(created: chrono::DateTime<chrono::Utc>) -> RunRecord {
         calls: vec![],
         counts: counts(),
     }
+}
+
+#[tokio::test]
+async fn bulk_lookup_uses_one_bounded_http_request_and_omits_missing_rows() {
+    let (state, store, server) = server().await;
+    let record = record(chrono::Utc::now());
+    let id = record.output_id.to_string();
+    let mut value = serde_json::to_value(&record).unwrap();
+    value["_id"] = id.clone().into();
+    value["_rev"] = "1-test".into();
+    state.docs.lock().unwrap().insert(id, value);
+    let missing = Uuid::new_v4();
+    let found = store.get_many(&[record.output_id, missing]).await.unwrap();
+    assert_eq!(found, vec![record]);
+    assert_eq!(state.bulk_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(store.get_many(&[]).await.unwrap(), vec![]);
+    assert_eq!(state.bulk_reads.load(Ordering::SeqCst), 1);
+    server.abort();
 }
 fn stage(name: StageName, calls: Vec<ModelCall>) -> StageResult<String> {
     StageResult {

@@ -162,6 +162,51 @@ impl RunStore {
             serde_json::from_value(value).map_err(|_| RunStoreError::InvalidRecord)?,
         ))
     }
+    /// Read at most one history page of run records in one CouchDB request.
+    /// Missing documents and malformed documents are omitted independently.
+    pub async fn get_many(&self, ids: &[uuid::Uuid]) -> Result<Vec<RunRecord>, RunStoreError> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        if ids.len() > 100 {
+            return Err(RunStoreError::InvalidRecord);
+        }
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                &["_all_docs"],
+                Some(&json!({
+                    "keys": ids.iter().map(uuid::Uuid::to_string).collect::<Vec<_>>(),
+                    "include_docs": true
+                })),
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(RunStoreError::Unavailable);
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|_| RunStoreError::Unavailable)?;
+        let rows = body["rows"]
+            .as_array()
+            .ok_or(RunStoreError::InvalidRecord)?;
+        let mut records = Vec::with_capacity(rows.len().min(ids.len()));
+        for row in rows {
+            let Some(mut value) = row.get("doc").cloned().filter(Value::is_object) else {
+                continue;
+            };
+            let Some(object) = value.as_object_mut() else {
+                continue;
+            };
+            object.remove("_id");
+            object.remove("_rev");
+            if let Ok(record) = serde_json::from_value::<RunRecord>(value) {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
     pub async fn stats(&self) -> Result<Value, RunStoreError> {
         let mut url = self.url(&["_design", "cortex_runs", "_view", "stats"]);
         url.query_pairs_mut().append_pair("group", "true");

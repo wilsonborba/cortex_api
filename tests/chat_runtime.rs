@@ -1260,6 +1260,7 @@ fn full_app(rt: &Arc<ChatRuntime>) -> Router {
                         repo: rt.chats.clone(),
                         config: rt.config.clone(),
                         hippocampus: hippocampus.clone(),
+                        runs: Some(rt.runs.clone()),
                     },
                     hippocampus,
                 },
