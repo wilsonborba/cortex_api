@@ -18,6 +18,7 @@ pub enum TurnRequest {
 pub struct AcceptedTurn {
     pub ids: InputIds,
     pub temporary: bool,
+    pub tools_enabled: bool,
     pub question: String,
     pub needs_web: bool,
     pub web_mode: WebMode,
@@ -51,6 +52,7 @@ impl AcceptedTurn {
 #[derive(Clone)]
 pub struct Turn {
     pub caller: Caller,
+    pub tools_enabled: bool,
     pub request: Arc<TurnRequest>,
     pub accepted: Option<Arc<AcceptedTurn>>,
     pub files: Vec<ContextText>,
@@ -70,6 +72,7 @@ impl Turn {
     pub fn new(caller: Caller, request: TurnRequest) -> Self {
         Self {
             caller,
+            tools_enabled: false,
             request: Arc::new(request),
             accepted: None,
             files: vec![],

@@ -73,6 +73,17 @@ async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Response 
 }
 async fn chat(State(s): State<Double>, Json(body): Json<Value>) -> Response {
     s.bodies.lock().unwrap().push(body.clone());
+    if body.get("tools").is_some() {
+        let has_result = body["messages"]
+            .as_array()
+            .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"));
+        let frame = if has_result {
+            json!({"message":{"content":"resumed"},"done":true,"prompt_eval_count":4,"eval_count":2})
+        } else {
+            json!({"message":{"content":"","tool_calls":[{"function":{"name":"view_file","arguments":{"path":"README.md","start_line":1,"end_line":2}}}]},"done":true,"prompt_eval_count":3,"eval_count":1})
+        };
+        return format!("{frame}\n").into_response();
+    }
     if s.reject_probabilities.load(Ordering::SeqCst) && body.get("logprobs").is_some() {
         return (
             StatusCode::BAD_REQUEST,
@@ -186,6 +197,8 @@ fn input(images: bool, role: &str) -> CallInput {
         temperature: 0.0,
         max_tokens: 32,
         prefix: None,
+        allow_tools: false,
+        tool_history: vec![],
     }
 }
 async fn setup() -> (
@@ -272,6 +285,14 @@ async fn text_vision_switch_and_one_model_for_all_output_roles() {
         ]
     );
     assert_eq!(state.maximum.load(Ordering::SeqCst), 1);
+    assert!(
+        state
+            .bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|body| body.get("tools").is_none())
+    );
     assert_eq!(ledger.0.lock().unwrap().len(), 4);
     let permit = scheduler
         .acquire("fixture-user".into(), uuid::Uuid::new_v4())
@@ -429,5 +450,45 @@ async fn continuation_uses_a_raw_prompt_that_ends_with_the_saved_prefix() {
     let prompt = bodies[0]["prompt"].as_str().unwrap();
     assert!(prompt.ends_with("<|im_start|>assistant\nMira found the map beneath the cabin"));
     assert_eq!(bodies[0]["top_logprobs"], 5);
+    task.abort();
+}
+
+#[tokio::test]
+async fn typed_tool_call_is_validated_and_provider_resumes_with_the_matching_result() {
+    let (driver, _, _, state, task) = setup().await;
+    let (tx, _) = mpsc::unbounded_channel();
+    let (_cancel, cancel) = watch::channel(false);
+    let mut call = input(false, "answer");
+    call.allow_tools = true;
+    let first = driver
+        .call(&output(false), call.clone(), tx, cancel.clone())
+        .await
+        .unwrap();
+    let request = first.tool_request.expect("typed provider tool call");
+    assert_eq!(
+        request.name,
+        cortex_api::domain::models::tools::ToolName::ViewFile
+    );
+    assert_eq!(request.arguments["path"], "README.md");
+    assert_eq!(state.bodies.lock().unwrap()[0]["stream"], false);
+
+    call.tool_history
+        .push(cortex_api::domain::models::tools::ToolExchange {
+            request: request.clone(),
+            output: "line one\nline two".into(),
+        });
+    let (tx, _) = mpsc::unbounded_channel();
+    let second = driver.call(&output(false), call, tx, cancel).await.unwrap();
+    assert!(second.tool_request.is_none());
+    assert_eq!(second.text, "resumed");
+    let bodies = state.bodies.lock().unwrap();
+    let resumed = bodies.last().unwrap();
+    assert_eq!(resumed["messages"][2]["role"], "assistant");
+    assert_eq!(
+        resumed["messages"][2]["tool_calls"][0]["function"]["name"],
+        "view_file"
+    );
+    assert_eq!(resumed["messages"][3]["role"], "tool");
+    assert_eq!(resumed["messages"][3]["content"], "line one\nline two");
     task.abort();
 }

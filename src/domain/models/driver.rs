@@ -1,3 +1,4 @@
+use crate::domain::models::tools::{ToolExchange, ToolRequest};
 use crate::{
     core::config::Config,
     domain::models::{
@@ -40,6 +41,7 @@ impl OutputModel {
         self.kind == ModelKind::Vision
     }
 }
+#[derive(Clone)]
 pub struct CallInput {
     pub role: String,
     pub system: String,
@@ -49,6 +51,10 @@ pub struct CallInput {
     pub max_tokens: u32,
     /// Saved answer prefix. The model continues it as its own message.
     pub prefix: Option<String>,
+    /// Only the explicitly opted-in CLI answer path receives these tools.
+    pub allow_tools: bool,
+    /// Provider-native assistant tool call and exact CLI result pairs.
+    pub tool_history: Vec<ToolExchange>,
 }
 #[derive(Clone)]
 pub enum DriverEvent {
@@ -71,6 +77,7 @@ pub struct CallOutcome {
     pub error: Option<DriverError>,
     pub load_ms: u64,
     pub tokens_per_second: Option<f64>,
+    pub tool_request: Option<ToolRequest>,
 }
 pub trait ModelDriver: Send + Sync {
     fn call<'a>(

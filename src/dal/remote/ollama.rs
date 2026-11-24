@@ -28,6 +28,17 @@ struct RunningModels {
 struct Message {
     #[serde(default)]
     content: String,
+    #[serde(default)]
+    tool_calls: Vec<ProviderToolCall>,
+}
+#[derive(Deserialize)]
+struct ProviderToolCall {
+    function: ProviderFunction,
+}
+#[derive(Deserialize)]
+struct ProviderFunction {
+    name: String,
+    arguments: Value,
 }
 #[derive(Default, Deserialize)]
 struct Frame {
@@ -59,6 +70,7 @@ struct Collected {
     inspection_limit: usize,
     probabilities: bool,
     option_rejected: bool,
+    tool_request: Option<crate::domain::models::tools::ToolRequest>,
 }
 impl Ollama {
     pub fn new(config: Config, queue: Scheduler) -> Self {
@@ -175,6 +187,7 @@ impl Ollama {
         role: &str,
         events: &mpsc::UnboundedSender<DriverEvent>,
         start: Instant,
+        allow_tools: bool,
     ) -> Result<bool, DriverError> {
         let frame: Frame = serde_json::from_slice(line).map_err(|_| DriverError::Ollama)?;
         if role == "answer" {
@@ -187,7 +200,29 @@ impl Ollama {
                 collected.text.is_empty() && probability_option_error(&error);
             return Err(DriverError::Ollama);
         }
-        let content = frame.message.map(|m| m.content).or(frame.response);
+        let content = if let Some(message) = frame.message {
+            if !message.tool_calls.is_empty() {
+                if !allow_tools || message.tool_calls.len() != 1 || collected.tool_request.is_some()
+                {
+                    return Err(DriverError::InvalidInput);
+                }
+                let call = message
+                    .tool_calls
+                    .into_iter()
+                    .next()
+                    .expect("one tool call");
+                collected.tool_request = Some(
+                    crate::domain::models::tools::ToolRequest::from_provider(
+                        &call.function.name,
+                        call.function.arguments,
+                    )
+                    .map_err(|_| DriverError::InvalidInput)?,
+                );
+            }
+            Some(message.content)
+        } else {
+            frame.response
+        };
         if let Some(content) = content
             && !content.is_empty()
         {
@@ -260,12 +295,28 @@ impl Ollama {
                     messages.push(json!({"role":"system","content":input.system}));
                 }
                 messages.push(json!({"role":"user","content":input.prompt,"images":input.images}));
+                for exchange in &input.tool_history {
+                    messages.push(json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":exchange.request.name.as_str(),"arguments":exchange.request.arguments}}]}));
+                    messages.push(json!({"role":"tool","tool_name":exchange.request.name.as_str(),"content":exchange.output}));
+                }
                 (
                     "/api/chat",
                     json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":options}),
                 )
             }
         };
+        if input.allow_tools && input.role == "answer" && input.prefix.is_none() {
+            // Tool-call argument objects are provider-complete, never streamed fragments.
+            body["stream"] = json!(false);
+            body["tools"] = json!([
+                {"type":"function","function":{"name":"invoke_subagent","description":"Delegate a bounded task to a mapped child agent.","parameters":{"type":"object","properties":{"role":{"type":"string"},"task":{"type":"string"},"context":{"type":"string"}},"required":["role","task"],"additionalProperties":false}}},
+                {"type":"function","function":{"name":"view_file","description":"Read a bounded section of a workspace file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}}},
+                {"type":"function","function":{"name":"grep_search","description":"Search selected workspace paths.","parameters":{"type":"object","properties":{"query":{"type":"string"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":32},"max_results":{"type":"integer","minimum":1,"maximum":100}},"required":["query","paths"],"additionalProperties":false}}},
+                {"type":"function","function":{"name":"replace_file_content","description":"Request an exact workspace file edit; the CLI must obtain approval first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"find":{"type":"string"},"replace":{"type":"string"}},"required":["path","find","replace"],"additionalProperties":false}}},
+                {"type":"function","function":{"name":"run_command","description":"Request a workspace command; the CLI must obtain approval first.","parameters":{"type":"object","properties":{"cwd":{"type":"string"},"argv":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":64}},"required":["cwd","argv"],"additionalProperties":false}}}
+            ]);
+            collected.probabilities = false;
+        }
         if input.role == "answer" && collected.probabilities {
             body["logprobs"] = json!(true);
             body["top_logprobs"] = json!(crate::domain::models::inspection::ALTERNATIVES);
@@ -325,13 +376,27 @@ impl Ollama {
                 if line.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
-                if self.frame(&line, collected, &input.role, events, start)? {
+                if self.frame(
+                    &line,
+                    collected,
+                    &input.role,
+                    events,
+                    start,
+                    input.allow_tools,
+                )? {
                     return Ok(());
                 }
             }
         }
         if !buffer.iter().all(u8::is_ascii_whitespace)
-            && self.frame(&buffer, collected, &input.role, events, start)?
+            && self.frame(
+                &buffer,
+                collected,
+                &input.role,
+                events,
+                start,
+                input.allow_tools,
+            )?
         {
             return Ok(());
         }
@@ -387,6 +452,7 @@ impl ModelDriver for Ollama {
                 || input.max_tokens == 0
                 || u64::from(input.max_tokens) > self.config.model_context_tokens
                 || (!output.is_vision() && !input.images.is_empty())
+                || (input.allow_tools && input.role != "answer")
             {
                 return Err(DriverError::InvalidInput);
             }
@@ -419,6 +485,7 @@ impl ModelDriver for Ollama {
                 inspection_limit: input.max_tokens as usize,
                 probabilities: true,
                 option_rejected: false,
+                tool_request: None,
             };
             let result = tokio::select! {biased;_=cancelled(&mut cancel)=>Err(DriverError::Cancelled),result=async{if let Some(permit)=&permit{load_ms=self.prepare(permit,model,&events).await?;}self.generate(&base,model,&input,&events,&mut collected,start).await}=>result};
             let finished_at = Utc::now();
@@ -481,6 +548,7 @@ impl ModelDriver for Ollama {
                 error: result.err(),
                 load_ms,
                 tokens_per_second,
+                tool_request: collected.tool_request,
             })
         })
     }

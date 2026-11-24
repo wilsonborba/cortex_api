@@ -16,7 +16,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -39,6 +39,10 @@ pub fn router(runtime: Arc<ChatRuntime>) -> Router {
         .route(
             "/chats/{session_id}/outputs/{output_id}",
             axum::routing::patch(control),
+        )
+        .route(
+            "/chats/{session_id}/outputs/{output_id}/tool-results",
+            post(tool_result),
         )
         .with_state(runtime)
 }
@@ -109,6 +113,7 @@ async fn respond(
 async fn create(
     State(runtime): State<Arc<ChatRuntime>>,
     context: CallerContext,
+    headers: HeaderMap,
     Json(body): Json<NewChat>,
 ) -> Result<Response, Response> {
     // A LAN backend may call without x-uuid; it uses only A2A memory (21.3).
@@ -116,17 +121,24 @@ async fn create(
         .for_app(&body.app_id, false)
         .map_err(IntoResponse::into_response)?;
     let stream = body.stream;
-    Ok(respond(
-        &runtime,
-        Turn::new(caller, TurnRequest::New(body)),
-        stream,
-        "Chat created",
-    )
-    .await)
+    let tools_requested = headers
+        .get("x-cortex-tools")
+        .and_then(|value| value.to_str().ok())
+        == Some("mapped-v1");
+    if tools_requested && (!stream || caller.user_id.is_none()) {
+        return Err(response::error(
+            StatusCode::BAD_REQUEST,
+            process_numbers::INVALID_DATA,
+        ));
+    }
+    let mut turn = Turn::new(caller, TurnRequest::New(body));
+    turn.tools_enabled = tools_requested;
+    Ok(respond(&runtime, turn, stream, "Chat created").await)
 }
 async fn next(
     State(runtime): State<Arc<ChatRuntime>>,
     context: CallerContext,
+    headers: HeaderMap,
     Path(session): Path<Uuid>,
     Json(body): Json<NextInput>,
 ) -> Result<Response, Response> {
@@ -167,13 +179,19 @@ async fn next(
         .for_app(&app, false)
         .map_err(IntoResponse::into_response)?;
     let stream = body.stream;
-    Ok(respond(
-        &runtime,
-        Turn::new(caller, TurnRequest::Next(session, body)),
-        stream,
-        "Input accepted",
-    )
-    .await)
+    let tools_requested = headers
+        .get("x-cortex-tools")
+        .and_then(|value| value.to_str().ok())
+        == Some("mapped-v1");
+    if tools_requested && (!stream || caller.user_id.is_none()) {
+        return Err(response::error(
+            StatusCode::BAD_REQUEST,
+            process_numbers::INVALID_DATA,
+        ));
+    }
+    let mut turn = Turn::new(caller, TurnRequest::Next(session, body));
+    turn.tools_enabled = tools_requested;
+    Ok(respond(&runtime, turn, stream, "Input accepted").await)
 }
 
 /// x-uuid must own the chat and the output (10.4.5). Returns true for a
@@ -337,4 +355,55 @@ async fn control(
         let _ = control.stop_thinking.send(true);
         Ok(Envelope::new("Thinking stop sent", data))
     }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolResultBody {
+    call_id: Uuid,
+    name: crate::domain::models::tools::ToolName,
+    result: ToolResultValue,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolResultValue {
+    output: String,
+}
+
+async fn tool_result(
+    State(runtime): State<Arc<ChatRuntime>>,
+    UserId(user): UserId,
+    context: CallerContext,
+    Path((session, output)): Path<(Uuid, Uuid)>,
+    Json(body): Json<ToolResultBody>,
+) -> Result<Response, Response> {
+    let failure = |process: ProcessNumber| response::error(status(process), process);
+    owned_output(&runtime, &context, &user, session, output)
+        .await
+        .map_err(failure)?;
+    if body.result.output.len() > crate::domain::models::tools::MAX_RESULT_BYTES {
+        return Err(failure(process_numbers::INVALID_DATA));
+    }
+    let control = runtime
+        .controls
+        .get(output)
+        .ok_or_else(|| failure(process_numbers::OUTPUT_NOT_RUNNING))?;
+    let result = crate::domain::models::tools::ToolResult {
+        call_id: body.call_id,
+        name: body.name,
+        output: body.result.output,
+    };
+    control
+        .tools
+        .submit(result)
+        .map_err(|_| failure(process_numbers::OUTPUT_NOT_RUNNING))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Envelope::new(
+            "Tool result accepted",
+            json!({"session_id": session, "output_id": output, "call_id": body.call_id}),
+        ),
+    )
+        .into_response())
 }

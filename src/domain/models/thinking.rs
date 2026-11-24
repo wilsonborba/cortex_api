@@ -12,6 +12,7 @@ pub struct ThinkingInput<'a> {
     pub images: Vec<String>,
     /// Continuation prefix for the answer call only.
     pub prefix: Option<String>,
+    pub tools_enabled: bool,
 }
 #[derive(Default)]
 pub struct ThinkingResult {

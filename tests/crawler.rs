@@ -180,6 +180,7 @@ impl ModelDriver for Driver {
                 },
                 load_ms: 0,
                 tokens_per_second: None,
+                tool_request: None,
             })
         })
     }

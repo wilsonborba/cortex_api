@@ -1,4 +1,5 @@
 use crate::domain::models::replay::StoredEvent;
+use crate::domain::models::tools::ToolControl;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -12,6 +13,7 @@ pub struct Control {
     pub cancel: Arc<watch::Sender<bool>>,
     pub stop_thinking: Arc<watch::Sender<bool>>,
     pub live: broadcast::Sender<StoredEvent>,
+    pub tools: ToolControl,
 }
 #[derive(Clone, Default)]
 pub struct OutputControls(Arc<Mutex<HashMap<Uuid, Control>>>);
