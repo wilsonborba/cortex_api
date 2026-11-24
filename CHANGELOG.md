@@ -6,6 +6,8 @@
 
 ### Bug Fixes
 
+- Pin TLS backend for non-Reddit clients (#130)
+
 - Continue with a raw ChatML prompt so the model extends the prefix (#125)
 
 

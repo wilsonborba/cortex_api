@@ -172,6 +172,7 @@ impl SearchAdapter for Wikipedia {
 }
 pub fn adapters(config: &Config) -> Result<Vec<Arc<dyn SearchAdapter>>, SearchFailure> {
     let client = reqwest::Client::builder()
+        .use_rustls_tls()
         .user_agent(&config.web_user_agent)
         .timeout(config.web_search_timeout)
         .redirect(reqwest::redirect::Policy::none())

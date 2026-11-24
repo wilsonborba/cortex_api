@@ -85,6 +85,7 @@ impl OpenAlexClient {
         mailto: Option<String>,
     ) -> Result<Self, String> {
         let http = reqwest::Client::builder()
+            .use_rustls_tls()
             .timeout(Duration::from_secs(10))
             .user_agent("cortex-api-research/1.0")
             .build()

@@ -39,6 +39,7 @@ impl FileWorker {
     pub fn new(config: &Config, base: &str) -> Self {
         Self {
             client: reqwest::Client::builder()
+                .use_rustls_tls()
                 .timeout(config.worker_timeout)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
