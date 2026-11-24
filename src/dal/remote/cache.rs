@@ -19,6 +19,18 @@ impl RedisCache {
             Config::default().cache_operation_timeout,
         )
     }
+    /// Reads only `CORTEX_TEST_REDIS_URL` for isolated cache tests.
+    /// Returns `None` when unset or blank and never falls back to `CORTEX_REDIS_URL`.
+    pub fn from_test_environment() -> Option<(String, Self)> {
+        let url = std::env::var("CORTEX_TEST_REDIS_URL").ok()?;
+        let url = url.trim().to_owned();
+        if url.is_empty() {
+            return None;
+        }
+        let cache = Self::new(Some(&url), Config::default().cache_operation_timeout);
+        assert!(cache.is_configured(), "CORTEX_TEST_REDIS_URL is not valid");
+        Some((url, cache))
+    }
     pub fn new(url: Option<&str>, timeout: Duration) -> Self {
         Self {
             client: url.and_then(|url| redis::Client::open(url).ok()),

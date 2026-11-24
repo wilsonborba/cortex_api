@@ -29,7 +29,10 @@ for rollback. A database restore is required before starting Hippo v1 again.
 
 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`.
 Ignored tests need explicit local dependencies or the approved MSI GPU window.
-They use test stores. Local reports and benchmark data stay under ignored `docs/`.
+They use test stores. Cache integration tests read only `CORTEX_TEST_REDIS_URL`
+(set to a separate test cache index or a local throwaway Valkey via
+`scripts/setup-test-valkey.sh`, never `CORTEX_REDIS_URL`) and skip when unset.
+Local reports and benchmark data stay under ignored `docs/`.
 
 The shield uses deterministic EN/PT/TH rules and the publisher ProtectAI
 `deberta-v3-base-prompt-injection-v2` ONNX model on CPU. Its Apache-2.0 model

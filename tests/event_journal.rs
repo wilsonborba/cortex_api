@@ -32,10 +32,15 @@ async fn absent_store_returns_unavailable() {
     ));
 }
 #[tokio::test]
-#[ignore = "requires the approved Valkey namespace; unique event fixture key only"]
+#[ignore = "requires CORTEX_TEST_REDIS_URL; unique event fixture key only"]
 async fn real_stream_order_after_paging_atomic_ttl_and_duplicate_rules() {
     dotenvy::dotenv().ok();
-    let cache = RedisCache::from_environment();
+    let Some((test_redis_url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping real_stream_order_after_paging_atomic_ttl_and_duplicate_rules: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
     let config = Config {
         event_read_batch: 2,
         ..Default::default()
@@ -61,8 +66,8 @@ async fn real_stream_order_after_paging_atomic_ttl_and_duplicate_rules() {
     assert_eq!(last[0].id, 5);
     assert_eq!(last[0].body["data"]["text"], "piece5");
     assert!(journal.after(output, 5).await.unwrap().unwrap().is_empty());
-    let client = redis::Client::open(std::env::var("CORTEX_REDIS_URL").unwrap())
-        .unwrap_or_else(|_| panic!("Test Redis URL invalid"));
+    let client =
+        redis::Client::open(test_redis_url).unwrap_or_else(|_| panic!("Test Redis URL invalid"));
     let mut audit = client
         .get_multiplexed_async_connection()
         .await

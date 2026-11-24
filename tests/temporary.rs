@@ -79,11 +79,14 @@ async fn redis_down_refuses_start_file_and_continue() {
     );
 }
 #[tokio::test]
-#[ignore = "requires approved Valkey; only unique cortex:temp UUID fixtures are written"]
+#[ignore = "requires CORTEX_TEST_REDIS_URL; only unique cortex:temp UUID fixtures are written"]
 async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates() {
     dotenvy::dotenv().ok();
+    let Some((test_redis_url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping temporary cache test: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
     let config = Config::default();
-    let cache = RedisCache::from_environment();
     let chats = TemporaryChats::new(&config, cache.clone());
     let actor = fixture_caller();
     let file_id = chats
@@ -111,7 +114,7 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
     let id = first.session_id;
     let key = CacheKey::TemporaryChat(id.to_string());
     let file_key = CacheKey::TemporaryChat(file_id.to_string());
-    let client = redis::Client::open(std::env::var("CORTEX_REDIS_URL").unwrap())
+    let client = redis::Client::open(test_redis_url)
         .unwrap_or_else(|_| panic!("test Valkey address is not valid"));
     let mut audit = client.get_multiplexed_async_connection().await.unwrap();
     let ttl: i64 = redis::cmd("PTTL")
