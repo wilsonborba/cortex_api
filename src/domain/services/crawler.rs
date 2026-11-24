@@ -20,11 +20,13 @@ use crate::{
                 FetchDecision, InMemoryLimitStore, ResearchPageCache, ResearchPolitenessGuard,
                 evaluate_publisher_policy,
             },
+            research_router::{EvidenceItem, EvidenceLedger, EvidenceStage},
             robots::{CrawlPermission, Robots},
             search::WebSearch,
             security::SecurityShield,
             web::{
-                FastWeb, PolicedPageError, notice, read_policed_page, record_policed_error, select,
+                FastWeb, PolicedPageError, ResearchProviders, gather_routed_providers, notice,
+                read_policed_page, record_policed_error, select,
             },
         },
     },
@@ -60,6 +62,7 @@ pub struct WebRetriever {
     shield: Arc<SecurityShield>,
     politeness: Arc<ResearchPolitenessGuard>,
     page_cache: Arc<ResearchPageCache>,
+    providers: ResearchProviders,
     enforce_robots_direct: bool,
     config: Config,
 }
@@ -85,6 +88,7 @@ impl WebRetriever {
             shield,
             politeness,
             page_cache,
+            providers: ResearchProviders::default(),
             enforce_robots_direct: false,
             config: config.clone(),
         }
@@ -98,6 +102,12 @@ impl WebRetriever {
         self.politeness = politeness.clone();
         self.page_cache = page_cache.clone();
         self.fast = self.fast.with_politeness(politeness, page_cache);
+        self
+    }
+
+    pub fn with_providers(mut self, providers: ResearchProviders) -> Self {
+        self.providers = providers.clone();
+        self.fast = self.fast.with_providers(providers);
         self
     }
 
@@ -131,6 +141,23 @@ impl WebRetriever {
             WebMode::Fast => unreachable!(),
         };
         let deadline = Instant::now() + budget;
+        let mut ledger = EvidenceLedger::default();
+        let mut all_pages = vec![];
+        if input.needs_web {
+            let provider_pages = gather_routed_providers(
+                &self.providers,
+                &self.politeness,
+                &self.shield,
+                input.question,
+                input.mode,
+                budget.as_millis() as u64,
+                &mut result.gathered,
+                &mut ledger,
+                events,
+            )
+            .await;
+            all_pages.extend(provider_pages);
+        }
         let mut search_queries = vec![];
         if input.needs_web {
             let (stop, signal) = watch::channel(false);
@@ -201,13 +228,23 @@ impl WebRetriever {
                 notice(&mut result.gathered, process, None);
             }
             for hit in found.hits {
-                if urls.len() == self.config.web_pages_per_level {
-                    break;
-                }
                 if let Ok(url) = page_url(&hit.hit.url) {
-                    let url = String::from(url);
-                    if visited.insert(url.clone()) {
-                        urls.push(url);
+                    let url_str = String::from(url);
+                    let host = page_url(&url_str)
+                        .ok()
+                        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                        .unwrap_or_default();
+                    ledger.record(EvidenceItem {
+                        canonical_url: url_str.clone(),
+                        publication_id: None,
+                        title: hit.hit.title,
+                        source_host: host,
+                        stage: EvidenceStage::FoundLink,
+                    });
+                    if urls.len() < self.config.web_pages_per_level
+                        && visited.insert(url_str.clone())
+                    {
+                        urls.push(url_str);
                     }
                 }
             }
@@ -255,7 +292,6 @@ impl WebRetriever {
                 plans.push((url, Instant::now()));
             }
         }
-        let mut all_pages = vec![];
         for level in 0..=depth {
             if plans.is_empty() || Instant::now() >= deadline {
                 if !plans.is_empty() {
@@ -270,6 +306,7 @@ impl WebRetriever {
                     deadline,
                     events,
                     &mut result.gathered,
+                    &mut ledger,
                     cancel.clone(),
                 )
                 .await;
@@ -366,11 +403,14 @@ impl WebRetriever {
             deadline,
             all_pages,
             &mut result.gathered,
+            &mut ledger,
             events,
         )
         .await;
+        result.gathered.evidence = ledger.all_items().to_vec();
         result
     }
+    #[allow(clippy::too_many_arguments)]
     async fn read_level(
         &self,
         plans: Vec<(String, Instant)>,
@@ -378,6 +418,7 @@ impl WebRetriever {
         deadline: Instant,
         events: &EventSink,
         output: &mut GatheredWeb,
+        ledger: &mut EvidenceLedger,
         cancel: watch::Receiver<bool>,
     ) -> (Vec<WebPage>, Option<DriverError>) {
         let total = plans.len();
@@ -413,7 +454,26 @@ impl WebRetriever {
                 _=tokio::time::sleep_until(deadline)=>{time_notice(output);break;},
                 _=cancelled(cancel.clone())=>return(pages.into_iter().map(|(_,page)|page).collect(),Some(DriverError::Cancelled)),
                 Some((index,url,response))=pending.next()=>match response{
-                    Ok((page,notices))=>{output.pages_read+=1;for process in notices{if process.number!=process_numbers::SECURITY_BLOCK.number{notice(output,process,Some(url.clone()));}}if !page.chunks.is_empty(){output.sources.push(page.source.clone());events.send(NativeEvent::Sources(output.sources.clone()));}pages.push((index,page));},
+                    Ok((page,notices))=>{
+                        output.pages_read+=1;
+                        for process in notices{if process.number!=process_numbers::SECURITY_BLOCK.number{notice(output,process,Some(url.clone()));}}
+                        if !page.chunks.is_empty(){
+                            let host = page_url(&page.source.url)
+                                .ok()
+                                .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                                .unwrap_or_default();
+                            ledger.record(EvidenceItem {
+                                canonical_url: page.source.url.clone(),
+                                publication_id: None,
+                                title: page.source.title.clone(),
+                                source_host: host,
+                                stage: EvidenceStage::ReadContent,
+                            });
+                            output.sources.push(page.source.clone());
+                            events.send(NativeEvent::Sources(output.sources.clone()));
+                        }
+                        pages.push((index,page));
+                    },
                     Err(error)=>record_policed_error(output, url, error),
                 }
             }

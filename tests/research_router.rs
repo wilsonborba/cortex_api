@@ -5,7 +5,14 @@ use cortex_api::domain::services::research_router::{
     ResearchRouteRequest, canonicalize_url, select_sources,
 };
 
-fn src(host: &str, subjects: &[&str], langs: &str, regions: &str, mode: &str, desc: &str) -> ResearchSource {
+fn src(
+    host: &str,
+    subjects: &[&str],
+    langs: &str,
+    regions: &str,
+    mode: &str,
+    desc: &str,
+) -> ResearchSource {
     ResearchSource {
         host: host.into(),
         name: host.into(),
@@ -26,7 +33,13 @@ fn src(host: &str, subjects: &[&str], langs: &str, regions: &str, mode: &str, de
 fn selects_relevant_subset_never_sweeps_all_200_sites() {
     let mut catalog = Vec::new();
     for i in 0..200 {
-        let sub = if i < 5 { "ai-ml" } else if i < 10 { "climate" } else { "sports" };
+        let sub = if i < 5 {
+            "ai-ml"
+        } else if i < 10 {
+            "climate"
+        } else {
+            "sports"
+        };
         catalog.push(src(
             &format!("site-{i}.example"),
             &[sub],
@@ -48,19 +61,55 @@ fn selects_relevant_subset_never_sweeps_all_200_sites() {
 
     let plan = select_sources(&catalog, &req);
     assert_eq!(plan.catalog_total, 200);
-    assert!(plan.selected.len() <= 6, "must select small subset, got {}", plan.selected.len());
+    assert!(
+        plan.selected.len() <= 6,
+        "must select small subset, got {}",
+        plan.selected.len()
+    );
     assert!(!plan.selected.is_empty());
-    assert!(plan.selected.iter().all(|r| r.source.host != "site-2.example"));
+    assert!(
+        plan.selected
+            .iter()
+            .all(|r| r.source.host != "site-2.example")
+    );
     assert_eq!(plan.selected[0].source.host, "site-0.example");
 }
 
 #[test]
 fn budget_downgrades_deep_mode_when_time_or_requests_are_low() {
     let catalog = vec![
-        src("a.example", &["science"], "en", "global", "public_api", "journal"),
-        src("b.example", &["science"], "en", "global", "public_api", "journal"),
-        src("c.example", &["science"], "en", "global", "public_api", "journal"),
-        src("d.example", &["science"], "en", "global", "public_api", "journal"),
+        src(
+            "a.example",
+            &["science"],
+            "en",
+            "global",
+            "public_api",
+            "journal",
+        ),
+        src(
+            "b.example",
+            &["science"],
+            "en",
+            "global",
+            "public_api",
+            "journal",
+        ),
+        src(
+            "c.example",
+            &["science"],
+            "en",
+            "global",
+            "public_api",
+            "journal",
+        ),
+        src(
+            "d.example",
+            &["science"],
+            "en",
+            "global",
+            "public_api",
+            "journal",
+        ),
     ];
     let req = ResearchRouteRequest {
         subjects: vec!["science".into()],

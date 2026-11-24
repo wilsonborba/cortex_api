@@ -1,10 +1,10 @@
 pub mod balancer;
+pub mod community_research;
 pub mod files;
 pub mod identity;
 pub mod input_guard;
 pub mod memory_graph;
 pub mod memory_overview;
-pub mod community_research;
 pub mod openalex;
 pub mod output_controls;
 pub mod personas;

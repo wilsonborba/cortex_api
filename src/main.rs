@@ -64,10 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 local::{
                     chats::Chats,
                     injection_classifier::{MissingClassifier, OnnxInjectionClassifier},
+                    research_sources::PostgresResearchSourceStore,
                 },
                 remote::{
                     cache::RedisCache, event_journal::EventJournal, ollama::Ollama,
-                    web_page::PageReader,
+                    openalex::OpenAlexClient, reddit::RedditClient, web_page::PageReader,
                 },
             },
             domain::{
@@ -75,12 +76,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 services::{
                     balancer::Scheduler,
                     chat_runtime::ChatRuntime,
+                    community_research::CommunityResearchService,
                     crawler::WebRetriever,
                     exchange_memory::ExchangeMemories,
                     extraction::DocumentExtractor,
                     files::FileProxy,
                     history::History,
+                    openalex::OpenAlexResearchService,
                     recall::MemoryRecall,
+                    research_catalog::ResearchCatalogService,
                     research_limits::{
                         ResearchPageCache, ResearchPolitenessGuard, ValkeyLimitStore,
                     },
@@ -89,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     security::SecurityShield,
                     temporary::TemporaryChats,
                     thinking::Thinking,
+                    web::ResearchProviders,
                 },
             },
         };
@@ -147,24 +152,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             temporary,
             recall: MemoryRecall::new(&config, hippocampus.clone(), shield.clone()),
-            web: WebRetriever::new(
-                &config,
-                WebSearch::new(&config).map_err(|_| "The web search config is not valid")?,
-                PageReader::new(&config).map_err(|_| "The web page reader is not valid")?,
-                shield.clone(),
-                driver.clone(),
-            )
-            .with_politeness(
-                std::sync::Arc::new(ResearchPolitenessGuard::from_config(
+            web: {
+                let catalog = ResearchCatalogService::new(std::sync::Arc::new(
+                    PostgresResearchSourceStore::new(chat_pool.clone()),
+                ));
+                let openalex = OpenAlexClient::from_env()
+                    .ok()
+                    .map(|c| std::sync::Arc::new(OpenAlexResearchService::new(c)));
+                let community = RedditClient::from_env()
+                    .ok()
+                    .map(|c| std::sync::Arc::new(CommunityResearchService::new(c)));
+                WebRetriever::new(
                     &config,
-                    std::sync::Arc::new(ValkeyLimitStore::new(RedisCache::from_environment())),
-                )),
-                std::sync::Arc::new(ResearchPageCache::new(
-                    RedisCache::from_environment(),
-                    config.research_cache_ttl,
-                )),
-            )
-            .with_robots_on_direct_reads(true),
+                    WebSearch::new(&config).map_err(|_| "The web search config is not valid")?,
+                    PageReader::new(&config).map_err(|_| "The web page reader is not valid")?,
+                    shield.clone(),
+                    driver.clone(),
+                )
+                .with_politeness(
+                    std::sync::Arc::new(ResearchPolitenessGuard::from_config(
+                        &config,
+                        std::sync::Arc::new(ValkeyLimitStore::new(RedisCache::from_environment())),
+                    )),
+                    std::sync::Arc::new(ResearchPageCache::new(
+                        RedisCache::from_environment(),
+                        config.research_cache_ttl,
+                    )),
+                )
+                .with_providers(ResearchProviders {
+                    catalog: Some(catalog),
+                    openalex,
+                    community,
+                })
+                .with_robots_on_direct_reads(true)
+            },
             thinking: Thinking::new(&config, driver),
             memories: ExchangeMemories {
                 repo: chats.clone(),

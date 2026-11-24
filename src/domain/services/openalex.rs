@@ -13,6 +13,7 @@ pub struct OpenAlexEvidence {
 
 /// Domain service for OpenAlex scholarly research.
 /// Enforces the rule that metadata is not proof a paper was read.
+#[derive(Clone)]
 pub struct OpenAlexResearchService {
     client: OpenAlexClient,
 }

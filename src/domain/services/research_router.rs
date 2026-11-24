@@ -119,7 +119,10 @@ pub fn canonicalize_url(raw: &str) -> String {
     let mut normalized_base = base.to_string();
     if let Some((scheme, rest)) = base.split_once("://") {
         let (host, path) = match rest.split_once('/') {
-            Some((h, p)) => (h.to_ascii_lowercase(), format!("/{}", p.trim_end_matches('/'))),
+            Some((h, p)) => (
+                h.to_ascii_lowercase(),
+                format!("/{}", p.trim_end_matches('/')),
+            ),
             None => (rest.to_ascii_lowercase(), String::new()),
         };
         let clean_path = if path == "/" { String::new() } else { path };
@@ -201,23 +204,217 @@ impl EvidenceLedger {
     pub fn citable_items(&self) -> Vec<&EvidenceItem> {
         self.items.iter().filter(|i| i.stage.is_citable()).collect()
     }
+
+    /// Promotes a previously read item to [EvidenceStage::UsedInAnswer].
+    pub fn promote_used(&mut self, url: &str) {
+        let canon = canonicalize_url(url);
+        if let Some(&idx) = self.by_url.get(&canon)
+            && self.items[idx].stage == EvidenceStage::ReadContent
+        {
+            self.items[idx].stage = EvidenceStage::UsedInAnswer;
+        }
+    }
+
+    pub fn stage_for_url(&self, url: &str) -> Option<EvidenceStage> {
+        let canon = canonicalize_url(url);
+        self.by_url.get(&canon).map(|&idx| self.items[idx].stage)
+    }
+}
+
+/// Classifies a natural-language question into catalog subjects, purpose, language,
+/// region, and remaining mode budget without sweeping all 200 catalog sites.
+pub fn classify_research_request(
+    question: &str,
+    mode: WebMode,
+    remaining_time_ms: u64,
+) -> ResearchRouteRequest {
+    let low = question.to_ascii_lowercase();
+    let has_thai = question
+        .chars()
+        .any(|c| ('\u{0E00}'..='\u{0E7F}').contains(&c));
+
+    let mut subjects = Vec::new();
+    let mut purpose = ResearchPurpose::General;
+
+    let is_academic = [
+        "paper",
+        "study",
+        "journal",
+        "doi",
+        "citation",
+        "arxiv",
+        "openalex",
+        "scholar",
+        "abstract",
+        "peer-reviewed",
+        "literature",
+        "research",
+        "วิจัย",
+        "งานวิจัย",
+        "บทความวิชาการ",
+    ]
+    .iter()
+    .any(|kw| low.contains(kw) || question.contains(kw));
+    if is_academic {
+        subjects.push("reference-and-scholarly-discovery".to_string());
+        purpose = ResearchPurpose::Academic;
+    }
+
+    let is_community = [
+        "reddit",
+        "forum",
+        "community",
+        "discussion",
+        "thread",
+        "opinions",
+        "experience",
+        "pantip",
+        "blognone",
+        "bloggang",
+        "ความคิดเห็น",
+        "กระทู้",
+        "พันทิป",
+    ]
+    .iter()
+    .any(|kw| low.contains(kw) || question.contains(kw));
+    if is_community {
+        subjects.push("regional-blogs-communities-and-practical-experience".to_string());
+    }
+
+    if [
+        "machine learning",
+        "neural",
+        "statistics",
+        "theorem",
+        "llm",
+        "transformer",
+        "math",
+    ]
+    .iter()
+    .any(|kw| low.contains(kw))
+    {
+        subjects.push("mathematics-statistics-and-machine-learning".to_string());
+        if purpose == ResearchPurpose::General {
+            purpose = ResearchPurpose::Academic;
+        }
+    }
+
+    if [
+        "rust",
+        "python",
+        "flutter",
+        "api",
+        "sdk",
+        "documentation",
+        "compiler",
+        "postgres",
+        "sql",
+    ]
+    .iter()
+    .any(|kw| low.contains(kw))
+    {
+        subjects.push("software-and-official-documentation".to_string());
+        if purpose == ResearchPurpose::General {
+            purpose = ResearchPurpose::Technical;
+        }
+    }
+
+    if [
+        "health",
+        "medical",
+        "clinical",
+        "nutrition",
+        "disease",
+        "exercise",
+    ]
+    .iter()
+    .any(|kw| low.contains(kw))
+    {
+        subjects.push("health-exercise-and-physical-education".to_string());
+    }
+
+    if [
+        "physics",
+        "quantum",
+        "chemistry",
+        "astronomy",
+        "space",
+        "molecule",
+    ]
+    .iter()
+    .any(|kw| low.contains(kw))
+    {
+        subjects.push("chemistry-physics-and-space".to_string());
+    }
+
+    if [
+        "climate",
+        "biodiversity",
+        "geography",
+        "ecology",
+        "environment",
+    ]
+    .iter()
+    .any(|kw| low.contains(kw))
+    {
+        subjects.push("geography-environment-and-biodiversity".to_string());
+    }
+
+    if ["economy", "gdp", "inflation", "education", "policy"]
+        .iter()
+        .any(|kw| low.contains(kw))
+    {
+        subjects.push("economics-public-data-and-education".to_string());
+    }
+
+    if ["history", "linguistics", "archive", "historical", "museum"]
+        .iter()
+        .any(|kw| low.contains(kw))
+    {
+        subjects.push("history-language-and-humanities".to_string());
+    }
+
+    if ["news", "breaking", "headline", "ข่าว"]
+        .iter()
+        .any(|kw| low.contains(kw) || question.contains(kw))
+    {
+        subjects.push("regional-news-and-analysis".to_string());
+        if purpose == ResearchPurpose::General {
+            purpose = ResearchPurpose::News;
+        }
+    }
+
+    let mut budget = ResearchBudget::for_mode(mode);
+    budget.remaining_time_ms = remaining_time_ms.min(budget.remaining_time_ms);
+
+    ResearchRouteRequest {
+        subjects,
+        purpose,
+        language: Some(if has_thai { "th" } else { "en" }.to_string()),
+        region: if has_thai {
+            Some("asia".to_string())
+        } else {
+            None
+        },
+        mode,
+        budget,
+    }
 }
 
 /// Selects a small, relevant subset of sources based on subjects, purpose, language,
 /// region coverage, availability, and remaining budget. Never sweeps all 200 sites.
 pub fn select_sources(sources: &[ResearchSource], req: &ResearchRouteRequest) -> ResearchPlan {
-    let effective_mode = if req.budget.remaining_time_ms < 10_000
-        || req.budget.remaining_requests <= 6
-    {
-        WebMode::Fast
-    } else if req.budget.remaining_time_ms < 25_000 || req.budget.remaining_requests <= 16 {
-        match req.mode {
-            WebMode::Deep => WebMode::Medium,
-            other => other,
-        }
-    } else {
-        req.mode
-    };
+    let effective_mode =
+        if req.budget.remaining_time_ms < 10_000 || req.budget.remaining_requests <= 6 {
+            WebMode::Fast
+        } else if req.budget.remaining_time_ms < 25_000 || req.budget.remaining_requests <= 16 {
+            match req.mode {
+                WebMode::Deep => WebMode::Medium,
+                other => other,
+            }
+        } else {
+            req.mode
+        };
 
     let mode_cap = match effective_mode {
         WebMode::Fast => 3,
@@ -243,7 +440,10 @@ pub fn select_sources(sources: &[ResearchSource], req: &ResearchRouteRequest) ->
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
-    let wanted_lang = req.language.as_deref().map(|l| l.trim().to_ascii_lowercase());
+    let wanted_lang = req
+        .language
+        .as_deref()
+        .map(|l| l.trim().to_ascii_lowercase());
     let wanted_region = req.region.as_deref().map(|r| r.trim().to_ascii_lowercase());
 
     let mut scored: Vec<(i32, &ResearchSource)> = sources
@@ -265,7 +465,10 @@ pub fn select_sources(sources: &[ResearchSource], req: &ResearchRouteRequest) ->
             let desc_lc = s.description.to_ascii_lowercase();
             score += match req.purpose {
                 ResearchPurpose::Academic => {
-                    if mode_lc.contains("api") || desc_lc.contains("journal") || desc_lc.contains("paper") {
+                    if mode_lc.contains("api")
+                        || desc_lc.contains("journal")
+                        || desc_lc.contains("paper")
+                    {
                         6
                     } else {
                         1
@@ -279,14 +482,20 @@ pub fn select_sources(sources: &[ResearchSource], req: &ResearchRouteRequest) ->
                     }
                 }
                 ResearchPurpose::Technical => {
-                    if desc_lc.contains("code") || desc_lc.contains("spec") || desc_lc.contains("doc") {
+                    if desc_lc.contains("code")
+                        || desc_lc.contains("spec")
+                        || desc_lc.contains("doc")
+                    {
                         6
                     } else {
                         1
                     }
                 }
                 ResearchPurpose::Reference => {
-                    if desc_lc.contains("encyclopedia") || desc_lc.contains("reference") || mode_lc.contains("api") {
+                    if desc_lc.contains("encyclopedia")
+                        || desc_lc.contains("reference")
+                        || mode_lc.contains("api")
+                    {
                         5
                     } else {
                         2
