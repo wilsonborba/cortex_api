@@ -292,7 +292,7 @@ async fn selected_audio_passes_only_requested_intervals_to_transcriber() {
             ("app_id", None, "cortex"),
             ("temporary", None, "true"),
             ("selection_kind", None, "intervals"),
-            ("selection_spec", None, "ms:0-500,ms:1000-1500"),
+            ("selection_spec", None, "ms:0-500,1000-1500"),
             ("file", Some("audio/ogg"), "synthetic audio"),
         ],
     )
@@ -302,6 +302,23 @@ async fn selected_audio_passes_only_requested_intervals_to_transcriber() {
         *selected_intervals().lock().unwrap(),
         [(0, 500), (1000, 1500)]
     );
+    assert!(double.calls.lock().unwrap().is_empty());
+
+    selected_intervals().lock().unwrap().clear();
+    let (status, _) = upload(
+        app(&config, no_redis()),
+        Some("alice"),
+        &[
+            ("app_id", None, "cortex"),
+            ("temporary", None, "true"),
+            ("selection_kind", None, "intervals"),
+            ("selection_spec", None, "ms:0-500,ms:1000-1500"),
+            ("file", Some("audio/ogg"), "synthetic audio"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(selected_intervals().lock().unwrap().is_empty());
     assert!(double.calls.lock().unwrap().is_empty());
 }
 #[tokio::test]

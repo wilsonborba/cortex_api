@@ -98,6 +98,7 @@ fn parse_selection(
             }
             let mut ranges = Vec::with_capacity(items.len());
             let mut selected_page_count = 0u64;
+            let mut previous_page_end = None;
             for item in items {
                 let (start, end) = if item.contains('-') {
                     let (start, end) = item.split_once('-').ok_or_else(invalid_selection)?;
@@ -115,6 +116,10 @@ fn parse_selection(
                 if start == 0 || end < start {
                     return Err(invalid_selection());
                 }
+                if previous_page_end.is_some_and(|previous| start <= previous) {
+                    return Err(invalid_selection());
+                }
+                previous_page_end = Some(end);
                 selected_page_count = selected_page_count
                     .checked_add(u64::from(end) - u64::from(start) + 1)
                     .ok_or_else(invalid_selection)?;
@@ -131,12 +136,17 @@ fn parse_selection(
                 return Err(invalid_selection());
             }
             let mut ranges = Vec::with_capacity(items.len());
+            let mut previous_end = None;
             for item in items {
                 let (page, offsets) = item.split_once(':').ok_or_else(invalid_selection)?;
                 if page != "p1" {
                     return Err(invalid_selection());
                 }
                 let (start, end) = parse_pair(offsets)?;
+                if previous_end.is_some_and(|previous| start < previous) {
+                    return Err(invalid_selection());
+                }
+                previous_end = Some(end);
                 ranges.push(TextRange {
                     start_utf16: start,
                     end_utf16: end,
@@ -145,21 +155,24 @@ fn parse_selection(
             Ok(Some(FileSelection::TextPassages(ranges)))
         }
         "intervals" if is_audio(file) => {
-            let items: Vec<_> = spec.split(',').collect();
+            let items: Vec<_> = spec
+                .strip_prefix("ms:")
+                .ok_or_else(invalid_selection)?
+                .split(',')
+                .collect();
             if items.is_empty() || items.len() > MAX_SELECTION_RANGES {
                 return Err(invalid_selection());
             }
             let mut ranges = Vec::with_capacity(items.len());
-            let mut previous_end = 0;
+            let mut previous_end = None;
             for item in items {
-                let offsets = item.strip_prefix("ms:").ok_or_else(invalid_selection)?;
-                let (start_ms, end_ms) = parse_pair(offsets)?;
+                let (start_ms, end_ms) = parse_pair(item)?;
                 let start_ms = u64::try_from(start_ms).map_err(|_| invalid_selection())?;
                 let end_ms = u64::try_from(end_ms).map_err(|_| invalid_selection())?;
-                if start_ms < previous_end {
+                if previous_end.is_some_and(|previous| start_ms < previous) {
                     return Err(invalid_selection());
                 }
-                previous_end = end_ms;
+                previous_end = Some(end_ms);
                 ranges.push(AudioRange { start_ms, end_ms });
             }
             Ok(Some(FileSelection::AudioIntervals(ranges)))
@@ -185,12 +198,17 @@ fn select_text_passages(bytes: &[u8], ranges: &[TextRange]) -> Result<Vec<String
     let decoded = std::str::from_utf8(bytes).map_err(|_| invalid_selection())?;
     let decoded = decoded.strip_prefix('\u{feff}').unwrap_or(decoded);
     let text = decoded.replace("\r\n", "\n").replace('\r', "\n");
+    let mut previous_end = None;
     ranges
         .iter()
         .map(|range| {
             if range.end_utf16 <= range.start_utf16 {
                 return Err(invalid_selection());
             }
+            if previous_end.is_some_and(|previous| range.start_utf16 < previous) {
+                return Err(invalid_selection());
+            }
+            previous_end = Some(range.end_utf16);
             let start =
                 utf16_offset_to_byte(&text, range.start_utf16).ok_or_else(invalid_selection)?;
             let end = utf16_offset_to_byte(&text, range.end_utf16).ok_or_else(invalid_selection)?;
@@ -393,6 +411,8 @@ mod selection_tests {
         assert!(parse_selection(&text, Some("pages"), Some("1")).is_err());
         assert!(parse_selection(&text, Some("passages"), Some("p1:0-3,")).is_err());
         assert!(parse_selection(&text, Some("passages"), Some("p1:0-3")).is_ok());
+        assert!(parse_selection(&text, Some("passages"), Some("p1:4-5,p1:0-1")).is_err());
+        assert!(parse_selection(&text, Some("passages"), Some("p1:0-3,p1:2-4")).is_err());
         assert!(parse_selection(&text, Some("all"), Some("anything")).is_err());
         assert!(
             parse_selection(
@@ -408,14 +428,20 @@ mod selection_tests {
         assert!(parse_selection(&text, Some("passages"), Some(&over_count)).is_err());
 
         let audio = file("a.wav", "audio/wav", b"audio");
-        assert!(parse_selection(&audio, Some("intervals"), Some("ms:0-100,ms:200-300")).is_ok());
-        assert!(parse_selection(&audio, Some("intervals"), Some("ms:0-100,ms:50-150")).is_err());
+        assert!(parse_selection(&audio, Some("intervals"), Some("ms:0-100,200-300")).is_ok());
+        assert!(parse_selection(&audio, Some("intervals"), Some("ms:0-100,ms:200-300")).is_err());
+        assert!(parse_selection(&audio, Some("intervals"), Some("ms:0-100,50-150")).is_err());
+        assert!(parse_selection(&audio, Some("intervals"), Some("ms:100-100")).is_err());
+        assert!(parse_selection(&audio, Some("intervals"), Some("ms:200-300,0-100")).is_err());
         assert!(parse_selection(&audio, Some("passages"), Some("p1:0-1")).is_err());
 
         let pdf = file("a.pdf", "application/pdf", b"pdf");
         assert!(parse_selection(&pdf, Some("pages"), Some("1-3,5")).is_ok());
         assert!(parse_selection(&pdf, Some("pages"), Some("0,2")).is_err());
         assert!(parse_selection(&pdf, Some("pages"), Some("1-101")).is_err());
+        assert!(parse_selection(&pdf, Some("pages"), Some("3,1-2")).is_err());
+        assert!(parse_selection(&pdf, Some("pages"), Some("1-3,3-4")).is_err());
+        assert!(parse_selection(&pdf, Some("pages"), Some("2,2")).is_err());
         assert!(parse_selection(&pdf, Some("intervals"), Some("ms:0-10")).is_err());
 
         let docx = file(
@@ -478,6 +504,38 @@ mod selection_tests {
                     start_utf16: 0,
                     end_utf16: 1
                 }]
+            )
+            .is_err()
+        );
+        assert!(
+            select_text_passages(
+                b"abcdef",
+                &[
+                    TextRange {
+                        start_utf16: 0,
+                        end_utf16: 4,
+                    },
+                    TextRange {
+                        start_utf16: 3,
+                        end_utf16: 5,
+                    },
+                ],
+            )
+            .is_err()
+        );
+        assert!(
+            select_text_passages(
+                b"abcdef",
+                &[
+                    TextRange {
+                        start_utf16: 4,
+                        end_utf16: 5,
+                    },
+                    TextRange {
+                        start_utf16: 0,
+                        end_utf16: 2,
+                    },
+                ],
             )
             .is_err()
         );
