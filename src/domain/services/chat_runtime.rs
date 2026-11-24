@@ -372,13 +372,14 @@ impl StageServices<Turn> for Run {
         Box::pin(async move {
             match self.accept_turn(&turn).await {
                 Ok(accepted) => {
-                    let _ = self
-                        .ids
-                        .send(Some((accepted.ids.clone(), accepted.temporary)));
-                    // Temporary chats have no reconnect, but can be cancelled.
+                    // Open controls before publishing ids so a client reacting to
+                    // the first SSE event can cancel immediately.
                     self.runtime
                         .controls
                         .open(accepted.ids.output_id, self.control.clone());
+                    let _ = self
+                        .ids
+                        .send(Some((accepted.ids.clone(), accepted.temporary)));
                     turn.accepted = Some(Arc::new(accepted));
                     StageValue::ok(turn)
                 }
@@ -731,21 +732,53 @@ impl ChatRuntime {
             let journal = runtime.journal.clone();
             let deliver = tokio::spawn(async move {
                 let mut ids_rx = ids_rx;
+                let mut ids_open = true;
+                let mut accepted: Option<(InputIds, bool)> = None;
+                let mut first_ids_attached = false;
                 let mut pending = vec![];
-                while let Some(event) = output.recv().await {
-                    if let Some(stream) = &stream {
-                        let _ = stream.send(event.clone());
-                    }
-                    pending.push(event);
-                    let ids = ids_rx.borrow_and_update().clone();
-                    // Temporary chats have no reconnect (10.4.8).
-                    if let Some((ids, false)) = ids {
-                        for event in pending.drain(..) {
-                            let stored = StoredEvent::from(&event);
-                            let _ = journal.append(ids.output_id, &stored).await;
-                            // Live after the journal, so a reconnect misses nothing.
-                            let _ = live.send(stored);
+                loop {
+                    tokio::select! {
+                        maybe = output.recv() => match maybe {
+                            Some(event) => pending.push(event),
+                            None => break,
+                        },
+                        res = ids_rx.changed(), if ids_open => {
+                            if res.is_err() {
+                                ids_open = false;
+                            }
                         }
+                    }
+                    if accepted.is_none() {
+                        accepted = ids_rx.borrow_and_update().clone();
+                    }
+                    if let Some((ref ids, temporary)) = accepted {
+                        for mut event in pending.drain(..) {
+                            if !first_ids_attached
+                                && let NativeEvent::Stage(stage) = &mut event.event
+                            {
+                                stage.session_id = Some(ids.session_id);
+                                stage.output_id = Some(ids.output_id);
+                                first_ids_attached = true;
+                            }
+                            if let Some(stream) = &stream {
+                                let _ = stream.send(event.clone());
+                            }
+                            // Temporary chats have no reconnect (10.4.8).
+                            if !temporary {
+                                let stored = StoredEvent::from(&event);
+                                let _ = journal.append(ids.output_id, &stored).await;
+                                // Live after the journal, so a reconnect misses nothing.
+                                let _ = live.send(stored);
+                            }
+                        }
+                    }
+                }
+                // Rejected turns never set ids; flush their stage/error events without ids.
+                if accepted.is_none()
+                    && let Some(stream) = &stream
+                {
+                    for event in pending.drain(..) {
+                        let _ = stream.send(event);
                     }
                 }
             });

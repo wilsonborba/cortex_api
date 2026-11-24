@@ -517,6 +517,8 @@ async fn refused_inputs_save_nothing_and_call_no_model() {
     assert!(text.contains("event: error"));
     assert!(text.contains("\"error_number\":1014"));
     assert!(!text.contains("event: done"));
+    assert!(!text.contains("session_id"));
+    assert!(!text.contains("output_id"));
     assert!(model.prompts.lock().unwrap().is_empty());
     assert!(log.lock().unwrap().is_empty());
 }
@@ -1729,6 +1731,177 @@ async fn continue_a_saved_answer_from_a_recorded_alternative() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema and UUID keys"]
+async fn first_stream_event_carries_ids_and_cancels_before_done() {
+    use futures_util::StreamExt;
+    dotenvy::dotenv().ok();
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_first_ids_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let cache = RedisCache::from_environment();
+    let (_log, address) = remote().await;
+    let rt = runtime(
+        pool.clone(),
+        cache.clone(),
+        &address,
+        Arc::new(Model::default()),
+    );
+
+    async fn read_one_frame(
+        stream: &mut (impl StreamExt<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+        buf: &mut String,
+    ) -> Option<(u64, String, Value)> {
+        loop {
+            if let Some(end) = buf.find("\n\n") {
+                let block: String = buf.drain(..end + 2).collect();
+                let field = |name: &str| {
+                    block
+                        .lines()
+                        .find_map(|l| l.strip_prefix(name))
+                        .map(str::to_owned)
+                };
+                if let (Some(id), Some(event), Some(data)) =
+                    (field("id: "), field("event: "), field("data: "))
+                {
+                    return Some((
+                        id.parse().unwrap(),
+                        event,
+                        serde_json::from_str(&data).unwrap(),
+                    ));
+                }
+            }
+            let chunk = stream.next().await?.ok()?;
+            buf.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    }
+
+    // 1. POST /chats (stream=true): read ONLY first SSE event, cancel before done.
+    let response = send(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({"app_id":"cortex","text":"slow question","stream":true})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut data_stream = response.into_body().into_data_stream();
+    let mut buf = String::new();
+    let first = read_one_frame(&mut data_stream, &mut buf).await.unwrap();
+    assert_eq!(first.0, 1);
+    assert_eq!(first.1, "stage");
+    let first_data = first.2["data"].as_object().unwrap();
+    assert_eq!(first_data["stage"], "accept");
+    assert_eq!(first_data["status"], "started");
+    assert!(first_data.contains_key("expected_ms"));
+    let session_id: Uuid = first_data["session_id"]
+        .as_str()
+        .expect("first SSE event must include session_id")
+        .parse()
+        .unwrap();
+    let output_id: Uuid = first_data["output_id"]
+        .as_str()
+        .expect("first SSE event must include output_id")
+        .parse()
+        .unwrap();
+
+    // Cancel immediately using the ids read from the first SSE event.
+    let cancel_res = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{session_id}/outputs/{output_id}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(cancel_res.status(), StatusCode::OK);
+
+    let mut rest = vec![];
+    while let Some(frame) = read_one_frame(&mut data_stream, &mut buf).await {
+        rest.push(frame);
+    }
+    let done = rest.last().expect("stream finishes with done");
+    assert_eq!(done.1, "done");
+    assert_eq!(done.2["data"]["session_id"], session_id.to_string());
+    assert_eq!(done.2["data"]["output_id"], output_id.to_string());
+    assert!(rest.iter().filter(|f| f.1 == "token").count() < 40);
+    // Later stage events do not repeat early ids.
+    assert!(
+        !rest
+            .iter()
+            .filter(|f| f.1 == "stage")
+            .any(|f| f.2["data"].get("session_id").is_some())
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM chat_outputs WHERE output_id=$1")
+        .bind(output_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+
+    // 2. Follow-up POST /chats/{session_id}/inputs (stream=true): same contract.
+    let response = send(
+        &rt,
+        "POST",
+        &format!("/chats/{session_id}/inputs"),
+        "alice",
+        Some(json!({"text":"slow follow up","stream":true})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut data_stream = response.into_body().into_data_stream();
+    let mut buf = String::new();
+    let first2 = read_one_frame(&mut data_stream, &mut buf).await.unwrap();
+    assert_eq!(first2.0, 1);
+    assert_eq!(first2.1, "stage");
+    let first2_data = first2.2["data"].as_object().unwrap();
+    assert_eq!(first2_data["session_id"], session_id.to_string());
+    let output_id2: Uuid = first2_data["output_id"]
+        .as_str()
+        .expect("follow-up first event must include output_id")
+        .parse()
+        .unwrap();
+    assert_ne!(output_id2, output_id);
+
+    let cancel_res2 = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{session_id}/outputs/{output_id2}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(cancel_res2.status(), StatusCode::OK);
+    let mut rest2 = vec![];
+    while let Some(frame) = read_one_frame(&mut data_stream, &mut buf).await {
+        rest2.push(frame);
+    }
+    assert_eq!(rest2.last().unwrap().1, "done");
+    assert_eq!(
+        rest2.last().unwrap().2["data"]["output_id"],
+        output_id2.to_string()
+    );
+
     pool.close().await;
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
