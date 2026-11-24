@@ -121,6 +121,7 @@ impl Hippocampus {
             return Err(HippoUnavailable);
         }
         let client = reqwest::Client::builder()
+            .use_rustls_tls()
             .timeout(config.hippocampus_timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()

@@ -64,6 +64,7 @@ impl Ollama {
     pub fn new(config: Config, queue: Scheduler) -> Self {
         Self {
             client: reqwest::Client::builder()
+                .use_rustls_tls()
                 .connect_timeout(config.ollama_connect_timeout)
                 .build()
                 .expect("Ollama client"),

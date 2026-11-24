@@ -29,6 +29,7 @@ impl RunStore {
         }
         Ok(Self {
             client: reqwest::Client::builder()
+                .use_rustls_tls()
                 .timeout(config.document_timeout)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()

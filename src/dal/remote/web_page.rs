@@ -64,6 +64,7 @@ pub struct PageReader {
 impl PageReader {
     pub fn new(config: &Config) -> Result<Self, PageFailure> {
         let client = reqwest::Client::builder()
+            .use_rustls_tls()
             .user_agent(&config.web_user_agent)
             .timeout(config.web_page_timeout)
             .no_proxy()
