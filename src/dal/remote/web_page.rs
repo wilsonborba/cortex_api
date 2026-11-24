@@ -2,7 +2,10 @@ use crate::{
     core::config::{Config, FORBIDDEN_WEB_IP},
     domain::{
         models::{context::ContextText, events::Source, web_page::*},
-        services::chunks::split,
+        services::{
+            chunks::split,
+            research_limits::{is_cache_permitted, is_challenge_response, parse_rate_limit_wait},
+        },
     },
 };
 use futures_util::StreamExt;
@@ -129,6 +132,156 @@ impl PageReader {
             tokio::task::spawn_blocking(move || extract(&config, url.as_str(), &html))
                 .await
                 .map_err(|_| PageFailure::NoMainText)?
+        })
+        .await
+        .unwrap_or(Err(PageFailure::Timeout))
+    }
+
+    /// Policed page fetch honoring conditional headers (`If-None-Match` / `If-Modified-Since`),
+    /// `401`/`403`/challenge clean stops, `429` with `Retry-After`/`X-RateLimit-Reset`,
+    /// and `Cache-Control` caching permissions.
+    pub async fn read_policed(
+        &self,
+        value: &str,
+        cond: Option<&PageConditionalMeta>,
+        max_backoff_secs: u64,
+    ) -> Result<PageFetchOutcome, PageFailure> {
+        let url = page_url(value)?;
+        let _permit = self
+            .slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| PageFailure::Unavailable)?;
+        tokio::time::timeout(self.config.web_page_timeout, async {
+            let mut req = self.client.get(url.clone());
+            if let Some(meta) = cond {
+                if let Some(ref etag) = meta.etag {
+                    req = req.header("If-None-Match", etag);
+                }
+                if let Some(ref lm) = meta.last_modified {
+                    req = req.header("If-Modified-Since", lm);
+                }
+            }
+            let response = req.send().await.map_err(|e| {
+                if e.is_timeout() {
+                    PageFailure::Timeout
+                } else {
+                    PageFailure::Unavailable
+                }
+            })?;
+            let status = response.status().as_u16();
+            if status == 304 {
+                return Ok(PageFetchOutcome::NotModified);
+            }
+            if status == 401 || status == 403 {
+                return Ok(PageFetchOutcome::Blocked {
+                    status,
+                    is_challenge: false,
+                });
+            }
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .map(ToOwned::to_owned);
+            let rl_remaining = response
+                .headers()
+                .get("x-ratelimit-remaining")
+                .and_then(|v| v.to_str().ok())
+                .map(ToOwned::to_owned);
+            let rl_reset = response
+                .headers()
+                .get("x-ratelimit-reset")
+                .and_then(|v| v.to_str().ok())
+                .map(ToOwned::to_owned);
+            if status == 429 {
+                let wait = parse_rate_limit_wait(
+                    retry_after.as_deref(),
+                    Some("0"),
+                    rl_reset.as_deref(),
+                    max_backoff_secs,
+                )
+                .unwrap_or_else(|| 5.min(max_backoff_secs));
+                return Ok(PageFetchOutcome::RateLimited { wait_secs: wait });
+            }
+            if !response.status().is_success() {
+                return Err(PageFailure::Unavailable);
+            }
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(';').next())
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if !content_type.eq_ignore_ascii_case("text/html") {
+                return Err(PageFailure::WrongType);
+            }
+            if response
+                .content_length()
+                .is_some_and(|n| n > self.config.web_html_bytes as u64)
+            {
+                return Err(PageFailure::TooLarge);
+            }
+            let cache_control = response
+                .headers()
+                .get(reqwest::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok())
+                .map(ToOwned::to_owned);
+            let etag = response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(ToOwned::to_owned);
+            let last_modified = response
+                .headers()
+                .get(reqwest::header::LAST_MODIFIED)
+                .and_then(|v| v.to_str().ok())
+                .map(ToOwned::to_owned);
+            let mut bytes = vec![];
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| {
+                    if e.is_timeout() {
+                        PageFailure::Timeout
+                    } else {
+                        PageFailure::Unavailable
+                    }
+                })?;
+                if chunk.len() > self.config.web_html_bytes.saturating_sub(bytes.len()) {
+                    return Err(PageFailure::TooLarge);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let html = String::from_utf8_lossy(&bytes).into_owned();
+            if is_challenge_response(status, &html) {
+                return Ok(PageFetchOutcome::Blocked {
+                    status,
+                    is_challenge: true,
+                });
+            }
+            let config = self.config.clone();
+            let page = tokio::task::spawn_blocking(move || extract(&config, url.as_str(), &html))
+                .await
+                .map_err(|_| PageFailure::NoMainText)??;
+            let cacheable = is_cache_permitted(cache_control.as_deref());
+            let reset_cooldown_secs = parse_rate_limit_wait(
+                None,
+                rl_remaining.as_deref(),
+                rl_reset.as_deref(),
+                max_backoff_secs,
+            );
+            Ok(PageFetchOutcome::Page {
+                page,
+                meta: PageConditionalMeta {
+                    etag,
+                    last_modified,
+                },
+                cacheable,
+                reset_cooldown_secs,
+            })
         })
         .await
         .unwrap_or(Err(PageFailure::Timeout))

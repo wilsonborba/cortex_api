@@ -2,12 +2,12 @@ use crate::{
     core::process_numbers::{self, ProcessNumber},
     domain::models::{context::ContextText, events::Source},
 };
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct WebLink {
     pub url: String,
     pub text: String,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct WebPage {
     pub source: Source,
     pub chunks: Vec<ContextText>,
@@ -35,4 +35,28 @@ impl PageFailure {
 pub struct RankedChunk {
     pub chunk: ContextText,
     pub score: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PageConditionalMeta {
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+#[derive(Clone)]
+pub enum PageFetchOutcome {
+    Page {
+        page: WebPage,
+        meta: PageConditionalMeta,
+        cacheable: bool,
+        reset_cooldown_secs: Option<u64>,
+    },
+    NotModified,
+    Blocked {
+        status: u16,
+        is_challenge: bool,
+    },
+    RateLimited {
+        wait_secs: u64,
+    },
 }

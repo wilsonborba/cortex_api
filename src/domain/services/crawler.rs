@@ -16,10 +16,16 @@ use crate::{
             chunks::{pasted_urls, rank},
             events::EventSink,
             queries::QueryRewriter,
+            research_limits::{
+                FetchDecision, InMemoryLimitStore, ResearchPageCache, ResearchPolitenessGuard,
+                evaluate_publisher_policy,
+            },
             robots::{CrawlPermission, Robots},
             search::WebSearch,
             security::SecurityShield,
-            web::{FastWeb, notice, select},
+            web::{
+                FastWeb, PolicedPageError, notice, read_policed_page, record_policed_error, select,
+            },
         },
     },
 };
@@ -52,6 +58,9 @@ pub struct WebRetriever {
     reader: PageReader,
     queries: QueryRewriter,
     shield: Arc<SecurityShield>,
+    politeness: Arc<ResearchPolitenessGuard>,
+    page_cache: Arc<ResearchPageCache>,
+    enforce_robots_direct: bool,
     config: Config,
 }
 impl WebRetriever {
@@ -62,14 +71,40 @@ impl WebRetriever {
         shield: Arc<SecurityShield>,
         driver: Arc<dyn ModelDriver>,
     ) -> Self {
+        let politeness = Arc::new(ResearchPolitenessGuard::from_config(
+            config,
+            Arc::new(InMemoryLimitStore::default()),
+        ));
+        let page_cache = Arc::new(ResearchPageCache::in_memory(config.research_cache_ttl));
         Self {
-            fast: FastWeb::new(config, search.clone(), reader.clone(), shield.clone()),
+            fast: FastWeb::new(config, search.clone(), reader.clone(), shield.clone())
+                .with_politeness(politeness.clone(), page_cache.clone()),
             search,
             reader,
             queries: QueryRewriter::new(config, driver),
             shield,
+            politeness,
+            page_cache,
+            enforce_robots_direct: false,
             config: config.clone(),
         }
+    }
+
+    pub fn with_politeness(
+        mut self,
+        politeness: Arc<ResearchPolitenessGuard>,
+        page_cache: Arc<ResearchPageCache>,
+    ) -> Self {
+        self.politeness = politeness.clone();
+        self.page_cache = page_cache.clone();
+        self.fast = self.fast.with_politeness(politeness, page_cache);
+        self
+    }
+
+    pub fn with_robots_on_direct_reads(mut self, enforce: bool) -> Self {
+        self.enforce_robots_direct = enforce;
+        self.fast = self.fast.with_robots(enforce);
+        self
     }
     pub async fn gather(
         &self,
@@ -177,9 +212,50 @@ impl WebRetriever {
                 }
             }
         }
-        let mut plans: Vec<_> = urls.into_iter().map(|url| (url, Instant::now())).collect();
-        let mut all_pages = vec![];
         let mut robots = Robots::default();
+        let mut plans = vec![];
+        for url in urls {
+            if self.enforce_robots_direct {
+                let host = page_url(&url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                    .unwrap_or_else(|| "unknown".into());
+                let permission = tokio::select! {
+                    permission = robots.check(&self.reader, &self.config, &url, deadline) => Some(permission),
+                    _ = tokio::time::sleep_until(deadline) => { time_notice(&mut result.gathered); None },
+                    _ = cancelled(cancel.clone()) => { result.error = Some(DriverError::Cancelled); None }
+                };
+                let Some(permission) = permission else {
+                    return result;
+                };
+                match permission {
+                    CrawlPermission::Allowed(start) => plans.push((url, start)),
+                    CrawlPermission::Denied => {
+                        let decision = evaluate_publisher_policy(&host, None, false);
+                        record_policed_error(
+                            &mut result.gathered,
+                            url,
+                            PolicedPageError::Decision { host, decision },
+                        );
+                    }
+                    CrawlPermission::Unavailable => {
+                        result
+                            .gathered
+                            .coverage
+                            .record_skipped(&host, format!("{host}: robots.txt unavailable"));
+                        notice(
+                            &mut result.gathered,
+                            process_numbers::WEB_ROBOTS_FAILED,
+                            Some(url),
+                        );
+                    }
+                    CrawlPermission::TooLate => time_notice(&mut result.gathered),
+                }
+            } else {
+                plans.push((url, Instant::now()));
+            }
+        }
+        let mut all_pages = vec![];
         for level in 0..=depth {
             if plans.is_empty() || Instant::now() >= deadline {
                 if !plans.is_empty() {
@@ -256,7 +332,22 @@ impl WebRetriever {
                 };
                 match permission {
                     CrawlPermission::Allowed(start) => plans.push((url, start)),
-                    CrawlPermission::Denied => {}
+                    CrawlPermission::Denied => {
+                        let host = page_url(&url)
+                            .ok()
+                            .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                            .unwrap_or_else(|| "unknown".into());
+                        record_policed_error(
+                            &mut result.gathered,
+                            url,
+                            PolicedPageError::Decision {
+                                host: host.clone(),
+                                decision: FetchDecision::BlockedStop {
+                                    reason: format!("{host}: disallowed by robots.txt"),
+                                },
+                            },
+                        );
+                    }
                     CrawlPermission::Unavailable => notice(
                         &mut result.gathered,
                         process_numbers::WEB_ROBOTS_FAILED,
@@ -299,12 +390,19 @@ impl WebRetriever {
             events.send(NativeEvent::Step(step));
             pending.push(async move {
                 tokio::time::sleep_until(start).await;
-                let response = async {
-                    let mut page = self.reader.read(&url).await?;
-                    let (safe, notices) = self.shield.filter_chunks(page.chunks).await;
-                    page.chunks = safe;
-                    Ok::<_, PageFailure>((page, notices))
-                }
+                let host = page_url(&url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+                    .unwrap_or_else(|| "unknown".into());
+                let scope = format!("host:{host}");
+                let response = read_policed_page(
+                    &self.reader,
+                    &self.politeness,
+                    &self.page_cache,
+                    &self.shield,
+                    &url,
+                    &scope,
+                )
                 .await;
                 (index, url, response)
             });
@@ -314,7 +412,10 @@ impl WebRetriever {
             tokio::select! {
                 _=tokio::time::sleep_until(deadline)=>{time_notice(output);break;},
                 _=cancelled(cancel.clone())=>return(pages.into_iter().map(|(_,page)|page).collect(),Some(DriverError::Cancelled)),
-                Some((index,url,response))=pending.next()=>match response{Ok((page,notices))=>{output.pages_read+=1;for process in notices{if process.number!=process_numbers::SECURITY_BLOCK.number{notice(output,process,Some(url.clone()));}}if !page.chunks.is_empty(){output.sources.push(page.source.clone());events.send(NativeEvent::Sources(output.sources.clone()));}pages.push((index,page));},Err(error)=>notice(output,error.process(),Some(url))}
+                Some((index,url,response))=pending.next()=>match response{
+                    Ok((page,notices))=>{output.pages_read+=1;for process in notices{if process.number!=process_numbers::SECURITY_BLOCK.number{notice(output,process,Some(url.clone()));}}if !page.chunks.is_empty(){output.sources.push(page.source.clone());events.send(NativeEvent::Sources(output.sources.clone()));}pages.push((index,page));},
+                    Err(error)=>record_policed_error(output, url, error),
+                }
             }
         }
         pages.sort_by_key(|(index, _)| *index);
