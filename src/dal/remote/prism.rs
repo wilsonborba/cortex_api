@@ -436,14 +436,14 @@ impl Prism {
                     {
                         for message in safe_messages {
                             let role = message.get("role").and_then(Value::as_str);
-                            if role == Some("system") {
-                                if let Some(content) = message.get_mut("content") {
-                                    let byte_len = content
-                                        .as_str()
-                                        .map(str::len)
-                                        .unwrap_or_else(|| content.to_string().len());
-                                    *content = Value::String(format!("<redacted:{byte_len} bytes>"));
-                                }
+                            if role == Some("system")
+                                && let Some(content) = message.get_mut("content")
+                            {
+                                let byte_len = content
+                                    .as_str()
+                                    .map(str::len)
+                                    .unwrap_or_else(|| content.to_string().len());
+                                *content = Value::String(format!("<redacted:{byte_len} bytes>"));
                             }
                         }
                     }

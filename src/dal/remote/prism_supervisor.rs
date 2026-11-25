@@ -295,9 +295,12 @@ mod tests {
         dal::remote::{model_router::ModelRouter, ollama::Ollama, prism::Prism},
         domain::{
             models::{
-                driver::{CallInput, DriverEvent, ModelDriver, OutputModel},
+                context::{AssembledContext, ContextInput, ContextText},
+                driver::{CallInput, CallOutcome, DriverEvent, ModelDriver, OutputModel},
                 identity::Caller,
                 model_profile::ModelProfile,
+                thinking::{ThinkingInput, ThinkingResult},
+                tools::{PendingTool, ToolControl, ToolName, ToolResult},
                 usage::{
                     CallUsage, LedgerUnavailable, Pending, Share, Usage, UsageLedger, WaitingCall,
                 },
@@ -356,29 +359,150 @@ mod tests {
         }
     }
 
-    fn cortex_eval_input(config: &Config, question: &str) -> CallInput {
-        let assembled = crate::domain::services::context::assemble(
+    fn cortex_eval_context(
+        config: &Config,
+        question: &str,
+        files: Vec<ContextText>,
+    ) -> AssembledContext {
+        crate::domain::services::context::assemble(
             config,
-            crate::domain::models::context::ContextInput {
+            ContextInput {
                 context_tokens: Some(8192),
                 output_tokens: Some(256),
                 question: question.into(),
+                files,
                 ..Default::default()
             },
         )
-        .expect("production Cortex context assembly");
-        CallInput {
-            role: "answer".into(),
-            system: assembled.system,
-            prompt: assembled.prompt,
-            images: vec![],
-            temperature: 0.0,
-            max_tokens: 256,
-            context_tokens: 8192,
-            prefix: None,
-            allow_tools: false,
-            tool_history: vec![],
+        .expect("production Cortex context assembly with bounded synthetic evidence")
+    }
+
+    fn synthetic_evidence(label: &str, text: &str) -> ContextText {
+        assert!(text.len() <= 1024, "synthetic evidence must stay bounded");
+        ContextText {
+            label: label.into(),
+            source: Some("synthetic-eval-fixture".into()),
+            text: text.into(),
         }
+    }
+
+    async fn evaluation_thinking_answer(
+        router: &Arc<ModelRouter>,
+        config: &Config,
+        output: &OutputModel,
+        context: &AssembledContext,
+        prefix: Option<String>,
+    ) -> CallOutcome {
+        let thinking = crate::domain::services::thinking::Thinking::new(config, router.clone());
+        let input = ThinkingInput {
+            model: output,
+            context,
+            images: vec![],
+            prefix,
+            tools_enabled: false,
+            budget: None,
+        };
+        let (events, receiver, event_task) = crate::domain::services::events::channel(config, None);
+        let (cancel_tx, cancel) = watch::channel(false);
+        let answer_state = ThinkingResult::default();
+        let result = {
+            let call = thinking.answer(&input, &answer_state, &events, cancel);
+            tokio::pin!(call);
+            let deadline = tokio::time::sleep(Duration::from_secs(240));
+            tokio::pin!(deadline);
+            let mut monitor = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    result = &mut call => break result,
+                    _ = monitor.tick() => {
+                        if evaluation_resources_ok(700).is_err() {
+                            let _ = cancel_tx.send(true);
+                        }
+                    }
+                    _ = &mut deadline => {
+                        let _ = cancel_tx.send(true);
+                        break tokio::time::timeout(Duration::from_secs(60), &mut call)
+                            .await.expect("bounded Thinking::answer cancellation");
+                    }
+                }
+            }
+        };
+        drop(events);
+        drop(receiver);
+        event_task.await.expect("bounded event output task");
+        result.expect("real Thinking::answer provider call")
+    }
+
+    async fn evaluation_thinking_tool_double(
+        router: &Arc<ModelRouter>,
+        config: &Config,
+        output: &OutputModel,
+        context: &AssembledContext,
+    ) -> (CallOutcome, Vec<PendingTool>) {
+        let thinking = crate::domain::services::thinking::Thinking::new(config, router.clone());
+        let input = ThinkingInput {
+            model: output,
+            context,
+            images: vec![],
+            prefix: None,
+            tools_enabled: true,
+            budget: None,
+        };
+        let (events, receiver, event_task) = crate::domain::services::events::channel(config, None);
+        let (tool_tx, mut tool_results) = mpsc::unbounded_channel();
+        let tool_control = ToolControl::new(tool_tx);
+        let (cancel_tx, cancel) = watch::channel(false);
+        let mut requests = Vec::new();
+        let answer_state = ThinkingResult::default();
+        let result = {
+            let call = thinking.answer_with_tools(
+                &input,
+                &answer_state,
+                &events,
+                cancel,
+                &tool_control,
+                &mut tool_results,
+            );
+            tokio::pin!(call);
+            let deadline = tokio::time::sleep(Duration::from_secs(240));
+            tokio::pin!(deadline);
+            let mut monitor = tokio::time::interval(Duration::from_secs(5));
+            let mut poll_tools = tokio::time::interval(Duration::from_millis(20));
+            loop {
+                tokio::select! {
+                    result = &mut call => break result,
+                    _ = poll_tools.tick() => {
+                        if let Some(request) = tool_control.pending()
+                            && !requests.iter().any(|seen: &PendingTool| seen.call_id == request.call_id)
+                        {
+                            requests.push(request.clone());
+                            tool_control.submit(ToolResult {
+                                call_id: request.call_id,
+                                name: request.name,
+                                output: "Synthetic fixture content: job KITE-204 status READY, retry_count 2.".into(),
+                            }).expect("respond only to a pending synthetic tool request");
+                        }
+                    }
+                    _ = monitor.tick() => {
+                        if evaluation_resources_ok(700).is_err() {
+                            let _ = cancel_tx.send(true);
+                        }
+                    }
+                    _ = &mut deadline => {
+                        let _ = cancel_tx.send(true);
+                        break tokio::time::timeout(Duration::from_secs(60), &mut call)
+                            .await.expect("bounded synthetic tool-call cancellation");
+                    }
+                }
+            }
+        };
+        drop(events);
+        drop(receiver);
+        event_task.await.expect("bounded event output task");
+        (
+            result.expect("real Thinking::answer_with_tools provider call"),
+            requests,
+        )
     }
 
     fn middle_word_prefix(text: &str) -> Option<String> {
@@ -554,34 +678,6 @@ mod tests {
             .map(str::to_owned)
     }
 
-    async fn evaluation_call(
-        router: &ModelRouter,
-        output: &OutputModel,
-        input: CallInput,
-    ) -> crate::domain::models::driver::CallOutcome {
-        let (events, mut receiver) = mpsc::unbounded_channel();
-        let (cancel_tx, cancel) = watch::channel(false);
-        let call = router.call(output, input, events, cancel);
-        tokio::pin!(call);
-        let deadline = tokio::time::sleep(Duration::from_secs(240));
-        tokio::pin!(deadline);
-        let mut monitor = tokio::time::interval(Duration::from_secs(5));
-        let mut saw_token = false;
-        loop {
-            tokio::select! {
-                result = &mut call => return result.expect("model call completed successfully"),
-                event = receiver.recv() => if matches!(event, Some(DriverEvent::Token { .. })) { saw_token = true; },
-                _ = monitor.tick() => {
-                    if evaluation_resources_ok(700).is_err() {
-                        let _ = cancel_tx.send(true);
-                    }
-                }
-                _ = &mut deadline => panic!("bounded evaluation call exceeded 240 seconds; inspect owned supervisor cleanup before retry"),
-            }
-            let _ = saw_token;
-        }
-    }
-
     fn assert_measured_answer(outcome: &crate::domain::models::driver::CallOutcome) {
         assert!(
             outcome.error.is_none(),
@@ -685,67 +781,149 @@ mod tests {
         let result = std::panic::AssertUnwindSafe(async {
             let uncensored = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
             let original_question =
-                "In English, explain in one sentence what a Rust Result represents.";
-            let original_input = cortex_eval_input(&config, original_question);
-            let cold = evaluation_call(&router, &uncensored, original_input.clone()).await;
+                "According to the synthetic record for KITE-204, what status and retry count are recorded? Answer in one sentence.";
+            let original_context = cortex_eval_context(
+                &config,
+                original_question,
+                vec![synthetic_evidence(
+                    "KITE-204 synthetic record",
+                    "Synthetic record KITE-204: status READY; retry_count 2.",
+                )],
+            );
+            let cold = evaluation_thinking_answer(
+                &router,
+                &config,
+                &uncensored,
+                &original_context,
+                None,
+            )
+            .await;
             assert!(!cold.text.trim().is_empty());
             assert_measured_answer(&cold);
+            assert!(cold.text.to_lowercase().contains("ready"));
+            assert!(cold.text.contains('2'));
             eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-en-cold","profile":uncensored.model_id(),"ttft_ms":cold.usage.time_to_first_token_ms,"input_tokens":cold.usage.input_tokens,"output_tokens":cold.usage.output_tokens,"usage_measured":cold.usage_measured,"total_ms":cold.usage.total_ms,"tokens_per_second":cold.tokens_per_second,"text":cold.text}));
             let first_pid = supervisor.child.lock().await.as_ref().expect("owned uncensored child").pid;
             let first_start = process_start_ticks(first_pid).expect("read owned Prism process identity");
 
-            let mut prefix_input = original_input;
-            prefix_input.prefix = Some(
-                middle_word_prefix(&cold.text)
-                    .expect("generated English answer has a valid middle word boundary"),
-            );
-            let prefix = evaluation_call(&router, &uncensored, prefix_input).await;
+            let saved_prefix = middle_word_prefix(&cold.text)
+                .expect("generated English answer has a valid middle word boundary");
+            let prefix = evaluation_thinking_answer(
+                &router,
+                &config,
+                &uncensored,
+                &original_context,
+                Some(saved_prefix.clone()),
+            )
+            .await;
+            let continued_answer = format!("{saved_prefix}{}", prefix.text);
             assert!(
                 !prefix.text.trim().is_empty(),
                 "a prefix cut in the middle of the generated answer must produce visible continuation text"
             );
             assert_measured_answer(&prefix);
+            assert!(continued_answer.to_lowercase().contains("ready"));
+            assert!(continued_answer.contains('2'));
             assert_eq!(supervisor.child.lock().await.as_ref().expect("same owned child").pid, first_pid,
                 "healthy same-profile calls reuse one process");
             assert_eq!(process_start_ticks(first_pid).as_deref(), Some(first_start.as_str()),
                 "same-profile calls preserve the original process instance");
             eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-prefix","ttft_ms":prefix.usage.time_to_first_token_ms,"output_tokens":prefix.usage.output_tokens,"usage_measured":prefix.usage_measured,"total_ms":prefix.usage.total_ms,"tokens_per_second":prefix.tokens_per_second,"text":prefix.text}));
 
-            let json = evaluation_call(&router, &uncensored,
-                cortex_eval_input(&config, "Return only JSON with keys ok (boolean) and count (integer), set to true and 3.")).await;
+            let json_context = cortex_eval_context(
+                &config,
+                "From the synthetic ledger, return only JSON with boolean key ok and integer key count.",
+                vec![synthetic_evidence(
+                    "JSON fixture",
+                    "Synthetic ledger entry: ok=true; count=3.",
+                )],
+            );
+            let json = evaluation_thinking_answer(
+                &router,
+                &config,
+                &uncensored,
+                &json_context,
+                None,
+            )
+            .await;
             assert_measured_answer(&json);
             let parsed: serde_json::Value = serde_json::from_str(json.text.trim()).expect("valid JSON answer");
             assert_eq!(parsed["ok"], true); assert_eq!(parsed["count"], 3);
             eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-json","text":json.text,"usage_measured":json.usage_measured}));
 
-            let mut tool_input = cortex_eval_input(&config,
-                "Use the view_file tool to read the synthetic path /evaluation-only/no-such-file.txt. Do not claim it was read.");
-            tool_input.allow_tools = true;
-            let tool = evaluation_call(&router, &uncensored, tool_input).await;
-            let tool_request = tool.tool_request.expect("model should return a synthetic tool request");
-            assert_eq!(tool_request.name.as_str(), "view_file");
-            assert_eq!(tool_request.arguments["path"], "/evaluation-only/no-such-file.txt");
+            let tool_context = cortex_eval_context(
+                &config,
+                "Use the view_file tool to read the synthetic path /evaluation-only/kite-204.txt, then state the record's status and retry count.",
+                vec![synthetic_evidence(
+                    "Tool fixture index",
+                    "The requested file path is synthetic and exists only in the evaluator's fake tool response.",
+                )],
+            );
+            let (tool, tool_requests) = evaluation_thinking_tool_double(
+                &router,
+                &config,
+                &uncensored,
+                &tool_context,
+            )
+            .await;
+            assert_eq!(tool_requests.len(), 1, "one synthetic tool request expected");
+            assert_eq!(tool_requests[0].name, ToolName::ViewFile);
+            assert_eq!(tool_requests[0].arguments["path"], "/evaluation-only/kite-204.txt");
             assert!(tool.usage_measured && tool.usage.output_tokens > 0 && tool.usage.total_ms > 0);
-            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-tool-double","tool":tool_request.name.as_str(),"arguments":tool_request.arguments,"effects":"none"}));
+            assert!(tool.text.to_lowercase().contains("ready") && tool.text.contains('2'));
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-tool-double","tool":tool_requests[0].name.as_str(),"arguments":tool_requests[0].arguments,"effects":"synthetic-only","text":tool.text,"usage_measured":tool.usage_measured}));
 
-            for (language, prompt) in [
-                ("en", "Explain in one short sentence how to handle a missing optional value in Rust."),
-                ("pt-BR", "Em uma frase curta, explique como tratar um valor opcional ausente em Rust."),
-                ("th", "ตอบเป็นภาษาไทยเท่านั้น: อธิบายสั้น ๆ ว่า Rust ใช้ Option เพื่ออะไร"),
+            for (language, question, evidence) in [
+                (
+                    "en",
+                    "According to the synthetic evidence, when is a Rust Option value absent? Answer in one sentence.",
+                    "In Rust, Option<T> is None when the optional value is absent, and Some(value) when it is present.",
+                ),
+                (
+                    "pt-BR",
+                    "Segundo a evidência sintética, quando um valor Option de Rust está ausente? Responda em uma frase.",
+                    "Em Rust, Option<T> é None quando o valor opcional está ausente e Some(valor) quando está presente.",
+                ),
+                (
+                    "th",
+                    "ตอบเป็นภาษาไทยเท่านั้น: ตามหลักฐานสังเคราะห์ Option ของ Rust หมายถึงค่าไม่อยู่เมื่อใด",
+                    "ใน Rust, Option<T> เป็น None เมื่อค่าไม่มี และเป็น Some(value) เมื่อค่ามีอยู่",
+                ),
             ] {
-                let outcome = evaluation_call(&router, &uncensored, cortex_eval_input(&config, prompt)).await;
+                let context = cortex_eval_context(
+                    &config,
+                    question,
+                    vec![synthetic_evidence("Language fact fixture", evidence)],
+                );
+                let outcome = evaluation_thinking_answer(
+                    &router,
+                    &config,
+                    &uncensored,
+                    &context,
+                    None,
+                )
+                .await;
                 assert_measured_answer(&outcome);
                 let han = outcome.text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count();
                 let thai = outcome.text.chars().filter(|c| ('\u{0e00}'..='\u{0e7f}').contains(c)).count();
                 eprintln!("EVAL {}", serde_json::json!({"case":"atomic-language","language":language,"han_codepoints":han,"thai_codepoints":thai,"text":outcome.text,"known_thai_mixed_chinese_is_quality_failure":language=="th" && han>0}));
                 assert!(outcome.error.is_none());
                 assert!(!outcome.text.trim().is_empty());
+                assert!(outcome.text.contains("None") || language == "th");
+                if language == "th" {
+                    assert!(han == 0 && thai > 0, "Thai response must use Thai script without Chinese; keep raw output in the log");
+                }
             }
 
             let official = evaluation_output(ModelProfile::Bonsai25Official, false);
-            let official_original_input = cortex_eval_input(&config, original_question);
-            let answer = evaluation_call(&router, &official,
-                official_original_input.clone()).await;
+            let answer = evaluation_thinking_answer(
+                &router,
+                &config,
+                &official,
+                &original_context,
+                None,
+            )
+            .await;
             assert_measured_answer(&answer);
             let official_child = supervisor.child.lock().await;
             let official_pid = official_child.as_ref().expect("owned official child").pid;
@@ -758,35 +936,60 @@ mod tests {
             }
             eprintln!("EVAL {}", serde_json::json!({"case":"official-en-switch","profile":official.model_id(),"pid":official_pid,"ttft_ms":answer.usage.time_to_first_token_ms,"total_ms":answer.usage.total_ms,"text":answer.text}));
             drop(official_child);
-            let mut official_prefix_input = official_original_input;
-            official_prefix_input.prefix = Some(
-                middle_word_prefix(&answer.text)
-                    .expect("official generated answer has a valid middle word boundary"),
-            );
-            let official_prefix = evaluation_call(&router, &official, official_prefix_input).await;
+            let official_saved_prefix = middle_word_prefix(&answer.text)
+                .expect("official generated answer has a valid middle word boundary");
+            let official_prefix = evaluation_thinking_answer(
+                &router,
+                &config,
+                &official,
+                &original_context,
+                Some(official_saved_prefix.clone()),
+            )
+            .await;
+            let official_continued = format!("{official_saved_prefix}{}", official_prefix.text);
             assert!(
                 !official_prefix.text.trim().is_empty(),
                 "a prefix cut in the middle of the official answer must produce visible continuation text"
             );
             assert_measured_answer(&official_prefix);
+            assert!(official_continued.to_lowercase().contains("ready"));
+            assert!(official_continued.contains('2'));
             assert_eq!(supervisor.child.lock().await.as_ref().expect("official same-profile child").pid, official_pid);
             eprintln!("EVAL {}", serde_json::json!({"case":"official-prefix","ttft_ms":official_prefix.usage.time_to_first_token_ms,"usage_measured":official_prefix.usage_measured,"text":official_prefix.text}));
-            let mut official_tool_input = cortex_eval_input(&config,
-                "Use the view_file tool to read the synthetic path /evaluation-only/no-such-file.txt. Do not claim it was read.");
-            official_tool_input.allow_tools = true;
-            let official_tool = evaluation_call(&router, &official, official_tool_input).await;
-            let official_tool_request = official_tool.tool_request.expect("official profile returns the synthetic tool call");
-            assert_eq!(official_tool_request.name.as_str(), "view_file");
-            assert_eq!(official_tool_request.arguments["path"], "/evaluation-only/no-such-file.txt");
+            let (official_tool, official_tool_requests) = evaluation_thinking_tool_double(
+                &router,
+                &config,
+                &official,
+                &tool_context,
+            )
+            .await;
+            assert_eq!(official_tool_requests.len(), 1);
+            assert_eq!(official_tool_requests[0].name, ToolName::ViewFile);
+            assert_eq!(official_tool_requests[0].arguments["path"], "/evaluation-only/kite-204.txt");
             assert!(official_tool.usage_measured && official_tool.usage.output_tokens > 0);
-            eprintln!("EVAL {}", serde_json::json!({"case":"official-tool-double","tool":official_tool_request.name.as_str(),"arguments":official_tool_request.arguments,"effects":"none","usage_measured":official_tool.usage_measured}));
-            let official_thai = evaluation_call(&router, &official,
-                cortex_eval_input(&config, "ตอบเป็นภาษาไทยเท่านั้น: อธิบายสั้น ๆ ว่า Rust ใช้ Option เพื่ออะไร")).await;
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-tool-double","tool":official_tool_requests[0].name.as_str(),"arguments":official_tool_requests[0].arguments,"effects":"synthetic-only","usage_measured":official_tool.usage_measured}));
+            let thai_context = cortex_eval_context(
+                &config,
+                "ตอบเป็นภาษาไทยเท่านั้น: ตามหลักฐานสังเคราะห์ Option ของ Rust หมายถึงค่าไม่อยู่เมื่อใด",
+                vec![synthetic_evidence(
+                    "Thai language fact fixture",
+                    "ใน Rust, Option<T> เป็น None เมื่อค่าไม่มี และ Some(value) เมื่อค่ามีอยู่",
+                )],
+            );
+            let official_thai = evaluation_thinking_answer(
+                &router,
+                &config,
+                &official,
+                &thai_context,
+                None,
+            )
+            .await;
             assert_measured_answer(&official_thai);
             let official_han = official_thai.text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count();
             let official_thai_chars = official_thai.text.chars().filter(|c| ('\u{0e00}'..='\u{0e7f}').contains(c)).count();
             let official_inspection = official_thai.inspection.as_ref().map(|value| (value.reason.clone(), value.tokens.len()));
             eprintln!("EVAL {}", serde_json::json!({"case":"official-thai-raw","han_codepoints":official_han,"thai_codepoints":official_thai_chars,"inspection":official_inspection,"usage_measured":official_thai.usage_measured,"text":official_thai.text,"postprocessing":false}));
+            assert!(official_han == 0 && official_thai_chars > 0, "Official Thai response must use Thai script without Chinese");
 
             // Load the previously empty Ollama T0 vision model only through the router.
             let image = {
@@ -848,8 +1051,19 @@ mod tests {
             eprintln!("EVAL {}", serde_json::json!({"case":"t0-image-prepass-source","model":config.vision_model,"description":description,"input_tokens":vision_usage.input_tokens,"output_tokens":vision_usage.output_tokens,"ttft_ms":vision_usage.time_to_first_token_ms,"total_ms":vision_usage.total_ms}));
             assert!(unload_owned_t0(&config).await.expect("unload only the test's sole T0 vision model"));
             let text_profile = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
-            let grounded = evaluation_call(&router, &text_profile,
-                eval_input(&format!("Use only this image description and state its three bands: {}", description), vec![], None, false)).await;
+            let image_context = cortex_eval_context(
+                &config,
+                "According to the synthetic image description, state the three visible color bands.",
+                vec![synthetic_evidence("T0 synthetic image description", &description)],
+            );
+            let grounded = evaluation_thinking_answer(
+                &router,
+                &config,
+                &text_profile,
+                &image_context,
+                None,
+            )
+            .await;
             assert_measured_answer(&grounded);
             assert!(grounded.text.to_lowercase().contains("red") && grounded.text.to_lowercase().contains("green") && grounded.text.to_lowercase().contains("blue"));
             eprintln!("EVAL {}", serde_json::json!({"case":"t0-prepass-to-t1-text","profile":text_profile.model_id(),"images_sent_to_t1":0,"text":grounded.text,"usage_measured":grounded.usage_measured}));
@@ -1030,23 +1244,42 @@ mod tests {
         let result = std::panic::AssertUnwindSafe(async {
             let output = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
             let original_question =
-                "In English, explain in one sentence what a Rust Result represents.";
-            let original_input = cortex_eval_input(&config, original_question);
-            let cold = evaluation_call(&router, &output, original_input.clone()).await;
+                "According to the synthetic record for KITE-204, what status and retry count are recorded? Answer in one sentence.";
+            let original_context = cortex_eval_context(
+                &config,
+                original_question,
+                vec![synthetic_evidence(
+                    "KITE-204 synthetic record",
+                    "Synthetic record KITE-204: status READY; retry_count 2.",
+                )],
+            );
+            let cold = evaluation_thinking_answer(
+                &router,
+                &config,
+                &output,
+                &original_context,
+                None,
+            )
+            .await;
             assert!(!cold.text.trim().is_empty(), "initial synthetic answer is nonempty");
             assert_measured_answer(&cold);
-            let mut continuation_input = original_input;
-            continuation_input.prefix = Some(
-                middle_word_prefix(&cold.text)
-                    .expect("initial answer has a valid middle word boundary"),
-            );
-            let continuation = evaluation_call(&router, &output, continuation_input).await;
+            let saved_prefix = middle_word_prefix(&cold.text)
+                .expect("initial answer has a valid middle word boundary");
+            let continuation = evaluation_thinking_answer(
+                &router,
+                &config,
+                &output,
+                &original_context,
+                Some(saved_prefix.clone()),
+            )
+            .await;
             eprintln!(
                 "PREFIX_DIAGNOSTIC_RESULT {}",
                 serde_json::json!({
                     "profile": output.model_id(),
                     "initial_text": cold.text,
                     "initial_tokens": cold.usage.output_tokens,
+                    "saved_prefix": saved_prefix,
                     "continuation_text": continuation.text,
                     "continuation_input_tokens": continuation.usage.input_tokens,
                     "continuation_output_tokens": continuation.usage.output_tokens,
