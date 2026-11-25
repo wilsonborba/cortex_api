@@ -403,8 +403,13 @@ mod tests {
         if load > 24.0 {
             return Err(format!("load average too high: {load}"));
         }
-        let gpu = std::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        let gpu = std::process::Command::new("timeout")
+            .args([
+                "5s",
+                "nvidia-smi",
+                "--query-gpu=memory.free",
+                "--format=csv,noheader,nounits",
+            ])
             .output()
             .map_err(|e| e.to_string())?;
         if !gpu.status.success() {
@@ -622,8 +627,13 @@ mod tests {
                 .is_empty(),
             "pre-existing Ollama models: do not unload another user's work"
         );
-        let apps = std::process::Command::new("nvidia-smi")
-            .args(["--query-compute-apps=pid,name", "--format=csv,noheader"])
+        let apps = std::process::Command::new("timeout")
+            .args([
+                "5s",
+                "nvidia-smi",
+                "--query-compute-apps=pid,name",
+                "--format=csv,noheader",
+            ])
             .output()
             .expect("nvidia-smi compute-process preflight");
         assert!(
@@ -813,7 +823,7 @@ mod tests {
             tokio::pin!(cancel_call);
             let queued_output = evaluation_output(ModelProfile::CortexT0, false);
             let (queued_events, mut queued_event_rx) = mpsc::unbounded_channel();
-            let (_queued_cancel_tx, queued_cancel_rx) = watch::channel(false);
+            let (queued_cancel_tx, queued_cancel_rx) = watch::channel(false);
             let queued_call = router.call(&queued_output,
                 eval_input("In one sentence, define Rust ownership.", vec![], None, false),
                 queued_events, queued_cancel_rx);
@@ -838,6 +848,8 @@ mod tests {
                         _ = observation_monitor.tick() => {
                             if evaluation_resources_ok(700).is_err() {
                                 pressure_detected = true;
+                                let _ = cancel_tx.send(true);
+                                let _ = queued_cancel_tx.send(true);
                                 break;
                             }
                         }
@@ -857,6 +869,9 @@ mod tests {
                         _ = &mut drain => break,
                         _ = drain_monitor.tick() => {
                             if evaluation_resources_ok(700).is_err() {
+                                pressure_detected = true;
+                                let _ = cancel_tx.send(true);
+                                let _ = queued_cancel_tx.send(true);
                                 eprintln!("GUARD_STOP resource pressure while settling cancelled T1 and queued T0");
                             }
                         }
