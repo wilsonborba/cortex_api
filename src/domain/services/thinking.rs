@@ -39,6 +39,18 @@ impl Thinking {
         instruction: &str,
         max_tokens: u32,
     ) -> Result<CallInput, DriverError> {
+        self.call_input_with_tool_history(input, notes, &[], role, instruction, max_tokens)
+    }
+
+    fn call_input_with_tool_history(
+        &self,
+        input: &ThinkingInput<'_>,
+        notes: &[ContextText],
+        tool_history: &[ToolExchange],
+        role: &str,
+        instruction: &str,
+        max_tokens: u32,
+    ) -> Result<CallInput, DriverError> {
         let system = format!("{}\n{instruction}", input.context.system);
         let render = |cap: usize| {
             let notes: Vec<_> = notes
@@ -97,11 +109,22 @@ impl Thinking {
             .budget
             .as_ref()
             .map_or(u64::MAX, |budget| budget.remaining());
+        let history_tokens = tool_history.iter().fold(0u64, |total, exchange| {
+            let exchange_text = format!(
+                "Assistant tool call {} {} arguments {}\nTool result:\n{}",
+                exchange.request.call_id,
+                exchange.request.name.as_str(),
+                exchange.request.arguments,
+                exchange.output
+            );
+            total.saturating_add(self.config.estimate_tokens(&exchange_text))
+        });
         let prompt_tokens = self
             .config
             .estimate_tokens(&system)
             .saturating_add(self.config.estimate_tokens(&prompt))
-            .saturating_add(self.config.chat_template_token_reserve);
+            .saturating_add(self.config.chat_template_token_reserve)
+            .saturating_add(history_tokens);
         let output_allowance = remaining.saturating_sub(prompt_tokens).min(
             self.config
                 .model_context_tokens
@@ -335,15 +358,6 @@ impl Thinking {
         if *cancel.borrow() {
             return Err(DriverError::Cancelled);
         }
-        let mut call = self.call_input(
-            input,
-            &thinking.notes,
-            "answer",
-            &self.config.thinking_final_instruction,
-            self.config.answer_token_reserve as u32,
-        )?;
-        call.prefix = input.prefix.clone();
-        call.allow_tools = input.tools_enabled && input.prefix.is_none();
         if !thinking.calls.is_empty() {
             let mut step = StepProgress::new(StageName::Answer, StepName::ThinkingStep);
             step.params.insert("role".into(), "answer".into());
@@ -358,7 +372,20 @@ impl Thinking {
         let mut accumulated_usage: Option<crate::domain::models::run_record::ModelCall> = None;
         let mut had_tool = false;
         for _ in 0..8 {
+            let mut call = self.call_input_with_tool_history(
+                input,
+                &thinking.notes,
+                &exchanges,
+                "answer",
+                &self.config.thinking_final_instruction,
+                self.config.answer_token_reserve as u32,
+            )?;
+            call.prefix = input.prefix.clone();
+            call.allow_tools = input.tools_enabled && input.prefix.is_none();
             call.tool_history = exchanges.clone();
+            if *cancel.borrow() {
+                return Err(DriverError::Cancelled);
+            }
             let outcome = self
                 .call(
                     input,
@@ -669,6 +696,81 @@ mod child_budget_tests {
         drop(events);
         forwarder.await.unwrap();
         assert_eq!(excess_budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_continuation_rebudgets_history_before_calling_the_provider() {
+        let config = Config {
+            thinking_final_instruction: "Answer".into(),
+            chat_template_token_reserve: 0,
+            token_estimate_bytes_per_token: 4,
+            answer_token_reserve: 64,
+            ..Config::default()
+        };
+        let caller = Caller {
+            app_id: "cortex".into(),
+            user_id: Some("owner".into()),
+            is_admin: false,
+        };
+        let model = OutputModel::new(&caller, uuid::Uuid::now_v7(), false);
+        let context = AssembledContext {
+            question: "x".into(),
+            system: "s".into(),
+            prompt: "Question: x".into(),
+            system_personas: vec![],
+            texts: vec![],
+            history: vec![],
+            estimated_input_tokens: 0,
+            reserved_output_tokens: 0,
+            reserved_notes_tokens: 0,
+        };
+        let budget = Arc::new(TokenBudget::new(4096));
+        let mut input = make_thinking_input(&model, &context, budget.clone());
+        input.tools_enabled = true;
+        let request = crate::domain::models::tools::ToolRequest {
+            call_id: uuid::Uuid::now_v7(),
+            name: crate::domain::models::tools::ToolName::ViewFile,
+            arguments: serde_json::json!({"path":"safe.txt","start_line":1,"end_line":2}),
+        };
+        let mut first = outcome(true, 3500, 500);
+        first.tool_request = Some(request.clone());
+        let fake = Arc::new(FakeDriver {
+            outcomes: std::sync::Mutex::new(VecDeque::from([first])),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let thinking = Thinking::new(&config, fake.clone());
+        let (events, _receiver, forwarder) =
+            crate::domain::services::events::channel(&config, None);
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let (result_tx, mut results) = mpsc::unbounded_channel();
+        result_tx
+            .send(ToolResult {
+                call_id: request.call_id,
+                name: request.name,
+                output: "r".repeat(512),
+            })
+            .unwrap();
+        let control = ToolControl::new(result_tx);
+        let result = thinking
+            .answer_with_tools(
+                &input,
+                &ThinkingResult::default(),
+                &events,
+                cancel,
+                &control,
+                &mut results,
+            )
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("continuation must not invoke the provider"),
+        };
+        drop(events);
+        forwarder.await.unwrap();
+        assert_eq!(error, DriverError::InvalidInput);
+        assert_eq!(fake.calls.lock().unwrap().len(), 1);
+        assert_eq!(budget.used(), 4000);
+        assert_eq!(budget.remaining(), 96);
     }
 
     #[tokio::test]

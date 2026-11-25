@@ -418,6 +418,27 @@ async fn create_bound_child(
         .into_response()
 }
 
+fn child_provider_may_start(
+    child: &crate::domain::services::agent_runs::ChildRun,
+    parent_cancelled: bool,
+    child_cancelled: bool,
+) -> bool {
+    !child.status.terminal() && !child.cancel_requested && !parent_cancelled && !child_cancelled
+}
+
+fn cancel_bound_output_if_requested(
+    control: &crate::domain::services::output_controls::Control,
+    parent_cancel: &tokio::sync::watch::Receiver<bool>,
+    child_cancel: &tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    if *parent_cancel.borrow() || *child_cancel.borrow() {
+        control.request_cancel();
+        true
+    } else {
+        false
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn start_bound_child(
     state: OutputActionState,
@@ -436,8 +457,9 @@ fn start_bound_child(
     {
         return;
     }
-    let mut parent_cancel = parent_control.cancel.subscribe();
     tokio::spawn(async move {
+        let mut cancel_rx = cancel_rx;
+        let mut parent_cancel = parent_control.cancel.subscribe();
         let runtime = state.runtime.clone();
         let token_budget = Arc::new(crate::domain::models::thinking::TokenBudget::new(
             u64::from(child.budget_tokens),
@@ -445,6 +467,81 @@ fn start_bound_child(
         state
             .service
             .register_child_budget(remote_session, child.child_id, token_budget.clone());
+        let current = state
+            .service
+            .store
+            .events_after(&owner, remote_session, child.child_id, 0, 1)
+            .await;
+        let Ok((stored_child, _)) = current else {
+            let _ = state
+                .service
+                .store
+                .append_event(
+                    &owner,
+                    remote_session,
+                    child.child_id,
+                    Uuid::now_v7(),
+                    ChildEventKind::Failed,
+                    None,
+                    None,
+                    Some("CHILD_FAILED"),
+                    now(),
+                )
+                .await;
+            state
+                .service
+                .unregister_child_task(remote_session, child.child_id);
+            return;
+        };
+        let parent_cancelled = *parent_cancel.borrow();
+        let child_cancelled = *cancel_rx.borrow();
+        if !child_provider_may_start(&stored_child, parent_cancelled, child_cancelled) {
+            let cancellation_seen = parent_cancelled || child_cancelled;
+            let cancel_recorded = stored_child.cancel_requested
+                || (cancellation_seen
+                    && !stored_child.status.terminal()
+                    && state
+                        .service
+                        .store
+                        .request_cancel(
+                            &owner,
+                            remote_session,
+                            child.child_id,
+                            Uuid::now_v7(),
+                            now(),
+                        )
+                        .await
+                        .is_ok());
+            if cancel_recorded && !stored_child.status.terminal() {
+                let _ = state
+                    .service
+                    .store
+                    .settle_child_budget(&owner, remote_session, child.child_id, 0, now())
+                    .await;
+                if let Some(parent_budget) = &parent_budget {
+                    let _ = parent_budget.settle_reservation(child.child_id, 0);
+                }
+                let _ = state
+                    .service
+                    .store
+                    .append_event(
+                        &owner,
+                        remote_session,
+                        child.child_id,
+                        Uuid::now_v7(),
+                        ChildEventKind::Cancelled,
+                        None,
+                        None,
+                        None,
+                        now(),
+                    )
+                    .await;
+            }
+            state
+                .service
+                .unregister_child_task(remote_session, child.child_id);
+            return;
+        }
         let body = crate::domain::models::chat_session::NewChat {
             app_id: "cortex".into(),
             text: task,
@@ -468,12 +565,12 @@ fn start_bound_child(
         let mut finished = runtime.start(turn, Some(events_tx));
         let mut child_chat = None;
         let mut child_output = None;
-        let mut cancel_rx = cancel_rx;
         let mut cancel_open = true;
         let mut parent_cancel_open = true;
         let mut events_open = true;
         let finished = loop {
             tokio::select! {
+                biased;
                 changed = cancel_rx.changed(), if cancel_open => {
                     if changed.is_err() { cancel_open = false; }
                     if *cancel_rx.borrow()
@@ -509,10 +606,12 @@ fn start_bound_child(
                                             if let Some(control) = runtime.controls.get(output) { control.request_cancel(); }
                                         }
                                     }
-                                    if *cancel_rx.borrow()
-                                        && let Some(control) = runtime.controls.get(output)
-                                    {
-                                        control.request_cancel();
+                                    if let Some(control) = runtime.controls.get(output) {
+                                        cancel_bound_output_if_requested(
+                                            &control,
+                                            &parent_cancel,
+                                            &cancel_rx,
+                                        );
                                     }
                             }
                             if stage.status != "started" {
@@ -1314,4 +1413,132 @@ async fn events(
     Sse::new(event_stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
+}
+
+#[cfg(test)]
+mod child_start_tests {
+    use super::{cancel_bound_output_if_requested, child_provider_may_start};
+    use crate::domain::{
+        models::tools::ToolControl,
+        services::{
+            agent_runs::{AgentRunService, AgentRunStore, ChildRunStatus},
+            output_controls::Control,
+        },
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tokio::sync::{broadcast, mpsc, watch};
+    use uuid::Uuid;
+
+    fn control() -> (Control, watch::Receiver<bool>) {
+        let (cancel, cancelled) = watch::channel(false);
+        let (stop_thinking, _) = watch::channel(false);
+        let (live, _) = broadcast::channel(1);
+        let (tool_results, _) = mpsc::unbounded_channel();
+        (
+            Control::new(
+                Arc::new(cancel),
+                Arc::new(stop_thinking),
+                live,
+                ToolControl::new(tool_results),
+            ),
+            cancelled,
+        )
+    }
+
+    #[tokio::test]
+    async fn cancelled_child_before_task_registration_never_starts_provider() {
+        let (service, store) = AgentRunService::in_memory_with_store(30_000);
+        let session = Uuid::now_v7();
+        store.register_session(session, "owner").await;
+        let child = store
+            .create_child(
+                "owner",
+                session,
+                &session.to_string(),
+                "researcher",
+                "Find one answer",
+                1024,
+                4,
+                3,
+                8192,
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        store
+            .request_cancel(
+                "owner",
+                session,
+                child.child_id,
+                Uuid::now_v7(),
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        // Cancellation persisted before the worker registered its watch sender.
+        service.cancel_child_task(session, child.child_id);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        assert!(service.register_child_task(session, child.child_id, cancel_tx));
+        let (stored, _) = store
+            .events_after("owner", session, child.child_id, 0, 1)
+            .await
+            .unwrap();
+        let provider_started = AtomicBool::new(false);
+        if child_provider_may_start(&stored, false, *cancel_rx.borrow()) {
+            provider_started.store(true, Ordering::Release);
+        }
+        assert!(!provider_started.load(Ordering::Acquire));
+        assert!(stored.cancel_requested);
+        assert_eq!(stored.status, ChildRunStatus::Queued);
+    }
+
+    #[test]
+    fn cancelled_parent_and_child_block_start_and_cancel_output_at_binding() {
+        let child = crate::domain::services::agent_runs::ChildRun {
+            session_id: Uuid::now_v7(),
+            child_id: Uuid::now_v7(),
+            parent_run_id: "root".into(),
+            parent_chat_session_id: None,
+            parent_output_id: None,
+            parent_call_id: None,
+            child_chat_session_id: None,
+            child_output_id: None,
+            role: "researcher".into(),
+            task: "Find one answer".into(),
+            budget_tokens: 1024,
+            depth: 1,
+            status: ChildRunStatus::Queued,
+            cancel_requested: false,
+            budget_used_tokens: 0,
+            budget_reserved_tokens: 0,
+            budget_settled: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(!child_provider_may_start(&child, true, false));
+        assert!(!child_provider_may_start(&child, false, true));
+
+        let (parent_tx, parent_rx) = watch::channel(false);
+        let (child_tx, child_rx) = watch::channel(false);
+        let (child_output_control, cancelled) = control();
+        child_tx.send(true).unwrap();
+        assert!(cancel_bound_output_if_requested(
+            &child_output_control,
+            &parent_rx,
+            &child_rx
+        ));
+        assert!(*cancelled.borrow());
+
+        let (parent_control, parent_cancelled) = control();
+        parent_tx.send(true).unwrap();
+        assert!(cancel_bound_output_if_requested(
+            &parent_control,
+            &parent_rx,
+            &child_rx
+        ));
+        assert!(*parent_cancelled.borrow());
+    }
 }
