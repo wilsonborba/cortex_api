@@ -388,6 +388,11 @@ async fn transitions_bonsai_to_whisper_and_recovers_t0_on_the_shared_queue() {
         let transcription_started = std::time::Instant::now();
         let mut transcribe_pressure = None;
         let mut transcribe_deadline_hit = false;
+        let mut event_stream_open = true;
+        let mut saw_transcribe_step = false;
+        let mut transcribe_step_observed_inflight = false;
+        let mut transcribe_step_prism_stopped: Option<Result<bool, String>> = None;
+        let mut transcribe_step_observed_ms = None;
         let text_result = async {
             let transcription = transcriber.transcribe(&caller, "audio.opus", bytes, &events);
             tokio::pin!(transcription);
@@ -396,6 +401,27 @@ async fn transitions_bonsai_to_whisper_and_recovers_t0_on_the_shared_queue() {
             let mut transcribe_monitor = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 tokio::select! {
+                    biased;
+                    event = event_rx.recv(), if event_stream_open && !saw_transcribe_step => {
+                        match event {
+                            Some(event) => {
+                                if let NativeEvent::Step(step) = event.event
+                                    && step.step == StepName::Transcribe
+                                    && !saw_transcribe_step
+                                {
+                                    saw_transcribe_step = true;
+                                    transcribe_step_observed_inflight = true;
+                                    transcribe_step_observed_ms = Some(transcription_started.elapsed().as_millis());
+                                    transcribe_step_prism_stopped = Some(
+                                        supervisor.is_running(profile).await
+                                            .map(|running| !running)
+                                            .map_err(|error| format!("Prism status query failed: {error:?}"))
+                                    );
+                                }
+                            }
+                            None => event_stream_open = false,
+                        }
+                    }
                     result = &mut transcription => break result,
                     _ = transcribe_monitor.tick() => {
                         if transcribe_pressure.is_none()
@@ -412,19 +438,11 @@ async fn transitions_bonsai_to_whisper_and_recovers_t0_on_the_shared_queue() {
         }
         .await;
         drop(events);
-        let mut saw_transcribe_step = false;
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while let Some(event) = event_rx.recv().await {
                 if let NativeEvent::Step(step) = event.event
                     && step.step == StepName::Transcribe
                 {
-                    assert!(
-                        !supervisor
-                            .is_running(profile)
-                            .await
-                            .expect("Prism status during Whisper"),
-                        "Prism must be reaped before Whisper progress starts"
-                    );
                     saw_transcribe_step = true;
                 }
             }
@@ -437,7 +455,7 @@ async fn transitions_bonsai_to_whisper_and_recovers_t0_on_the_shared_queue() {
             .expect("Whisper event task");
         eprintln!(
             "EVAL {}",
-            serde_json::json!({"case":"whisper-transcription","text":text_result.as_ref().ok(),"error":text_result.as_ref().err().map(|error|format!("{error:?}")),"wall_ms":transcription_started.elapsed().as_millis(),"soft_deadline_300s_exceeded":transcribe_deadline_hit,"transcribe_steps":saw_transcribe_step,"resource_pressure":transcribe_pressure})
+            serde_json::json!({"case":"whisper-transcription","text":text_result.as_ref().ok(),"error":text_result.as_ref().err().map(|error|format!("{error:?}")),"wall_ms":transcription_started.elapsed().as_millis(),"soft_deadline_300s_exceeded":transcribe_deadline_hit,"transcribe_steps":saw_transcribe_step,"transcribe_step_observed_inflight":transcribe_step_observed_inflight,"transcribe_step_observed_ms":transcribe_step_observed_ms,"prism_stopped_at_first_transcribe_step":transcribe_step_prism_stopped,"resource_pressure":transcribe_pressure})
         );
         assert!(
             !transcribe_deadline_hit,
@@ -449,7 +467,16 @@ async fn transitions_bonsai_to_whisper_and_recovers_t0_on_the_shared_queue() {
         );
         assert!(
             saw_transcribe_step,
-            "Whisper emits progress after Prism teardown"
+            "Whisper must emit a Transcribe progress step"
+        );
+        assert!(
+            transcribe_step_observed_inflight,
+            "the first Transcribe progress event was not observed while inference remained in flight"
+        );
+        assert_eq!(
+            transcribe_step_prism_stopped,
+            Some(Ok(true)),
+            "Prism must be stopped when the first Transcribe progress event is observed"
         );
         let text = text_result.expect("existing Opus fixture transcribes");
         assert!(!text.trim().is_empty());
