@@ -206,6 +206,8 @@ async fn remote_vision_uses_the_other_ollama_url_and_still_counts() {
         temperature: 0.0,
         max_tokens: 64,
         prefix: None,
+        allow_tools: false,
+        tool_history: vec![],
     };
     let outcome = driver.call(&model, input, tx, cancel).await.unwrap();
     assert_eq!(outcome.text, "a red apple");

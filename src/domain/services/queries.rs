@@ -134,6 +134,8 @@ impl QueryRewriter {
                     temperature: self.config.query_temperature,
                     max_tokens: self.config.query_output_tokens,
                     prefix: None,
+                    allow_tools: false,
+                    tool_history: vec![],
                 },
                 tx,
                 cancel,

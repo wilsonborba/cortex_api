@@ -7,6 +7,7 @@ use crate::{
             events::{CallStreamRole, NativeEvent, StepName, StepProgress, ThinkingRole},
             pipeline::StageName,
             thinking::*,
+            tools::{PendingTool, ToolControl, ToolExchange, ToolResult},
         },
         services::{context::encode, crawler::cancelled, events::EventSink},
     },
@@ -14,7 +15,7 @@ use crate::{
 use std::sync::Arc;
 use tokio::{
     sync::{mpsc, watch},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone)]
@@ -100,6 +101,8 @@ impl Thinking {
             temperature: self.config.query_temperature,
             max_tokens,
             prefix: None,
+            allow_tools: role == "answer" && input.tools_enabled,
+            tool_history: vec![],
         })
     }
     async fn call(
@@ -272,6 +275,21 @@ impl Thinking {
         events: &EventSink,
         cancel: watch::Receiver<bool>,
     ) -> Result<CallOutcome, DriverError> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let control = ToolControl::new(tx);
+        self.answer_with_tools(input, thinking, events, cancel, &control, &mut rx)
+            .await
+    }
+
+    pub async fn answer_with_tools(
+        &self,
+        input: &ThinkingInput<'_>,
+        thinking: &ThinkingResult,
+        events: &EventSink,
+        cancel: watch::Receiver<bool>,
+        tool_control: &ToolControl,
+        tool_results: &mut mpsc::UnboundedReceiver<ToolResult>,
+    ) -> Result<CallOutcome, DriverError> {
         if let Some(error) = thinking.error {
             return Err(error);
         }
@@ -286,6 +304,7 @@ impl Thinking {
             self.config.answer_token_reserve as u32,
         )?;
         call.prefix = input.prefix.clone();
+        call.allow_tools = input.tools_enabled && input.prefix.is_none();
         if !thinking.calls.is_empty() {
             let mut step = StepProgress::new(StageName::Answer, StepName::ThinkingStep);
             step.params.insert("role".into(), "answer".into());
@@ -295,7 +314,87 @@ impl Thinking {
             ]);
             events.send(NativeEvent::Step(step));
         }
-        self.call(input, call, CallStreamRole::Answer, events, cancel)
-            .await
+        let mut exchanges = Vec::new();
+        let mut accumulated_text = String::new();
+        let mut accumulated_usage: Option<crate::domain::models::run_record::ModelCall> = None;
+        let mut had_tool = false;
+        for _ in 0..8 {
+            call.tool_history = exchanges.clone();
+            let outcome = self
+                .call(
+                    input,
+                    call.clone(),
+                    CallStreamRole::Answer,
+                    events,
+                    cancel.clone(),
+                )
+                .await?;
+            if let Some(request) = outcome.tool_request {
+                accumulated_text.push_str(&outcome.text);
+                if !input.tools_enabled {
+                    return Err(DriverError::InvalidInput);
+                }
+                had_tool = true;
+                accumulated_usage = Some(match accumulated_usage.take() {
+                    Some(mut prior) => {
+                        prior.input_tokens = prior
+                            .input_tokens
+                            .saturating_add(outcome.usage.input_tokens);
+                        prior.output_tokens = prior
+                            .output_tokens
+                            .saturating_add(outcome.usage.output_tokens);
+                        prior.total_ms = prior.total_ms.saturating_add(outcome.usage.total_ms);
+                        prior.finished_at = outcome.usage.finished_at;
+                        prior
+                    }
+                    None => outcome.usage,
+                });
+                if !tool_control.set_pending(PendingTool {
+                    call_id: request.call_id,
+                    name: request.name,
+                }) {
+                    return Err(DriverError::InvalidInput);
+                }
+                events.send(NativeEvent::ToolCall(request.clone()));
+                let received = tokio::select! {
+                    _ = cancelled(cancel.clone()) => None,
+                    result = tokio::time::timeout(Duration::from_secs(120), tool_results.recv()) => result.ok().flatten(),
+                };
+                tool_control.clear_pending(request.call_id);
+                let Some(result) = received else {
+                    return Err(if *cancel.borrow() {
+                        DriverError::Cancelled
+                    } else {
+                        DriverError::InvalidInput
+                    });
+                };
+                if result.call_id != request.call_id || result.name != request.name {
+                    return Err(DriverError::InvalidInput);
+                }
+                exchanges.push(ToolExchange {
+                    request,
+                    output: result.output,
+                });
+                continue;
+            }
+            let mut outcome = outcome;
+            outcome.text = format!("{accumulated_text}{}", outcome.text);
+            if let Some(mut prior) = accumulated_usage {
+                prior.input_tokens = prior
+                    .input_tokens
+                    .saturating_add(outcome.usage.input_tokens);
+                prior.output_tokens = prior
+                    .output_tokens
+                    .saturating_add(outcome.usage.output_tokens);
+                prior.total_ms = prior.total_ms.saturating_add(outcome.usage.total_ms);
+                prior.finished_at = outcome.usage.finished_at;
+                outcome.usage = prior;
+            }
+            if had_tool {
+                outcome.inspection = None;
+            }
+            return Ok(outcome);
+        }
+        Err(DriverError::InvalidInput)
     }
 }

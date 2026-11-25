@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Relay typed local tool requests and results through chat outputs (#137)
+
 
 ## v2.3.0 - 2026-11-16
 
