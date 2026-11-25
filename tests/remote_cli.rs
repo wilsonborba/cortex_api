@@ -14,6 +14,7 @@ use uuid::Uuid;
 use cortex_api::core::{config::Config, logs::LogHub, process_numbers};
 use cortex_api::dal::{
     local::{
+        agent_runs::PostgresAgentRunStore,
         chats::Chats,
         database::{self, Target},
         remote_cli::PostgresRemoteCliStore,
@@ -100,9 +101,11 @@ impl ModelDriver for StubDriver {
                     started_at: now,
                     finished_at: now,
                 },
+                usage_measured: true,
                 error: None,
                 load_ms: 0,
                 tokens_per_second: None,
+                tool_request: None,
             })
         })
     }
@@ -113,6 +116,21 @@ fn build_real_app_router(
     cache: RedisCache,
     remote_cli: RemoteCliService,
 ) -> axum::Router {
+    build_real_app_router_with_agent_runs(
+        pool,
+        cache,
+        remote_cli,
+        cortex_api::domain::services::agent_runs::AgentRunService::in_memory(120_000),
+    )
+    .0
+}
+
+fn build_real_app_router_with_agent_runs(
+    pool: sqlx::PgPool,
+    cache: RedisCache,
+    remote_cli: RemoteCliService,
+    agent_runs: cortex_api::domain::services::agent_runs::AgentRunService,
+) -> (axum::Router, Arc<ChatRuntime>) {
     let config = Config {
         hippocampus_url: "http://127.0.0.1:1".into(),
         ..Default::default()
@@ -173,15 +191,16 @@ fn build_real_app_router(
         },
         journal: EventJournal::new(cache.clone(), &config).unwrap(),
         controls: Default::default(),
+        agent_runs: agent_runs.clone(),
         personas: personas.clone(),
         shield,
         chats: chats.clone(),
         config: config.clone(),
     });
     let logs = LogHub::new(&config);
-    app_router(AppServices {
+    let app = app_router(AppServices {
         config: config.clone(),
-        runtime,
+        runtime: runtime.clone(),
         personas,
         chat_delete: ChatDelete {
             history: ChatHistory {
@@ -206,7 +225,9 @@ fn build_real_app_router(
         logs,
         ledger,
         remote_cli,
-    })
+        agent_runs,
+    });
+    (app, runtime)
 }
 
 fn lazy_test_pool() -> sqlx::PgPool {
@@ -462,6 +483,191 @@ async fn remote_cli_real_app_router_isolation_cursor_sse_approval_and_cancel() {
     assert!(!svc.list_sessions("user-a", 10_000).await.unwrap()[0].online);
     assert!(svc.expire_pending_commands(u64::MAX).await.unwrap() >= 1);
     srv_handle.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires the explicitly approved cortex_api_test database"]
+async fn output_action_route_enforces_one_executor_and_idempotent_registration() {
+    dotenvy::dotenv().ok();
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_output_actions_{}", Uuid::now_v7().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    async {
+        let cache = RedisCache::new(None, Duration::from_millis(25));
+        let config = Config::default();
+        let remote_cli = RemoteCliService::new(
+            Arc::new(PostgresRemoteCliStore::new(pool.clone())),
+            cache.clone(),
+            &config,
+        );
+        let first_session = remote_cli
+            .register("owner", "test cli", "linux", 1_000)
+            .await
+            .unwrap()
+            .session_id;
+        let second_session = remote_cli
+            .register("owner", "second test cli", "linux", 1_001)
+            .await
+            .unwrap()
+            .session_id;
+
+        let agent_runs = cortex_api::domain::services::agent_runs::AgentRunService::new(
+            Arc::new(PostgresAgentRunStore::new(pool.clone())),
+            120_000,
+            4,
+            2,
+            8192,
+        );
+        let (app, runtime) = build_real_app_router_with_agent_runs(
+            pool.clone(),
+            cache,
+            remote_cli.clone(),
+            agent_runs,
+        );
+
+        let chat = Uuid::now_v7();
+        let input = Uuid::now_v7();
+        let output = Uuid::now_v7();
+        let call = Uuid::now_v7();
+        let now = chrono::Utc::now();
+        sqlx::query("INSERT INTO chats(session_id,app_id,user_id,title,created_at,updated_at) VALUES($1,'cortex','owner','output action route test',$2,$2)")
+            .bind(chat).bind(now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chat_inputs(input_id,session_id,text,needs_web,web_mode,use_memory,thinking,created_at) VALUES($1,$2,'typed tool fixture',false,'fast',false,false,$3)")
+            .bind(input).bind(chat).bind(now).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO chat_outputs(output_id,input_id,session_id,status,text,created_at) VALUES($1,$2,$3,'running','',$4)")
+            .bind(output).bind(input).bind(chat).bind(now).execute(&pool).await.unwrap();
+
+        let (tool_result_tx, _tool_results) = tokio::sync::mpsc::unbounded_channel();
+        let tools = cortex_api::domain::models::tools::ToolControl::new(tool_result_tx);
+        assert!(tools.set_pending(cortex_api::domain::models::tools::PendingTool {
+            call_id: call,
+            name: cortex_api::domain::models::tools::ToolName::RunCommand,
+            arguments: json!({"cwd":".","argv":["true"]}),
+        }));
+        let (cancel, _) = watch::channel(false);
+        let (stop_thinking, _) = watch::channel(false);
+        let (live, _) = tokio::sync::broadcast::channel(8);
+        runtime.controls.open(
+            output,
+            cortex_api::domain::services::output_controls::Control::new(
+                Arc::new(cancel),
+                Arc::new(stop_thinking),
+                live,
+                tools,
+            ),
+        );
+
+        let child_path = format!("/remote/sessions/{first_session}/outputs/{chat}/{output}/children");
+        let (wrong_call_status, _) = json_req(
+            &app,
+            "POST",
+            &child_path,
+            Some("owner"),
+            Some(json!({"call_id":Uuid::now_v7()})),
+        )
+        .await;
+        assert_eq!(wrong_call_status, StatusCode::CONFLICT);
+        let (client_authority_status, _) = json_req(
+            &app,
+            "POST",
+            &child_path,
+            Some("owner"),
+            Some(json!({"call_id":call,"task":"client supplied task"})),
+        )
+        .await;
+        assert_eq!(client_authority_status, StatusCode::BAD_REQUEST);
+
+        let path = format!("/remote/sessions/{first_session}/outputs/{chat}/{output}/actions");
+        let (status, first) = json_req(
+            &app,
+            "POST",
+            &path,
+            Some("owner"),
+            Some(json!({"call_id":call})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let action_id = first["data"]["action_id"].as_str().unwrap();
+        let (retry_status, retry) = json_req(
+            &app,
+            "POST",
+            &path,
+            Some("owner"),
+            Some(json!({"call_id":call})),
+        )
+        .await;
+        assert_eq!(retry_status, StatusCode::OK);
+        assert_eq!(retry["data"]["action_id"], action_id);
+
+        let (events, _) = remote_cli
+            .ctrl_events_since(&first_session, "owner", 0)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "registration retry must not republish approval");
+
+        let second_path = format!("/remote/sessions/{second_session}/outputs/{chat}/{output}/actions");
+        let (second_status, _) = json_req(
+            &app,
+            "POST",
+            &second_path,
+            Some("owner"),
+            Some(json!({"call_id":call})),
+        )
+        .await;
+        assert_eq!(second_status, StatusCode::CONFLICT);
+
+        let action_id = action_id.to_owned();
+        let answer_path = format!("{path}/{action_id}/answer");
+        let (answer_status, _) = json_req(
+            &app,
+            "POST",
+            &answer_path,
+            Some("owner"),
+            Some(json!({"approved":true})),
+        )
+        .await;
+        assert_eq!(answer_status, StatusCode::OK);
+        let claim_path = format!("{path}/{action_id}/claim");
+        let digest = first["data"]["action_digest"].as_str().unwrap();
+        let claim = json!({"call_id":call,"action_digest":digest});
+        let (claim_status, _) = json_req(
+            &app,
+            "POST",
+            &claim_path,
+            Some("owner"),
+            Some(claim.clone()),
+        )
+        .await;
+        assert_eq!(claim_status, StatusCode::OK);
+        let (duplicate_claim, _) = json_req(
+            &app,
+            "POST",
+            &claim_path,
+            Some("owner"),
+            Some(claim),
+        )
+        .await;
+        assert_eq!(duplicate_claim, StatusCode::CONFLICT);
+    }
+    .await;
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

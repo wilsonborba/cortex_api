@@ -154,9 +154,11 @@ impl ModelDriver for Model {
                     started_at: started,
                     finished_at: chrono::Utc::now(),
                 },
+                usage_measured: true,
                 error,
                 load_ms: 0,
                 tokens_per_second: None,
+                tool_request: None,
             })
         })
     }
@@ -327,6 +329,7 @@ fn runtime(
         },
         journal: EventJournal::new(cache, &config).unwrap(),
         controls: Default::default(),
+        agent_runs: cortex_api::domain::services::agent_runs::AgentRunService::in_memory(120_000),
         personas: cortex_api::domain::services::personas::Personas {
             hippocampus: Hippocampus::new(&config).unwrap(),
             shield: shield.clone(),
@@ -405,7 +408,7 @@ async fn lan_call(rt: &Arc<ChatRuntime>, path: &str, body: Value) -> (StatusCode
     let req = Request::post(path)
         .header("content-type", "application/json")
         .extension(axum::extract::ConnectInfo(
-            "192.168.1.50:1234".parse::<std::net::SocketAddr>().unwrap(),
+            "203.0.113.50:1234".parse::<std::net::SocketAddr>().unwrap(),
         ));
     let response = app(rt)
         .oneshot(req.body(Body::from(body.to_string())).unwrap())
@@ -442,6 +445,49 @@ fn no_database() -> sqlx::PgPool {
         .connect_lazy("postgres://nobody@127.0.0.1:1/none")
         .unwrap()
 }
+
+#[tokio::test]
+async fn mapped_tools_require_user_auth_and_streaming_before_start() {
+    let (_log, address) = remote().await;
+    let model = Arc::new(Model::default());
+    let rt = runtime(
+        no_database(),
+        RedisCache::new(None, Duration::from_millis(20)),
+        &address,
+        model.clone(),
+    );
+    let request = Request::post("/chats")
+        .header("content-type", "application/json")
+        .header("x-uuid", "alice")
+        .header("x-cortex-tools", "mapped-v1")
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ))
+        .body(Body::from(
+            json!({"app_id":"cortex","text":"hello"}).to_string(),
+        ))
+        .unwrap();
+    let response = app(&rt).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(body["data"]["error_number"], 1003);
+
+    let request = Request::post("/chats")
+        .header("content-type", "application/json")
+        .header("x-cortex-tools", "mapped-v1")
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.50:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ))
+        .body(Body::from(
+            json!({"app_id":"cortex","text":"hello","stream":true}).to_string(),
+        ))
+        .unwrap();
+    let response = app(&rt).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(model.prompts.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn refused_inputs_save_nothing_and_call_no_model() {
     let (log, address) = remote().await;

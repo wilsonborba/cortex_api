@@ -50,6 +50,7 @@ pub struct ChatRuntime {
     pub journal: EventJournal,
     pub personas: crate::domain::services::personas::Personas,
     pub controls: crate::domain::services::output_controls::OutputControls,
+    pub agent_runs: crate::domain::services::agent_runs::AgentRunService,
 }
 /// The final state of one output, for an input sent without `stream`.
 pub struct Finished {
@@ -82,6 +83,8 @@ struct Run {
     stop: watch::Receiver<bool>,
     ids: watch::Sender<Option<(InputIds, bool)>>,
     control: crate::domain::services::output_controls::Control,
+    tool_results:
+        tokio::sync::Mutex<mpsc::UnboundedReceiver<crate::domain::models::tools::ToolResult>>,
     finished: std::sync::Mutex<Option<FinishedOutput>>,
 }
 impl Run {
@@ -280,6 +283,7 @@ impl Run {
             model: OutputModel::new(&turn.caller, ids.output_id, false),
             ids,
             temporary,
+            tools_enabled: turn.tools_enabled,
             question: input.text.clone(),
             needs_web: input.needs_web,
             web_mode: web_mode(&input.web_mode),
@@ -526,6 +530,8 @@ impl StageServices<Turn> for Run {
                         context: &context,
                         images: accepted.images.clone(),
                         prefix: None,
+                        tools_enabled: accepted.tools_enabled,
+                        budget: turn.token_budget.clone(),
                     },
                     &self.events,
                     self.stop.clone(),
@@ -557,19 +563,24 @@ impl StageServices<Turn> for Run {
                 // Clients show the saved prefix first, then the new tokens.
                 self.events.send(NativeEvent::Token(c.prefix.clone()));
             }
+            let mut tool_results = self.tool_results.lock().await;
             let outcome = self
                 .runtime
                 .thinking
-                .answer(
+                .answer_with_tools(
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
                         images: accepted.images.clone(),
                         prefix: continuation.as_ref().map(|c| c.prefix.clone()),
+                        tools_enabled: accepted.tools_enabled,
+                        budget: turn.token_budget.clone(),
                     },
                     thinking.as_deref().unwrap_or(&empty),
                     &self.events,
                     self.cancel.clone(),
+                    &self.control.tools,
+                    &mut tool_results,
                 )
                 .await;
             match outcome {
@@ -723,11 +734,13 @@ impl ChatRuntime {
             let (ids_tx, ids_rx) = watch::channel::<Option<(InputIds, bool)>>(None);
             let (cancel_tx, cancel) = watch::channel(false);
             let (stop_tx, stop) = watch::channel(false);
-            let control = crate::domain::services::output_controls::Control {
-                cancel: Arc::new(cancel_tx),
-                stop_thinking: Arc::new(stop_tx),
-                live: tokio::sync::broadcast::channel(runtime.config.event_read_batch.max(1)).0,
-            };
+            let (tool_result_tx, tool_results) = mpsc::unbounded_channel();
+            let control = crate::domain::services::output_controls::Control::new(
+                Arc::new(cancel_tx),
+                Arc::new(stop_tx),
+                tokio::sync::broadcast::channel(runtime.config.event_read_batch.max(1)).0,
+                crate::domain::models::tools::ToolControl::new(tool_result_tx),
+            );
             let live = control.live.clone();
             let journal = runtime.journal.clone();
             let deliver = tokio::spawn(async move {
@@ -789,6 +802,7 @@ impl ChatRuntime {
                 stop,
                 ids: ids_tx,
                 control,
+                tool_results: tokio::sync::Mutex::new(tool_results),
                 finished: Default::default(),
             };
             let reporter = pipeline::StageReporter::new(stage_tx);
