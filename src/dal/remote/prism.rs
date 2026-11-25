@@ -49,6 +49,7 @@ struct GeneratedAnswer {
     inspection: crate::domain::models::inspection::InspectionCapture,
     tool_request: Option<crate::domain::models::tools::ToolRequest>,
     probabilities: bool,
+    error: Option<DriverError>,
 }
 
 impl Prism {
@@ -266,16 +267,28 @@ impl Prism {
                 let mut calls = BTreeMap::<u64, (String, String, String)>::new();
                 let mut done = false;
                 let mut finish_seen = false;
-                while !done {
-                    let chunk = tokio::select! {
+                let mut stream_error = None;
+                while !done && stream_error.is_none() {
+                    let next = tokio::select! {
                         biased;
-                        _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
+                        _ = cancelled(&mut cancel) => {
+                            stream_error = Some(DriverError::Cancelled);
+                            break;
+                        },
                         next = stream.next() => next,
                     };
-                    let Some(chunk) = chunk else { break };
-                    buffer.extend_from_slice(&chunk.map_err(|_| DriverError::Ollama)?);
+                    let Some(chunk) = next else { break };
+                    let chunk = match chunk {
+                        Ok(chunk) => chunk,
+                        Err(_) => {
+                            stream_error = Some(DriverError::Ollama);
+                            break;
+                        }
+                    };
+                    buffer.extend_from_slice(&chunk);
                     if buffer.len() > MAX_FRAME_BYTES {
-                        return Err(DriverError::Ollama);
+                        stream_error = Some(DriverError::Ollama);
+                        break;
                     }
                     while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
                         let line: Vec<u8> = buffer.drain(..=end).collect();
@@ -288,8 +301,13 @@ impl Prism {
                             done = true;
                             break;
                         }
-                        let frame: Value =
-                            serde_json::from_slice(line).map_err(|_| DriverError::Ollama)?;
+                        let frame: Value = match serde_json::from_slice(line) {
+                            Ok(frame) => frame,
+                            Err(_) => {
+                                stream_error = Some(DriverError::Ollama);
+                                break;
+                            }
+                        };
                         if let Some(usage) = frame.get("usage") {
                             prompt_tokens = usage
                                 .get("prompt_tokens")
@@ -350,23 +368,30 @@ impl Prism {
                         }
                     }
                 }
-                if !done || !finish_seen || !buffer.iter().all(u8::is_ascii_whitespace) {
-                    return Err(DriverError::Ollama);
+                if stream_error.is_none()
+                    && (!done || !finish_seen || !buffer.iter().all(u8::is_ascii_whitespace))
+                {
+                    stream_error = Some(DriverError::Ollama);
                 }
-                let tool_request = if calls.is_empty() {
-                    None
+                let (tool_request, tool_error) = if stream_error.is_some() || calls.is_empty() {
+                    (None, None)
+                } else if !input.allow_tools || calls.len() != 1 {
+                    (None, Some(DriverError::InvalidInput))
                 } else {
-                    if !input.allow_tools || calls.len() != 1 {
-                        return Err(DriverError::InvalidInput);
-                    }
                     let (_, (id, name, arguments)) = calls.into_iter().next().expect("one call");
                     let _provider_call_id = id;
-                    let arguments: Value =
-                        serde_json::from_str(&arguments).map_err(|_| DriverError::InvalidInput)?;
-                    Some(
-                        crate::domain::models::tools::ToolRequest::from_provider(&name, arguments)
-                            .map_err(|_| DriverError::InvalidInput)?,
-                    )
+                    match serde_json::from_str::<Value>(&arguments)
+                        .map_err(|_| DriverError::InvalidInput)
+                        .and_then(|arguments| {
+                            crate::domain::models::tools::ToolRequest::from_provider(
+                                &name, arguments,
+                            )
+                            .map_err(|_| DriverError::InvalidInput)
+                        })
+                    {
+                        Ok(request) => (Some(request), None),
+                        Err(error) => (None, Some(error)),
+                    }
                 };
                 Ok(GeneratedAnswer {
                     text,
@@ -376,6 +401,7 @@ impl Prism {
                     inspection,
                     tool_request,
                     probabilities: request_probabilities,
+                    error: stream_error.or(tool_error),
                 })
             }.await;
             let GeneratedAnswer {
@@ -386,6 +412,7 @@ impl Prism {
                 inspection,
                 tool_request,
                 probabilities,
+                error,
             } = match generated_result {
                 Ok(generated) => generated,
                 Err(error) => {
@@ -395,6 +422,13 @@ impl Prism {
                     return Err(error);
                 }
             };
+            let mut error = error;
+            if error.is_some()
+                && let Some(supervisor) = &self.supervisor
+                && supervisor.stop().await.is_err()
+            {
+                error = Some(DriverError::Ollama);
+            }
             let finished_at = Utc::now();
             let tool_text = tool_request
                 .as_ref()
@@ -445,7 +479,7 @@ impl Prism {
                 text,
                 usage,
                 usage_measured,
-                error: None,
+                error,
                 load_ms: start.elapsed().as_millis() as u64,
                 tokens_per_second: completion_tokens
                     .filter(|_| start.elapsed().as_micros() > 0)
@@ -838,10 +872,16 @@ mod tests {
         let output = test_output();
         let (events, _rx) = mpsc::unbounded_channel();
         let (_cancel_tx, cancel) = watch::channel(false);
-        assert!(matches!(
-            prism.call(&output, input(), events, cancel).await,
-            Err(DriverError::Ollama)
-        ));
+        let truncated = prism.call(&output, input(), events, cancel).await.unwrap();
+        assert_eq!(truncated.text, "x");
+        assert_eq!(truncated.error, Some(DriverError::Ollama));
+        assert_eq!(truncated.usage.input_tokens, 13);
+        assert_eq!(truncated.usage.output_tokens, 2);
+        assert!(truncated.usage_measured);
+        assert!(truncated.tool_request.is_none());
+        let partial_inspection = truncated.inspection.unwrap();
+        assert_eq!(partial_inspection.tokens.len(), 1);
+        assert_eq!(partial_inspection.tokens[0].bytes, b"x");
         server.await.unwrap();
     }
 
@@ -939,7 +979,7 @@ mod tests {
                     if let Some(started_tx) = started_tx.take() {
                         let _ = started_tx.send(());
                     }
-                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"logprobs\":{\"content\":[{\"token\":\"partial\",\"logprob\":-0.1,\"top_logprobs\":[]}]},\"finish_reason\":null}]}\n\n").await.unwrap();
                     stream.flush().await.unwrap();
                     let mut buffer = [0; 16];
                     let _ = tokio::time::timeout(
@@ -955,7 +995,7 @@ mod tests {
             .acquire(output.actor.clone(), output.output_id)
             .await
             .unwrap();
-        let (events, _rx) = mpsc::unbounded_channel();
+        let (events, mut event_rx) = mpsc::unbounded_channel();
         let (cancel_tx, cancel) = watch::channel(false);
         let call = {
             let prism = prism.clone();
@@ -966,6 +1006,15 @@ mod tests {
             })
         };
         started_rx.await.unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if matches!(event_rx.recv().await, Some(DriverEvent::Token { .. })) {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_ok());
         let next_queue = queue.clone();
         let mut next = tokio::spawn(async move {
             next_queue
@@ -978,13 +1027,16 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(2), call)
-                .await
-                .unwrap()
-                .unwrap(),
-            Err(DriverError::Cancelled)
-        ));
+        let partial = tokio::time::timeout(std::time::Duration::from_secs(2), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("partial output is preserved on cancellation");
+        assert_eq!(partial.text, "partial");
+        assert_eq!(partial.error, Some(DriverError::Cancelled));
+        assert!(!partial.usage_measured);
+        assert!(partial.tool_request.is_none());
+        assert_eq!(partial.inspection.unwrap().tokens.len(), 1);
         assert_eq!(process.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
         let next_permit = tokio::time::timeout(std::time::Duration::from_secs(1), &mut next)
             .await

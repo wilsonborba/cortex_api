@@ -1995,6 +1995,113 @@ async fn continue_a_saved_answer_from_a_recorded_alternative() {
 }
 
 #[tokio::test]
+#[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema"]
+async fn cancelled_stream_persists_partial_answer_text() {
+    dotenvy::dotenv().ok();
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping cancelled_stream_persists_partial_answer_text: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_partial_answer_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let (_log, address) = remote().await;
+    let model = Arc::new(Model::default());
+    let rt = runtime(pool.clone(), cache, &address, model);
+
+    use futures_util::StreamExt;
+    async fn read_partial_frame(
+        stream: &mut (impl StreamExt<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+        buf: &mut String,
+    ) -> Option<(u64, String, Value)> {
+        loop {
+            if let Some(end) = buf.find("\n\n") {
+                let block: String = buf.drain(..end + 2).collect();
+                let field = |name: &str| block.lines().find_map(|line| line.strip_prefix(name).map(str::to_owned));
+                if let (Some(id), Some(event), Some(data)) = (field("id: "), field("event: "), field("data: ")) {
+                    return Some((id.parse().unwrap(), event, serde_json::from_str(&data).unwrap()));
+                }
+            }
+            let chunk = stream.next().await?.ok()?;
+            buf.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    }
+
+    let response = send(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({"app_id":"cortex","text":"slow answer for partial persistence","stream":true})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let mut buffer = String::new();
+    let mut session_id = None;
+    let mut output_id = None;
+    let mut saw_answer_token = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some((_, event, value)) = read_partial_frame(&mut stream, &mut buffer).await {
+            if let Some(data) = value.get("data") {
+                if let Some(id) = data.get("session_id").and_then(Value::as_str) {
+                    session_id = Some(id.parse::<Uuid>().unwrap());
+                }
+                if let Some(id) = data.get("output_id").and_then(Value::as_str) {
+                    output_id = Some(id.parse::<Uuid>().unwrap());
+                }
+            }
+            if event == "token" {
+                saw_answer_token = true;
+                break;
+            }
+        }
+    })
+    .await
+    .expect("model emitted an answer token before cancellation");
+    assert!(saw_answer_token);
+    let session_id = session_id.expect("stream identified the session");
+    let output_id = output_id.expect("stream identified the output");
+    let cancel = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{session_id}/outputs/{output_id}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(cancel.status(), StatusCode::OK);
+    while read_partial_frame(&mut stream, &mut buffer).await.is_some() {}
+
+    let (status, text): (String, String) = sqlx::query_as(
+        "SELECT status, text FROM chat_outputs WHERE output_id=$1",
+    )
+    .bind(output_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "cancelled");
+    assert!(!text.trim().is_empty(), "partial answer text remains attached to the cancelled output");
+    assert!(text.starts_with("w0 "), "persisted text is the streamed partial answer: {text}");
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema and UUID keys"]
 async fn first_stream_event_carries_ids_and_cancels_before_done() {
     use futures_util::StreamExt;

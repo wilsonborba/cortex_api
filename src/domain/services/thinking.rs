@@ -166,10 +166,10 @@ impl Thinking {
     ) -> Result<CallOutcome, DriverError> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let sink = events.clone();
-        let stage = if matches!(role, CallStreamRole::Answer) {
-            StageName::Answer
-        } else {
-            StageName::Think
+        let stage = match &role {
+            CallStreamRole::Answer => StageName::Answer,
+            CallStreamRole::Thinking { .. } => StageName::Think,
+            CallStreamRole::Queries => StageName::Gather,
         };
         let forward = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
@@ -647,10 +647,11 @@ mod child_budget_tests {
             &'a self,
             output: &'a OutputModel,
             input: CallInput,
-            _events: mpsc::UnboundedSender<DriverEvent>,
+            events: mpsc::UnboundedSender<DriverEvent>,
             _cancel: watch::Receiver<bool>,
         ) -> crate::domain::models::usage::Pending<'a, Result<CallOutcome, DriverError>> {
             Box::pin(async move {
+                let _ = events.send(DriverEvent::ModelLoading { model: "synthetic-t0".into() });
                 *self.profile.lock().unwrap() = Some(output.profile());
                 let role = input.role.clone();
                 let model = output.model_id().to_owned();
@@ -901,8 +902,17 @@ mod child_budget_tests {
         assert_eq!(input.images, vec!["ZmFrZS1pbWFnZQ==".to_owned()]);
         assert_eq!(call.role, "vision_description");
         assert_eq!(call.model, ModelProfile::CortexT0.id());
-        receiver.close();
-        forwarder.abort();
+        drop(events);
+        forwarder.await.unwrap();
+        let stages: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter_map(|event| match event.event {
+                crate::domain::models::events::NativeEvent::Stage(stage) => Some(stage.stage),
+                crate::domain::models::events::NativeEvent::Step(step) => Some(step.stage),
+                _ => None,
+            })
+            .collect();
+        assert!(stages.contains(&crate::domain::models::pipeline::StageName::Gather));
+        assert!(!stages.contains(&crate::domain::models::pipeline::StageName::Think));
     }
 
     #[tokio::test]

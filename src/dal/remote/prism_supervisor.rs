@@ -292,6 +292,375 @@ fn process_group_exists(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        dal::remote::{model_router::ModelRouter, ollama::Ollama, prism::Prism},
+        domain::{
+            models::{
+                driver::{CallInput, DriverEvent, ModelDriver, OutputModel},
+                identity::Caller,
+                model_profile::ModelProfile,
+                usage::{CallUsage, LedgerUnavailable, Pending, Share, Usage, UsageLedger, WaitingCall},
+            },
+            services::balancer::Scheduler,
+        },
+    };
+    use chrono::{DateTime, Utc};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, watch};
+
+    struct EvaluationLedger;
+    impl UsageLedger for EvaluationLedger {
+        fn share<'a>(&'a self, _: &'a str, _: DateTime<Utc>) -> Pending<'a, Result<Share, LedgerUnavailable>> {
+            Box::pin(async { Ok(Share { usage: Usage::default(), weight: 1.0, loyalty: None }) })
+        }
+        fn record<'a>(&'a self, _: CallUsage) -> Pending<'a, Result<(), LedgerUnavailable>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn waiting<'a>(&'a self, _: Vec<WaitingCall>) -> Pending<'a, Result<(), LedgerUnavailable>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn eval_input(prompt: &str, images: Vec<String>, prefix: Option<String>, allow_tools: bool) -> CallInput {
+        CallInput {
+            role: "answer".into(),
+            system: "Be accurate, concise, and follow the requested language and format.".into(),
+            prompt: prompt.into(),
+            images,
+            temperature: 0.0,
+            max_tokens: 256,
+            context_tokens: 8192,
+            prefix,
+            allow_tools,
+            tool_history: vec![],
+        }
+    }
+
+    fn evaluation_resources_ok(min_gpu_free_mib: u64) -> Result<(), String> {
+        let mem = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
+        let available_kib = mem.lines().find_map(|line| line.strip_prefix("MemAvailable:")
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())).ok_or("MemAvailable missing")?;
+        if available_kib < 4 * 1024 * 1024 { return Err(format!("MemAvailable below 4 GiB: {available_kib} KiB")); }
+        let load = std::fs::read_to_string("/proc/loadavg").map_err(|e| e.to_string())?
+            .split_whitespace().next().and_then(|value| value.parse::<f64>().ok()).ok_or("loadavg missing")?;
+        if load > 24.0 { return Err(format!("load average too high: {load}")); }
+        let gpu = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+            .output().map_err(|e| e.to_string())?;
+        if !gpu.status.success() { return Err(format!("nvidia-smi failed: {}", String::from_utf8_lossy(&gpu.stderr))); }
+        let free_mib = String::from_utf8_lossy(&gpu.stdout).trim().parse::<u64>().map_err(|e| e.to_string())?;
+        if free_mib < min_gpu_free_mib { return Err(format!("GPU free VRAM below {min_gpu_free_mib} MiB: {free_mib} MiB")); }
+        eprintln!("GUARD mem_available_kib={available_kib} load1={load} gpu_free_mib={free_mib}");
+        Ok(())
+    }
+
+    async fn ollama_loaded(config: &Config) -> Result<Vec<String>, String> {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(10))
+            .build().map_err(|e| e.to_string())?;
+        let response = client
+            .get(format!("{}/api/ps", config.ollama_url.trim_end_matches('/')))
+            .send().await.map_err(|e| e.to_string())?;
+        if !response.status().is_success() { return Err(format!("Ollama /api/ps status {}", response.status())); }
+        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+        if bytes.len() > 64 * 1024 { return Err("Ollama /api/ps response exceeded 64 KiB".into()); }
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        Ok(value.get("models").and_then(serde_json::Value::as_array).ok_or("Ollama models missing")?
+            .iter().filter_map(|item| item.get("name").and_then(serde_json::Value::as_str).map(str::to_owned)).collect())
+    }
+
+    async fn unload_owned_t0(config: &Config) -> Result<bool, String> {
+        let loaded = ollama_loaded(config).await?;
+        if loaded.len() != 1 || (loaded[0] != config.text_model && loaded[0] != config.vision_model) {
+            return Ok(false);
+        }
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(10))
+            .build().map_err(|e| e.to_string())?;
+        let response = client
+            .post(format!("{}/api/generate", config.ollama_url.trim_end_matches('/')))
+            .json(&serde_json::json!({"model":loaded[0],"keep_alive":0,"stream":false,"prompt":""}))
+            .send().await.map_err(|e| e.to_string())?;
+        if !response.status().is_success() { return Err(format!("Ollama unload status {}", response.status())); }
+        for _ in 0..30 {
+            if ollama_loaded(config).await?.is_empty() { return Ok(true); }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        Err("owned T0 model did not unload within 30 seconds".into())
+    }
+
+    fn evaluation_output(profile: ModelProfile, has_images: bool) -> OutputModel {
+        OutputModel::for_profile(
+            &Caller { app_id: "bonsai-eval".into(), user_id: Some("local-eval".into()), is_admin: false },
+            uuid::Uuid::now_v7(), profile, has_images,
+        )
+    }
+
+    fn process_start_ticks(pid: u32) -> Option<String> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(str::to_owned)
+    }
+
+    async fn evaluation_call(
+        router: &ModelRouter,
+        output: &OutputModel,
+        input: CallInput,
+    ) -> crate::domain::models::driver::CallOutcome {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel) = watch::channel(false);
+        let call = router.call(output, input, events, cancel);
+        tokio::pin!(call);
+        let deadline = tokio::time::sleep(Duration::from_secs(240));
+        tokio::pin!(deadline);
+        let mut monitor = tokio::time::interval(Duration::from_secs(5));
+        let mut saw_token = false;
+        loop {
+            tokio::select! {
+                result = &mut call => return result.expect("model call completed successfully"),
+                event = receiver.recv() => if matches!(event, Some(DriverEvent::Token { .. })) { saw_token = true; },
+                _ = monitor.tick() => {
+                    if evaluation_resources_ok(700).is_err() {
+                        let _ = cancel_tx.send(true);
+                    }
+                }
+                _ = &mut deadline => panic!("bounded evaluation call exceeded 240 seconds; inspect owned supervisor cleanup before retry"),
+            }
+            let _ = saw_token;
+            evaluation_resources_ok(700).expect("resource pressure during call");
+        }
+    }
+
+    fn assert_measured_answer(outcome: &crate::domain::models::driver::CallOutcome) {
+        assert!(outcome.error.is_none(), "provider returned an answer error: {:?}", outcome.error);
+        assert!(outcome.usage_measured, "provider usage must include both prompt and completion tokens");
+        assert!(outcome.usage.input_tokens > 0 && outcome.usage.output_tokens > 0,
+            "measured input/output token counts must be nonzero");
+        let ttft = outcome.usage.time_to_first_token_ms.expect("answer TTFT is available");
+        assert!(ttft <= outcome.usage.total_ms, "TTFT cannot exceed total elapsed time");
+        assert!(outcome.tokens_per_second.is_some_and(|value| value.is_finite() && value > 0.0),
+            "decode throughput must be measurable for a nonempty answer");
+        let inspection = outcome.inspection.as_ref().expect("answer inspection is present");
+        assert!(inspection.matches(&outcome.text), "inspection/logprobs must cover the complete answer; reason={:?}", inspection.reason);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit global heavy/GPU locks; real local models and runtime"]
+    async fn gpu_model_router_acceptance_uncensored_official_t0_and_cancel() {
+        use futures_util::FutureExt;
+        evaluation_resources_ok(7600).expect("safe host resources before model use; MTP requires headroom");
+        let mut config = Config::default();
+        config.bonsai_enabled = true;
+        config.prism_server_path = std::env::var("CORTEX_TEST_PRISM_SERVER").expect("runner pins CORTEX_TEST_PRISM_SERVER").into();
+        config.bonsai_model_directory = std::env::var("CORTEX_TEST_BONSAI_DIR").expect("runner pins CORTEX_TEST_BONSAI_DIR").into();
+        config.ollama_url = std::env::var("CORTEX_TEST_OLLAMA_URL").expect("runner pins CORTEX_TEST_OLLAMA_URL");
+        let available = std::net::TcpListener::bind("127.0.0.1:0").expect("free loopback port");
+        let port = available.local_addr().unwrap().port();
+        drop(available);
+        config.prism_url = format!("http://127.0.0.1:{port}");
+        assert!(config.prism_url_is_loopback());
+        assert!(ollama_loaded(&config).await.expect("Ollama preflight").is_empty(),
+            "pre-existing Ollama models: do not unload another user's work");
+        let apps = std::process::Command::new("nvidia-smi")
+            .args(["--query-compute-apps=pid,name", "--format=csv,noheader"])
+            .output().expect("nvidia-smi compute-process preflight");
+        assert!(apps.status.success(), "nvidia-smi failed: {}", String::from_utf8_lossy(&apps.stderr));
+        assert!(String::from_utf8_lossy(&apps.stdout).trim().is_empty(),
+            "GPU compute process already active; do not disturb it");
+
+        let queue = Scheduler::new(Arc::new(EvaluationLedger));
+        let supervisor = Arc::new(PrismSupervisor::new());
+        let ollama = Arc::new(Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()));
+        let prism = Arc::new(Prism::managed(config.clone(), queue.clone(), supervisor.clone()));
+        let router = Arc::new(ModelRouter::new(ollama, prism, queue));
+        let mut owned_t0 = false;
+        let result = std::panic::AssertUnwindSafe(async {
+            let uncensored = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
+            let cold = evaluation_call(&router, &uncensored,
+                eval_input("In English, explain in one sentence what a Rust Result represents.", vec![], None, false)).await;
+            assert!(!cold.text.trim().is_empty());
+            assert_measured_answer(&cold);
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-en-cold","profile":uncensored.model_id(),"ttft_ms":cold.usage.time_to_first_token_ms,"input_tokens":cold.usage.input_tokens,"output_tokens":cold.usage.output_tokens,"usage_measured":cold.usage_measured,"total_ms":cold.usage.total_ms,"tokens_per_second":cold.tokens_per_second,"text":cold.text}));
+            let first_pid = supervisor.child.lock().await.as_ref().expect("owned uncensored child").pid;
+            let first_start = process_start_ticks(first_pid).expect("read owned Prism process identity");
+
+            let prefix = evaluation_call(&router, &uncensored,
+                eval_input("Continue this answer with one short clause.", vec![], Some("A Rust Result is an enum that represents ".into()), false)).await;
+            assert_measured_answer(&prefix);
+            assert_eq!(supervisor.child.lock().await.as_ref().expect("same owned child").pid, first_pid,
+                "healthy same-profile calls reuse one process");
+            assert_eq!(process_start_ticks(first_pid).as_deref(), Some(first_start.as_str()),
+                "same-profile calls preserve the original process instance");
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-prefix","ttft_ms":prefix.usage.time_to_first_token_ms,"output_tokens":prefix.usage.output_tokens,"usage_measured":prefix.usage_measured,"total_ms":prefix.usage.total_ms,"tokens_per_second":prefix.tokens_per_second,"text":prefix.text}));
+
+            let json = evaluation_call(&router, &uncensored,
+                eval_input("Return only JSON with keys ok (boolean) and count (integer), set to true and 3.", vec![], None, false)).await;
+            assert_measured_answer(&json);
+            let parsed: serde_json::Value = serde_json::from_str(json.text.trim()).expect("valid JSON answer");
+            assert_eq!(parsed["ok"], true); assert_eq!(parsed["count"], 3);
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-json","text":json.text,"usage_measured":json.usage_measured}));
+
+            let tool = evaluation_call(&router, &uncensored,
+                eval_input("Use the view_file tool to read the synthetic path /evaluation-only/no-such-file.txt. Do not claim it was read.", vec![], None, true)).await;
+            let tool_request = tool.tool_request.expect("model should return a synthetic tool request");
+            assert_eq!(tool_request.name.as_str(), "view_file");
+            assert_eq!(tool_request.arguments["path"], "/evaluation-only/no-such-file.txt");
+            assert!(tool.usage_measured && tool.usage.output_tokens > 0 && tool.usage.total_ms > 0);
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-tool-double","tool":tool_request.name.as_str(),"arguments":tool_request.arguments,"effects":"none"}));
+
+            for (language, prompt) in [
+                ("en", "Explain in one short sentence how to handle a missing optional value in Rust."),
+                ("pt-BR", "Em uma frase curta, explique como tratar um valor opcional ausente em Rust."),
+                ("th", "ตอบเป็นภาษาไทยเท่านั้น: อธิบายสั้น ๆ ว่า Rust ใช้ Option เพื่ออะไร"),
+            ] {
+                let outcome = evaluation_call(&router, &uncensored, eval_input(prompt, vec![], None, false)).await;
+                assert_measured_answer(&outcome);
+                let han = outcome.text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count();
+                let thai = outcome.text.chars().filter(|c| ('\u{0e00}'..='\u{0e7f}').contains(c)).count();
+                eprintln!("EVAL {}", serde_json::json!({"case":"atomic-language","language":language,"han_codepoints":han,"thai_codepoints":thai,"text":outcome.text,"known_thai_mixed_chinese_is_quality_failure":language=="th" && han>0}));
+                assert!(outcome.error.is_none());
+                assert!(!outcome.text.trim().is_empty());
+            }
+
+            let official = evaluation_output(ModelProfile::Bonsai25Official, false);
+            let answer = evaluation_call(&router, &official,
+                eval_input("In English, explain in one sentence what a Rust Result represents.", vec![], None, false)).await;
+            assert_measured_answer(&answer);
+            let official_child = supervisor.child.lock().await;
+            let official_pid = official_child.as_ref().expect("owned official child").pid;
+            assert_eq!(official_child.as_ref().unwrap().profile, ModelProfile::Bonsai25Official);
+            let official_start = process_start_ticks(official_pid).expect("read switched Prism process identity");
+            assert!(official_pid != first_pid || official_start != first_start,
+                "profile switch must replace the owned process, even if the OS reuses its PID");
+            if official_pid != first_pid {
+                assert!(!process_group_exists(first_pid), "previous Prism process group must be gone");
+            }
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-en-switch","profile":official.model_id(),"pid":official_pid,"ttft_ms":answer.usage.time_to_first_token_ms,"total_ms":answer.usage.total_ms,"text":answer.text}));
+            drop(official_child);
+            let official_thai = evaluation_call(&router, &official,
+                eval_input("ตอบเป็นภาษาไทยเท่านั้น: อธิบายสั้น ๆ ว่า Rust ใช้ Option เพื่ออะไร", vec![], None, false)).await;
+            assert_measured_answer(&official_thai);
+            let official_han = official_thai.text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count();
+            let official_thai_chars = official_thai.text.chars().filter(|c| ('\u{0e00}'..='\u{0e7f}').contains(c)).count();
+            let official_inspection = official_thai.inspection.as_ref().map(|value| (value.reason.clone(), value.tokens.len()));
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-thai-raw","han_codepoints":official_han,"thai_codepoints":official_thai_chars,"inspection":official_inspection,"usage_measured":official_thai.usage_measured,"text":official_thai.text,"postprocessing":false}));
+
+            // Load the previously empty Ollama T0 vision model only through the router.
+            let image = {
+                use image::{ImageBuffer, ImageFormat, Rgb};
+                let mut bands = ImageBuffer::new(96, 48);
+                for (x, y, pixel) in bands.enumerate_pixels_mut() {
+                    *pixel = if y < 16 { Rgb([230, 30, 30]) } else if y < 32 { Rgb([20, 210, 40]) } else { Rgb([20, 40, 230]) };
+                    let _ = x;
+                }
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                image::DynamicImage::ImageRgb8(bands).write_to(&mut bytes, ImageFormat::Png).unwrap();
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+            };
+            owned_t0 = true;
+            let vision = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
+            let thinking = crate::domain::services::thinking::Thinking::new(&config, router.clone());
+            let (events, receiver, event_task) = crate::domain::services::events::channel(&config, None);
+            let (_cancel_tx, cancel) = watch::channel(false);
+            let (description, vision_usage) = thinking.describe_images_for_text_profile(
+                &vision,
+                "Describe the visible image briefly, including its colors.",
+                &[],
+                vec![image],
+                None,
+                &events,
+                cancel,
+            ).await.expect("real T0 image prepass");
+            drop(events);
+            drop(receiver);
+            event_task.await.expect("event output task");
+            assert!(!description.trim().is_empty());
+            assert!(supervisor.child.lock().await.is_none(), "switch to T0 must stop the owned Prism process");
+            assert_eq!(ollama_loaded(&config).await.expect("T0 loaded model identity"), vec![config.vision_model.clone()]);
+            eprintln!("EVAL {}", serde_json::json!({"case":"t0-image-prepass-source","model":config.vision_model,"description":description,"input_tokens":vision_usage.input_tokens,"output_tokens":vision_usage.output_tokens,"ttft_ms":vision_usage.time_to_first_token_ms,"total_ms":vision_usage.total_ms}));
+            assert!(unload_owned_t0(&config).await.expect("unload only the test's sole T0 vision model"));
+            let text_profile = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
+            let grounded = evaluation_call(&router, &text_profile,
+                eval_input(&format!("Use only this image description and state its three bands: {}", description), vec![], None, false)).await;
+            assert_measured_answer(&grounded);
+            assert!(grounded.text.to_lowercase().contains("red") && grounded.text.to_lowercase().contains("green") && grounded.text.to_lowercase().contains("blue"));
+            eprintln!("EVAL {}", serde_json::json!({"case":"t0-prepass-to-t1-text","profile":text_profile.model_id(),"images_sent_to_t1":0,"text":grounded.text,"usage_measured":grounded.usage_measured}));
+
+            let cancel_output = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
+            let (events, mut event_rx) = mpsc::unbounded_channel();
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            let cancel_call = router.call(&cancel_output,
+                eval_input("Write a detailed explanation with many examples of Rust ownership and borrowing.", vec![], None, false),
+                events, cancel_rx);
+            tokio::pin!(cancel_call);
+            let queued_output = evaluation_output(ModelProfile::CortexT0, false);
+            let (queued_events, mut queued_event_rx) = mpsc::unbounded_channel();
+            let (_queued_cancel_tx, queued_cancel_rx) = watch::channel(false);
+            let queued_call = router.call(&queued_output,
+                eval_input("In one sentence, define Rust ownership.", vec![], None, false),
+                queued_events, queued_cancel_rx);
+            tokio::pin!(queued_call);
+            let mut saw_cancel_token = false;
+            let mut saw_queued_wait = false;
+            let mut cancel_result = None;
+            let mut queued_result = None;
+            let observation = tokio::time::timeout(Duration::from_secs(180), async {
+                while !(saw_cancel_token && saw_queued_wait) && cancel_result.is_none() && queued_result.is_none() {
+                    tokio::select! {
+                        result = &mut cancel_call, if cancel_result.is_none() => cancel_result = Some(result),
+                        result = &mut queued_call, if queued_result.is_none() => queued_result = Some(result),
+                        event = event_rx.recv(), if !saw_cancel_token => {
+                            saw_cancel_token = matches!(event, Some(DriverEvent::Token { .. }));
+                        }
+                        event = queued_event_rx.recv(), if !saw_queued_wait => {
+                            saw_queued_wait = matches!(event, Some(DriverEvent::Waiting));
+                        }
+                    }
+                }
+            }).await;
+            let _ = cancel_tx.send(true);
+            if cancel_result.is_none() { cancel_result = Some(cancel_call.await); }
+            if queued_result.is_none() { queued_result = Some(queued_call.await); }
+            let partial_result = cancel_result.expect("cancel call result collected");
+            let queued_result = queued_result.expect("queued call result collected");
+            assert!(observation.is_ok() && saw_cancel_token && saw_queued_wait,
+                "both T1 token and queued T0 waiting state must be observed before cancellation");
+            let partial = partial_result.expect("partial result survives cancellation");
+            assert_eq!(partial.error, Some(crate::domain::models::driver::DriverError::Cancelled));
+            assert!(!partial.text.is_empty());
+            assert!(partial.tool_request.is_none());
+            assert!(supervisor.child.lock().await.is_none(), "owned Prism must be reaped before permit release");
+            let queued = queued_result.expect("queued T0 runs after Prism teardown");
+            assert!(queued.error.is_none());
+            eprintln!("EVAL {}", serde_json::json!({"case":"cancel-then-queued-t0","partial_text":partial.text,"partial_error":"cancelled","queued_t0_text":queued.text,"queued_after_teardown":true}));
+        }).catch_unwind().await;
+
+        // Cleanup only this supervisor child. T0 started empty by the preflight;
+        // unload only if its exact model is the sole resident now.
+        let stop_result = supervisor.stop().await;
+        let cleanup_state = async {
+            if owned_t0 {
+                let _ = unload_owned_t0(&config).await?;
+            }
+            let remaining = ollama_loaded(&config).await?;
+            if !remaining.is_empty() {
+                return Err(format!("Ollama models remain after owned cleanup; preserved without unloading: {remaining:?}"));
+            }
+            Ok::<(), String>(())
+        }.await;
+        stop_result.expect("owned Prism cleanup");
+        cleanup_state.expect("verify Ollama is empty or report preserved unexpected models");
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
 
     #[tokio::test]
     async fn stop_reaps_only_the_owned_process_group() {
