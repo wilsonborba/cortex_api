@@ -207,6 +207,14 @@ async fn create_continue_and_failure_are_atomic_and_scoped() {
         .execute(&pool)
         .await
         .unwrap();
+    let baseline_input_count: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_inputs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        baseline_input_count, 0,
+        "deleting the legacy chat cascades its input"
+    );
     let mut body = new("first question");
     body.persona_id = Some("bot-persona".into());
     let first =
@@ -289,11 +297,24 @@ async fn create_continue_and_failure_are_atomic_and_scoped() {
             .unwrap()
             .is_none()
     );
+    // The legacy input was removed with its parent chat above (CASCADE); at
+    // this point only the initial and official follow-up inputs may remain.
+    let persisted_input_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT input_id FROM chat_inputs WHERE session_id=$1 ORDER BY created_at",
+    )
+    .bind(chat.session_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_input_ids,
+        vec![first.input.input_id, follow.input.input_id]
+    );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_inputs")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 3);
+    assert_eq!(count, baseline_input_count + 2);
     let older = continue_permanent(&config, &actor, &chat, next("older clock"), &[], now)
         .unwrap_or_else(|_| panic!("prepare failed"));
     assert_eq!(older.input.model_id, "bonsai25-official");
