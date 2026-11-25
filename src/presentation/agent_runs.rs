@@ -636,6 +636,7 @@ fn start_bound_child(
         let provider_completed = finished
             .as_ref()
             .is_some_and(|run| run.error.is_none() && run.output.is_some());
+        let settlement_usage = token_budget.settlement_usage();
         let budget_settled = if provider_completed && !cancelled {
             state
                 .service
@@ -644,13 +645,29 @@ fn start_bound_child(
                     &owner,
                     remote_session,
                     child.child_id,
-                    token_budget.settlement_usage(),
+                    settlement_usage,
                     now(),
                 )
                 .await
                 .is_ok()
                 && parent_budget.as_ref().is_none_or(|budget| {
-                    budget.settle_reservation(child.child_id, token_budget.settlement_usage())
+                    budget.settle_reservation(child.child_id, settlement_usage)
+                })
+        } else if cancelled || *parent_control.cancel.borrow() {
+            state
+                .service
+                .store
+                .settle_child_budget(
+                    &owner,
+                    remote_session,
+                    child.child_id,
+                    settlement_usage,
+                    now(),
+                )
+                .await
+                .is_ok()
+                && parent_budget.as_ref().is_none_or(|budget| {
+                    budget.settle_reservation(child.child_id, settlement_usage)
                 })
         } else {
             false
@@ -912,7 +929,7 @@ async fn create_output_action(
     if is_new {
         let event = json!({
             "approval_id": created.action_id.to_string(),
-            "action_text": created.display.clone(),
+            "action": created.display.clone(),
         });
         let remote_session_text = remote_session.to_string();
         if let Err(error) = state
@@ -1024,25 +1041,32 @@ async fn answer_output_action(
         return map_error(ChildRunError::Conflict);
     }
     match state
-        .service
-        .store
-        .answer_output_action(
+        .remote_cli
+        .answer_bound_output_action(
+            &remote_session.to_string(),
             &owner,
-            remote_session,
             chat_session,
             output,
             action_id,
             body.approved,
-            now,
+            now.timestamp_millis().max(0) as u64,
         )
         .await
     {
-        Ok(action) => Envelope::new(
-            "Output action answered",
-            OutputActionView::from_action(action, now),
-        )
-        .into_response(),
-        Err(error) => map_error(error),
+        Ok(_) => match state
+            .service
+            .store
+            .output_action(&owner, remote_session, chat_session, output, action_id)
+            .await
+        {
+            Ok(action) => Envelope::new(
+                "Output action answered",
+                OutputActionView::from_action(action, now),
+            )
+            .into_response(),
+            Err(error) => map_error(error),
+        },
+        Err(error) => map_remote_error(error),
     }
 }
 

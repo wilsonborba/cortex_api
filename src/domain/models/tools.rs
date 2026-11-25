@@ -50,12 +50,17 @@ impl ToolName {
 }
 
 pub fn action_digest(call_id: Uuid, name: ToolName, arguments: &Value) -> String {
+    // Cross-client protocol: canonical lowercase UUID text, a zero byte,
+    // the snake_case tool name, a zero byte, then recursively key-sorted JSON.
+    // JSON arrays keep their original order.
+    let mut canonical_arguments = arguments.clone();
+    canonical_arguments.sort_all_objects();
     let mut hasher = Sha256::new();
     hasher.update(call_id.to_string().as_bytes());
     hasher.update([0]);
     hasher.update(name.as_str().as_bytes());
     hasher.update([0]);
-    hasher.update(arguments.to_string().as_bytes());
+    hasher.update(canonical_arguments.to_string().as_bytes());
     hasher
         .finalize()
         .iter()

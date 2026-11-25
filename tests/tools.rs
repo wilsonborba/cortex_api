@@ -48,15 +48,52 @@ fn provider_requests_are_allowlisted_strict_and_bounded() {
 }
 
 #[test]
-fn action_digest_covers_call_name_and_canonical_arguments() {
-    let digest = cortex_api::domain::models::tools::action_digest(
-        Uuid::parse_str("30000000-0000-4000-8000-000000000003").unwrap(),
-        ToolName::RunCommand,
-        &json!({"cwd":".","argv":["echo","ok"]}),
+fn action_digest_matches_shared_cli_golden_and_is_sensitive_to_uuid_tool_and_arguments() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/output_action_digest.json")).unwrap();
+    let call_id = Uuid::parse_str(fixture["call_id"].as_str().unwrap()).unwrap();
+    let parse_args = |raw: &str| serde_json::from_str::<serde_json::Value>(raw).unwrap();
+    let name = ToolName::RunCommand;
+    let first = parse_args(fixture["arguments_raw"][0].as_str().unwrap());
+    let reordered = parse_args(fixture["arguments_raw"][1].as_str().unwrap());
+    let expected = fixture["digest"].as_str().unwrap();
+
+    assert_eq!(
+        cortex_api::domain::models::tools::action_digest(call_id, name, &first),
+        expected
     );
     assert_eq!(
-        digest,
-        "52f61567c4934e6c0ea1da29e80bb22fe2f08756ad1fc28b81ddace856de9c33"
+        cortex_api::domain::models::tools::action_digest(call_id, name, &reordered),
+        expected,
+        "reordered nested object keys must preserve the digest"
+    );
+    assert_eq!(
+        cortex_api::domain::models::tools::action_digest(
+            Uuid::parse_str(fixture["changed_call_id"]["value"].as_str().unwrap()).unwrap(),
+            name,
+            &first,
+        ),
+        fixture["changed_call_id"]["digest"].as_str().unwrap()
+    );
+    assert_eq!(
+        cortex_api::domain::models::tools::action_digest(call_id, ToolName::ViewFile, &first),
+        fixture["changed_tool_name"]["digest"].as_str().unwrap()
+    );
+    assert_eq!(
+        cortex_api::domain::models::tools::action_digest(
+            call_id,
+            name,
+            &parse_args(fixture["changed_arguments"]["raw"].as_str().unwrap()),
+        ),
+        fixture["changed_arguments"]["digest"].as_str().unwrap()
+    );
+    assert_eq!(
+        cortex_api::domain::models::tools::action_digest(
+            call_id,
+            name,
+            &parse_args(fixture["changed_array_order"]["raw"].as_str().unwrap()),
+        ),
+        fixture["changed_array_order"]["digest"].as_str().unwrap()
     );
 }
 

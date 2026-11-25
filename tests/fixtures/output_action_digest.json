@@ -1,0 +1,31 @@
+{
+  "protocol": "sha256(UTF-8(lowercase-hyphenated-uuid) || 00 || UTF-8(snake_case_tool_name) || 00 || UTF-8(compact JSON with recursively sorted object keys)); array order is preserved",
+  "call_id": "30000000-0000-4000-8000-000000000003",
+  "tool_name": "run_command",
+  "arguments_raw": [
+    "{\"cwd\":\".\",\"argv\":[\"echo\",\"ok\"],\"metadata\":{\"z\":2,\"a\":{\"y\":true,\"x\":1}}}",
+    "{\"metadata\":{\"a\":{\"x\":1,\"y\":true},\"z\":2},\"argv\":[\"echo\",\"ok\"],\"cwd\":\".\"}"
+  ],
+  "canonical_arguments": "{\"argv\":[\"echo\",\"ok\"],\"cwd\":\".\",\"metadata\":{\"a\":{\"x\":1,\"y\":true},\"z\":2}}",
+  "digest": "78e6e2f7a440ea643d53ce0eb200080a7c7a97dfc35c0671d34642eda5af7e4c",
+  "changed_call_id": {
+    "value": "30000000-0000-4000-8000-000000000004",
+    "digest": "d6595d93028639f77f7899c8ed1d591cb1a0a62297dae8b68b3be72bb90f31ae"
+  },
+  "changed_tool_name": {
+    "value": "view_file",
+    "digest": "abc768e61e73680a4815e661acee822c4ebdf355472dbb33682a2ebae241b773"
+  },
+  "changed_arguments": {
+    "raw": "{\"cwd\":\".\",\"argv\":[\"echo\",\"different\"],\"metadata\":{\"z\":2,\"a\":{\"y\":true,\"x\":1}}}",
+    "digest": "90350244b052af3c02ed06156d5833f86d74a2442d2c57b2329a3f7df5561c23"
+  },
+  "changed_array_order": {
+    "raw": "{\"cwd\":\".\",\"argv\":[\"ok\",\"echo\"],\"metadata\":{\"z\":2,\"a\":{\"y\":true,\"x\":1}}}",
+    "digest": "f91e7cb0a238688013ae32c8e967d36b5d86b769834b2e3212bceb9a46d36e74"
+  },
+  "valid_command": {
+    "arguments_raw": "{\"cwd\":\".\",\"argv\":[\"echo\",\"ok\"]}",
+    "digest": "52f61567c4934e6c0ea1da29e80bb22fe2f08756ad1fc28b81ddace856de9c33"
+  }
+}

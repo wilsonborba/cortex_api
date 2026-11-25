@@ -305,6 +305,7 @@ mod tests {
         },
     };
     use chrono::{DateTime, Utc};
+    use futures_util::StreamExt;
     use std::sync::Arc;
     use tokio::sync::{mpsc, watch};
 
@@ -332,6 +333,28 @@ mod tests {
             context_tokens: 8192,
             prefix,
             allow_tools,
+            tool_history: vec![],
+        }
+    }
+
+    fn cortex_eval_input(config: &Config, question: &str) -> CallInput {
+        let assembled = crate::domain::services::context::assemble(config,
+            crate::domain::models::context::ContextInput {
+                context_tokens: Some(8192),
+                output_tokens: Some(256),
+                question: question.into(),
+                ..Default::default()
+            }).expect("production Cortex context assembly");
+        CallInput {
+            role: "answer".into(),
+            system: assembled.system,
+            prompt: assembled.prompt,
+            images: vec![],
+            temperature: 0.0,
+            max_tokens: 256,
+            context_tokens: 8192,
+            prefix: None,
+            allow_tools: false,
             tool_history: vec![],
         }
     }
@@ -366,8 +389,15 @@ mod tests {
             .get(format!("{}/api/ps", config.ollama_url.trim_end_matches('/')))
             .send().await.map_err(|e| e.to_string())?;
         if !response.status().is_success() { return Err(format!("Ollama /api/ps status {}", response.status())); }
-        let bytes = response.bytes().await.map_err(|e| e.to_string())?;
-        if bytes.len() > 64 * 1024 { return Err("Ollama /api/ps response exceeded 64 KiB".into()); }
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
+                return Err("Ollama /api/ps response exceeded 64 KiB".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         Ok(value.get("models").and_then(serde_json::Value::as_array).ok_or("Ollama models missing")?
             .iter().filter_map(|item| item.get("name").and_then(serde_json::Value::as_str).map(str::to_owned)).collect())
@@ -490,8 +520,9 @@ mod tests {
             let first_pid = supervisor.child.lock().await.as_ref().expect("owned uncensored child").pid;
             let first_start = process_start_ticks(first_pid).expect("read owned Prism process identity");
 
-            let prefix = evaluation_call(&router, &uncensored,
-                eval_input("Continue this answer with one short clause.", vec![], Some("A Rust Result is an enum that represents ".into()), false)).await;
+            let mut prefix_input = cortex_eval_input(&config, "Continue this answer with one short clause.");
+            prefix_input.prefix = Some("A Rust Result is an enum that represents ".into());
+            let prefix = evaluation_call(&router, &uncensored, prefix_input).await;
             assert_measured_answer(&prefix);
             assert_eq!(supervisor.child.lock().await.as_ref().expect("same owned child").pid, first_pid,
                 "healthy same-profile calls reuse one process");
@@ -500,14 +531,16 @@ mod tests {
             eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-prefix","ttft_ms":prefix.usage.time_to_first_token_ms,"output_tokens":prefix.usage.output_tokens,"usage_measured":prefix.usage_measured,"total_ms":prefix.usage.total_ms,"tokens_per_second":prefix.tokens_per_second,"text":prefix.text}));
 
             let json = evaluation_call(&router, &uncensored,
-                eval_input("Return only JSON with keys ok (boolean) and count (integer), set to true and 3.", vec![], None, false)).await;
+                cortex_eval_input(&config, "Return only JSON with keys ok (boolean) and count (integer), set to true and 3.")).await;
             assert_measured_answer(&json);
             let parsed: serde_json::Value = serde_json::from_str(json.text.trim()).expect("valid JSON answer");
             assert_eq!(parsed["ok"], true); assert_eq!(parsed["count"], 3);
             eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-json","text":json.text,"usage_measured":json.usage_measured}));
 
-            let tool = evaluation_call(&router, &uncensored,
-                eval_input("Use the view_file tool to read the synthetic path /evaluation-only/no-such-file.txt. Do not claim it was read.", vec![], None, true)).await;
+            let mut tool_input = cortex_eval_input(&config,
+                "Use the view_file tool to read the synthetic path /evaluation-only/no-such-file.txt. Do not claim it was read.");
+            tool_input.allow_tools = true;
+            let tool = evaluation_call(&router, &uncensored, tool_input).await;
             let tool_request = tool.tool_request.expect("model should return a synthetic tool request");
             assert_eq!(tool_request.name.as_str(), "view_file");
             assert_eq!(tool_request.arguments["path"], "/evaluation-only/no-such-file.txt");
@@ -519,7 +552,7 @@ mod tests {
                 ("pt-BR", "Em uma frase curta, explique como tratar um valor opcional ausente em Rust."),
                 ("th", "ตอบเป็นภาษาไทยเท่านั้น: อธิบายสั้น ๆ ว่า Rust ใช้ Option เพื่ออะไร"),
             ] {
-                let outcome = evaluation_call(&router, &uncensored, eval_input(prompt, vec![], None, false)).await;
+                let outcome = evaluation_call(&router, &uncensored, cortex_eval_input(&config, prompt)).await;
                 assert_measured_answer(&outcome);
                 let han = outcome.text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count();
                 let thai = outcome.text.chars().filter(|c| ('\u{0e00}'..='\u{0e7f}').contains(c)).count();
@@ -543,8 +576,23 @@ mod tests {
             }
             eprintln!("EVAL {}", serde_json::json!({"case":"official-en-switch","profile":official.model_id(),"pid":official_pid,"ttft_ms":answer.usage.time_to_first_token_ms,"total_ms":answer.usage.total_ms,"text":answer.text}));
             drop(official_child);
+            let mut official_prefix_input = cortex_eval_input(&config, "Continue this answer with one short clause.");
+            official_prefix_input.prefix = Some("A Rust Result is an enum that represents ".into());
+            let official_prefix = evaluation_call(&router, &official, official_prefix_input).await;
+            assert_measured_answer(&official_prefix);
+            assert_eq!(supervisor.child.lock().await.as_ref().expect("official same-profile child").pid, official_pid);
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-prefix","ttft_ms":official_prefix.usage.time_to_first_token_ms,"usage_measured":official_prefix.usage_measured,"text":official_prefix.text}));
+            let mut official_tool_input = cortex_eval_input(&config,
+                "Use the view_file tool to read the synthetic path /evaluation-only/no-such-file.txt. Do not claim it was read.");
+            official_tool_input.allow_tools = true;
+            let official_tool = evaluation_call(&router, &official, official_tool_input).await;
+            let official_tool_request = official_tool.tool_request.expect("official profile returns the synthetic tool call");
+            assert_eq!(official_tool_request.name.as_str(), "view_file");
+            assert_eq!(official_tool_request.arguments["path"], "/evaluation-only/no-such-file.txt");
+            assert!(official_tool.usage_measured && official_tool.usage.output_tokens > 0);
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-tool-double","tool":official_tool_request.name.as_str(),"arguments":official_tool_request.arguments,"effects":"none","usage_measured":official_tool.usage_measured}));
             let official_thai = evaluation_call(&router, &official,
-                eval_input("ตอบเป็นภาษาไทยเท่านั้น: อธิบายสั้น ๆ ว่า Rust ใช้ Option เพื่ออะไร", vec![], None, false)).await;
+                cortex_eval_input(&config, "ตอบเป็นภาษาไทยเท่านั้น: อธิบายสั้น ๆ ว่า Rust ใช้ Option เพื่ออะไร")).await;
             assert_measured_answer(&official_thai);
             let official_han = official_thai.text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count();
             let official_thai_chars = official_thai.text.chars().filter(|c| ('\u{0e00}'..='\u{0e7f}').contains(c)).count();
@@ -568,8 +616,8 @@ mod tests {
             let vision = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
             let thinking = crate::domain::services::thinking::Thinking::new(&config, router.clone());
             let (events, receiver, event_task) = crate::domain::services::events::channel(&config, None);
-            let (_cancel_tx, cancel) = watch::channel(false);
-            let (description, vision_usage) = thinking.describe_images_for_text_profile(
+            let (vision_cancel_tx, cancel) = watch::channel(false);
+            let vision_call = thinking.describe_images_for_text_profile(
                 &vision,
                 "Describe the visible image briefly, including its colors.",
                 &[],
@@ -577,7 +625,29 @@ mod tests {
                 None,
                 &events,
                 cancel,
-            ).await.expect("real T0 image prepass");
+            );
+            tokio::pin!(vision_call);
+            let vision_deadline = tokio::time::sleep(Duration::from_secs(240));
+            tokio::pin!(vision_deadline);
+            let mut vision_monitor = tokio::time::interval(Duration::from_secs(5));
+            let mut pressure_cancelled_vision = false;
+            let vision_result = loop {
+                tokio::select! {
+                    result = &mut vision_call => break result,
+                    _ = vision_monitor.tick() => {
+                        if evaluation_resources_ok(700).is_err() && !pressure_cancelled_vision {
+                            pressure_cancelled_vision = true;
+                            let _ = vision_cancel_tx.send(true);
+                        }
+                    }
+                    _ = &mut vision_deadline => {
+                        let _ = vision_cancel_tx.send(true);
+                        break tokio::time::timeout(Duration::from_secs(60), &mut vision_call)
+                            .await.expect("bounded T0 prepass cancellation");
+                    }
+                }
+            };
+            let (description, vision_usage) = vision_result.expect("real T0 image prepass");
             drop(events);
             drop(receiver);
             event_task.await.expect("event output task");
@@ -593,7 +663,8 @@ mod tests {
             assert!(grounded.text.to_lowercase().contains("red") && grounded.text.to_lowercase().contains("green") && grounded.text.to_lowercase().contains("blue"));
             eprintln!("EVAL {}", serde_json::json!({"case":"t0-prepass-to-t1-text","profile":text_profile.model_id(),"images_sent_to_t1":0,"text":grounded.text,"usage_measured":grounded.usage_measured}));
 
-            let cancel_output = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
+            for cancellation_profile in [ModelProfile::Bonsai25Uncensored, ModelProfile::Bonsai25Official] {
+            let cancel_output = evaluation_output(cancellation_profile, false);
             let (events, mut event_rx) = mpsc::unbounded_channel();
             let (cancel_tx, cancel_rx) = watch::channel(false);
             let cancel_call = router.call(&cancel_output,
@@ -609,8 +680,10 @@ mod tests {
             tokio::pin!(queued_call);
             let mut saw_cancel_token = false;
             let mut saw_queued_wait = false;
+            let mut pressure_detected = false;
             let mut cancel_result = None;
             let mut queued_result = None;
+            let mut observation_monitor = tokio::time::interval(Duration::from_secs(5));
             let observation = tokio::time::timeout(Duration::from_secs(180), async {
                 while !(saw_cancel_token && saw_queued_wait) && cancel_result.is_none() && queued_result.is_none() {
                     tokio::select! {
@@ -622,15 +695,45 @@ mod tests {
                         event = queued_event_rx.recv(), if !saw_queued_wait => {
                             saw_queued_wait = matches!(event, Some(DriverEvent::Waiting));
                         }
+                        _ = observation_monitor.tick() => {
+                            if evaluation_resources_ok(700).is_err() {
+                                pressure_detected = true;
+                                break;
+                            }
+                        }
                     }
                 }
             }).await;
             let _ = cancel_tx.send(true);
-            if cancel_result.is_none() { cancel_result = Some(cancel_call.await); }
-            if queued_result.is_none() { queued_result = Some(queued_call.await); }
+            let drain = async {
+                if cancel_result.is_none() { cancel_result = Some(cancel_call.as_mut().await); }
+                if queued_result.is_none() { queued_result = Some(queued_call.as_mut().await); }
+            };
+            tokio::pin!(drain);
+            let mut drain_monitor = tokio::time::interval(Duration::from_secs(5));
+            let drained = tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    tokio::select! {
+                        _ = &mut drain => break,
+                        _ = drain_monitor.tick() => {
+                            if evaluation_resources_ok(700).is_err() {
+                                eprintln!("GUARD_STOP resource pressure while settling cancelled T1 and queued T0");
+                            }
+                        }
+                    }
+                }
+            }).await.is_ok();
+            if !drained {
+                eprintln!("GUARD_STOP cancellation/queued-T0 drain exceeded 90 seconds; stopping only the owned Prism child");
+                supervisor.stop().await.expect("bounded owned Prism stop after drain timeout");
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    if cancel_result.is_none() { cancel_result = Some(cancel_call.as_mut().await); }
+                    if queued_result.is_none() { queued_result = Some(queued_call.as_mut().await); }
+                }).await.expect("bounded model-future settlement after owned Prism stop");
+            }
             let partial_result = cancel_result.expect("cancel call result collected");
             let queued_result = queued_result.expect("queued call result collected");
-            assert!(observation.is_ok() && saw_cancel_token && saw_queued_wait,
+            assert!(observation.is_ok() && !pressure_detected && saw_cancel_token && saw_queued_wait,
                 "both T1 token and queued T0 waiting state must be observed before cancellation");
             let partial = partial_result.expect("partial result survives cancellation");
             assert_eq!(partial.error, Some(crate::domain::models::driver::DriverError::Cancelled));
@@ -639,7 +742,8 @@ mod tests {
             assert!(supervisor.child.lock().await.is_none(), "owned Prism must be reaped before permit release");
             let queued = queued_result.expect("queued T0 runs after Prism teardown");
             assert!(queued.error.is_none());
-            eprintln!("EVAL {}", serde_json::json!({"case":"cancel-then-queued-t0","partial_text":partial.text,"partial_error":"cancelled","queued_t0_text":queued.text,"queued_after_teardown":true}));
+            eprintln!("EVAL {}", serde_json::json!({"case":"cancel-then-queued-t0","profile":cancellation_profile.id(),"partial_text":partial.text,"partial_error":"cancelled","queued_t0_text":queued.text,"queued_after_teardown":true}));
+            }
         }).catch_unwind().await;
 
         // Cleanup only this supervisor child. T0 started empty by the preflight;

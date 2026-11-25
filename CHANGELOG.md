@@ -7,7 +7,14 @@
 - Add opt-in Bonsai 2.5 profiles with uncensored default, official alternative,
   per-chat persistence, verified single-process Prism loading, and serialized
   T0/Whisper GPU transitions (#138)
+- Add scoped provider child runs with metered budgets and cancellation (#135)
 - Relay typed local tool requests and results through chat outputs (#137)
+
+### Fixes
+
+- Bind local and phone approvals to one canonical action and one executor
+- Keep child cancellation pending until the provider has stopped
+- Use a loopback peer for the internal-call test fixture (#139)
 
 
 ## v2.3.0 - 2026-11-16

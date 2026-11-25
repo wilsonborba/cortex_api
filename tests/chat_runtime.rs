@@ -436,9 +436,10 @@ async fn frames(body: Body, stop_after: Option<usize>) -> Vec<(u64, String, Valu
 async fn lan_call(rt: &Arc<ChatRuntime>, path: &str, body: Value) -> (StatusCode, Value) {
     let req = Request::post(path)
         .header("content-type", "application/json")
-        .extension(axum::extract::ConnectInfo(
-            "127.0.0.1:1234".parse::<std::net::SocketAddr>().unwrap(),
-        ));
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::LOCALHOST,
+            1234,
+        ))));
     let response = app(rt)
         .oneshot(req.body(Body::from(body.to_string())).unwrap())
         .await

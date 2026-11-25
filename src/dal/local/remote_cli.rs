@@ -226,6 +226,140 @@ impl PostgresRemoteCliStore {
         }
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn answer_bound_output_action_inner(
+        &self,
+        session_id: Uuid,
+        caller: &str,
+        expected_binding: Option<(Uuid, Uuid)>,
+        action_id: Uuid,
+        approved: bool,
+        now_ms: u64,
+        command_ttl_ms: u64,
+    ) -> Result<Option<RemoteCliEvent>, RemoteCliError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| RemoteCliError::Unavailable)?;
+        let (_, cli_seq, ctrl_seq) = Self::lock_session(&mut tx, session_id, caller).await?;
+        let now = ts_from_ms(now_ms);
+        let row = sqlx::query(
+            "SELECT chat_session_id, output_id, approved, cancelled_at, claimed_at, expires_at
+             FROM remote_cli_output_actions
+             WHERE session_id = $1 AND action_id = $2
+             FOR UPDATE",
+        )
+        .bind(session_id)
+        .bind(action_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| RemoteCliError::Unavailable)?;
+        let Some(row) = row else {
+            return if expected_binding.is_some() {
+                Err(RemoteCliError::NotFound)
+            } else {
+                Ok(None)
+            };
+        };
+        let chat_session_id: Uuid = row
+            .try_get("chat_session_id")
+            .map_err(|_| RemoteCliError::Unavailable)?;
+        let output_id: Uuid = row
+            .try_get("output_id")
+            .map_err(|_| RemoteCliError::Unavailable)?;
+        if expected_binding.is_some_and(|binding| binding != (chat_session_id, output_id)) {
+            return Err(RemoteCliError::AlreadyAnswered);
+        }
+        let existing: Option<bool> = row
+            .try_get("approved")
+            .map_err(|_| RemoteCliError::Unavailable)?;
+        let cancelled: Option<DateTime<Utc>> = row
+            .try_get("cancelled_at")
+            .map_err(|_| RemoteCliError::Unavailable)?;
+        let claimed: Option<DateTime<Utc>> = row
+            .try_get("claimed_at")
+            .map_err(|_| RemoteCliError::Unavailable)?;
+        let expires: DateTime<Utc> = row
+            .try_get("expires_at")
+            .map_err(|_| RemoteCliError::Unavailable)?;
+        if existing.is_some() || cancelled.is_some() || claimed.is_some() || expires <= now {
+            return Err(RemoteCliError::AlreadyAnswered);
+        }
+
+        let updated = sqlx::query(
+            "UPDATE remote_cli_output_actions
+             SET approved = $3, answered_at = $4
+             WHERE session_id = $1 AND action_id = $2
+               AND approved IS NULL AND cancelled_at IS NULL
+               AND claimed_at IS NULL AND expires_at > $4",
+        )
+        .bind(session_id)
+        .bind(action_id)
+        .bind(approved)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| RemoteCliError::Unavailable)?
+        .rows_affected();
+        if updated != 1 {
+            return Err(RemoteCliError::AlreadyAnswered);
+        }
+
+        let new_cli_seq = cli_seq + 1;
+        let new_ctrl_seq = ctrl_seq + 1;
+        let ttl_ms = i64::try_from(command_ttl_ms.max(1)).unwrap_or(i64::MAX);
+        sqlx::query(
+            "UPDATE remote_cli_sessions
+             SET next_cli_seq = $2, next_ctrl_seq = $3,
+                 last_seen_at = GREATEST(last_seen_at, $4)
+             WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .bind(new_cli_seq)
+        .bind(new_ctrl_seq)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| RemoteCliError::Unavailable)?;
+        let approval_id = action_id.to_string();
+        sqlx::query(
+            "INSERT INTO remote_cli_commands (
+                session_id, seq, kind, approval_id, approved, ttl_ms, created_at
+             ) VALUES ($1, $2, 'approval_answer', $3, $4, $5, $6)",
+        )
+        .bind(session_id)
+        .bind(new_cli_seq)
+        .bind(&approval_id)
+        .bind(approved)
+        .bind(ttl_ms)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| RemoteCliError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO remote_cli_events (
+                session_id, seq, kind, approval_id, approved, created_at
+             ) VALUES ($1, $2, 'approval_answer', $3, $4, $5)",
+        )
+        .bind(session_id)
+        .bind(new_ctrl_seq)
+        .bind(&approval_id)
+        .bind(approved)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| RemoteCliError::Unavailable)?;
+
+        tx.commit().await.map_err(|_| RemoteCliError::Unavailable)?;
+        Ok(Some(RemoteCliEvent {
+            id: new_cli_seq as u64,
+            kind: RemoteEventKind::ApprovalAnswer,
+            payload: serde_json::json!({ "approval_id": approval_id, "approved": approved }),
+            created_at_ms: now_ms,
+        }))
+    }
 }
 
 impl RemoteCliStore for PostgresRemoteCliStore {
@@ -693,6 +827,34 @@ impl RemoteCliStore for PostgresRemoteCliStore {
     ) -> Pin<Box<dyn Future<Output = Result<RemoteCliEvent, RemoteCliError>> + Send + 'a>> {
         Box::pin(async move {
             let sid = Uuid::parse_str(session_id).map_err(|_| RemoteCliError::NotFound)?;
+            if let Ok(action_id) = Uuid::parse_str(approval_id) {
+                if let Some(event) = self
+                    .answer_bound_output_action_inner(
+                        sid,
+                        caller,
+                        None,
+                        action_id,
+                        approved,
+                        now_ms,
+                        command_ttl_ms,
+                    )
+                    .await?
+                {
+                    return Ok(event);
+                }
+                let is_bound_elsewhere: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM remote_cli_output_actions WHERE action_id = $1
+                     )",
+                )
+                .bind(action_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|_| RemoteCliError::Unavailable)?;
+                if is_bound_elsewhere {
+                    return Err(RemoteCliError::NotFound);
+                }
+            }
             let mut tx = self
                 .pool
                 .begin()
@@ -770,6 +932,33 @@ impl RemoteCliStore for PostgresRemoteCliStore {
                 payload: serde_json::json!({ "approval_id": approval_id, "approved": approved }),
                 created_at_ms: now_ms,
             })
+        })
+    }
+
+    fn answer_bound_output_action<'a>(
+        &'a self,
+        session_id: &'a str,
+        caller: &'a str,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+        approved: bool,
+        now_ms: u64,
+        command_ttl_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<RemoteCliEvent, RemoteCliError>> + Send + 'a>> {
+        Box::pin(async move {
+            let sid = Uuid::parse_str(session_id).map_err(|_| RemoteCliError::NotFound)?;
+            self.answer_bound_output_action_inner(
+                sid,
+                caller,
+                Some((chat_session_id, output_id)),
+                action_id,
+                approved,
+                now_ms,
+                command_ttl_ms,
+            )
+            .await?
+            .ok_or(RemoteCliError::NotFound)
         })
     }
 
