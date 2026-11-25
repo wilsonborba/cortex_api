@@ -124,6 +124,7 @@ struct LifecycleRunStore {
     pause_create: std::sync::atomic::AtomicBool,
     release_create: tokio::sync::Semaphore,
     bind_started: tokio::sync::mpsc::UnboundedSender<Uuid>,
+    bind_completed: tokio::sync::mpsc::UnboundedSender<Uuid>,
     pause_bind: std::sync::atomic::AtomicBool,
     release_bind: tokio::sync::Semaphore,
 }
@@ -213,10 +214,10 @@ impl cortex_api::domain::services::agent_runs::AgentRunStore for LifecycleRunSto
         >,
     > {
         Box::pin(async move {
-            if self
+            let paused = self
                 .pause_bind
-                .swap(false, std::sync::atomic::Ordering::AcqRel)
-            {
+                .swap(false, std::sync::atomic::Ordering::AcqRel);
+            if paused {
                 let _ = self.bind_started.send(child_output_id);
                 self.release_bind
                     .acquire()
@@ -226,7 +227,8 @@ impl cortex_api::domain::services::agent_runs::AgentRunStore for LifecycleRunSto
                     })?
                     .forget();
             }
-            self.inner
+            let child = self
+                .inner
                 .bind_child_output(
                     owner,
                     session_id,
@@ -235,7 +237,11 @@ impl cortex_api::domain::services::agent_runs::AgentRunStore for LifecycleRunSto
                     child_output_id,
                     now,
                 )
-                .await
+                .await?;
+            if paused {
+                let _ = self.bind_completed.send(child_output_id);
+            }
+            Ok(child)
         })
     }
 
@@ -437,7 +443,7 @@ struct ParentFixture {
     chat: Uuid,
     output: Uuid,
     call: Uuid,
-    cancel: watch::Sender<bool>,
+    _cancel_receiver: watch::Receiver<bool>,
     results: mpsc::UnboundedReceiver<cortex_api::domain::models::tools::ToolResult>,
 }
 
@@ -463,13 +469,13 @@ async fn parent_fixture(pool: &sqlx::PgPool, runtime: &Arc<ChatRuntime>) -> Pare
             arguments: json!({"role":"researcher","task":"wait for cancellation"}),
         })
     );
-    let (cancel, _) = watch::channel(false);
+    let (cancel, cancel_receiver) = watch::channel(false);
     let (stop_thinking, _) = watch::channel(false);
     let (live, _) = tokio::sync::broadcast::channel(8);
     runtime.controls.open(
         output,
         cortex_api::domain::services::output_controls::Control::new(
-            Arc::new(cancel.clone()),
+            Arc::new(cancel),
             Arc::new(stop_thinking),
             live,
             tools,
@@ -479,7 +485,7 @@ async fn parent_fixture(pool: &sqlx::PgPool, runtime: &Arc<ChatRuntime>) -> Pare
         chat,
         output,
         call,
-        cancel,
+        _cancel_receiver: cancel_receiver,
         results,
     }
 }
@@ -963,12 +969,14 @@ async fn bound_child_parent_cancel_waits_for_real_chat_runtime_provider_stop() {
     store.register_session(remote_session, "owner").await;
     let (created_tx, mut created_rx) = mpsc::unbounded_channel();
     let (bind_started_tx, mut bind_started_rx) = mpsc::unbounded_channel();
+    let (bind_completed_tx, mut bind_completed_rx) = mpsc::unbounded_channel();
     let run_store = Arc::new(LifecycleRunStore {
         inner: store.clone(),
         created: created_tx,
         pause_create: std::sync::atomic::AtomicBool::new(false),
         release_create: tokio::sync::Semaphore::new(0),
         bind_started: bind_started_tx,
+        bind_completed: bind_completed_tx,
         pause_bind: std::sync::atomic::AtomicBool::new(false),
         release_bind: tokio::sync::Semaphore::new(0),
     });
@@ -1082,7 +1090,11 @@ async fn bound_child_parent_cancel_waits_for_real_chat_runtime_provider_stop() {
         .await
         .unwrap()
         .unwrap();
-    parent_before_task.cancel.send(true).unwrap();
+    runtime
+        .controls
+        .get(parent_before_task.output)
+        .expect("parent output control is registered")
+        .request_cancel();
     run_store.release_create.add_permits(1);
     assert_eq!(create_before_task.await.unwrap().0, StatusCode::CREATED);
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1138,11 +1150,20 @@ async fn bound_child_parent_cancel_waits_for_real_chat_runtime_provider_stop() {
         .unwrap()
         .unwrap();
     assert_eq!(provider_output, child_output);
-    parent_during_binding.cancel.send(true).unwrap();
+    runtime
+        .controls
+        .get(parent_during_binding.output)
+        .expect("parent output control is registered")
+        .request_cancel();
     run_store.release_bind.add_permits(1);
     let (status, body) = create_child.await.unwrap();
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let child_id: Uuid = body["data"]["child_id"].as_str().unwrap().parse().unwrap();
+    let bound_output = tokio::time::timeout(Duration::from_secs(10), bind_completed_rx.recv())
+        .await
+        .expect("child output binding should finish")
+        .expect("binding completion signal should be sent");
+    assert_eq!(bound_output, provider_output);
 
     assert!(runtime.controls.get(provider_output).is_some());
     let (stored, _) = store
