@@ -55,9 +55,14 @@ struct GeneratedAnswer {
 
 fn validated_decode_rate(timings: &Value, completion_tokens: Option<u64>) -> Option<f64> {
     let predicted_tokens = timings.get("predicted_n")?.as_u64()?;
-    if !(1..=8192).contains(&predicted_tokens)
-        || completion_tokens.is_some_and(|tokens| tokens != predicted_tokens)
+    if predicted_tokens > 8192 || completion_tokens.is_some_and(|tokens| tokens != predicted_tokens)
     {
+        return None;
+    }
+    // Pinned llama.cpp counts the first generated token from the final prompt
+    // logits; n_gen_tps() therefore measures n_gen - 1 decode steps.
+    let decode_steps = predicted_tokens.checked_sub(1)?;
+    if decode_steps == 0 {
         return None;
     }
     let predicted_ms = timings.get("predicted_ms")?.as_f64()?;
@@ -71,7 +76,7 @@ fn validated_decode_rate(timings: &Value, completion_tokens: Option<u64>) -> Opt
     {
         return None;
     }
-    let calculated_rate = predicted_tokens as f64 * 1000.0 / predicted_ms;
+    let calculated_rate = decode_steps as f64 * 1000.0 / predicted_ms;
     ((reported_rate - calculated_rate).abs() <= (calculated_rate * 0.1).max(0.25))
         .then_some(reported_rate)
 }
@@ -865,6 +870,59 @@ mod tests {
         (Prism::new(config, queue), ledger)
     }
 
+    #[test]
+    fn validated_decode_rate_matches_pinned_server_decode_steps() {
+        let recorded = json!({
+            "predicted_n": 5,
+            "predicted_ms": 113.603,
+            "predicted_per_second": 35.210337755,
+        });
+        assert_eq!(
+            validated_decode_rate(&recorded, Some(5)),
+            Some(35.210337755),
+            "llama.cpp throughput uses n_gen - 1 decode steps"
+        );
+
+        let two_tokens = json!({
+            "predicted_n": 2,
+            "predicted_ms": 100.0,
+            "predicted_per_second": 10.0,
+        });
+        assert_eq!(validated_decode_rate(&two_tokens, Some(2)), Some(10.0));
+
+        for predicted_n in [0, 1] {
+            let no_decode_steps = json!({
+                "predicted_n": predicted_n,
+                "predicted_ms": 100.0,
+                "predicted_per_second": 10.0,
+            });
+            assert_eq!(
+                validated_decode_rate(&no_decode_steps, Some(predicted_n)),
+                None,
+                "throughput is unavailable with no decode steps, not fabricated as zero"
+            );
+        }
+
+        let old_incorrect_rate = json!({
+            "predicted_n": 5,
+            "predicted_ms": 113.603,
+            "predicted_per_second": 44.012,
+        });
+        assert_eq!(
+            validated_decode_rate(&old_incorrect_rate, Some(5)),
+            None,
+            "do not widen tolerance to accept the completion-token rate"
+        );
+        assert_eq!(validated_decode_rate(&recorded, Some(4)), None);
+        assert_eq!(
+            validated_decode_rate(
+                &json!({"predicted_n": 2, "predicted_ms": 0.0, "predicted_per_second": 10.0}),
+                Some(2)
+            ),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn waits_for_usage_after_finish_reason_and_reassembles_sse_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -916,7 +974,7 @@ mod tests {
                         let timings = if attempt == 1 {
                             json!({"predicted_n":2,"predicted_ms":0.0,"predicted_per_second":20.0})
                         } else {
-                            json!({"predicted_n":2,"predicted_ms":100.0,"predicted_per_second":20.0})
+                            json!({"predicted_n":2,"predicted_ms":100.0,"predicted_per_second":10.0})
                         };
                         let frames = [
                             format!(
@@ -967,7 +1025,7 @@ mod tests {
         );
         assert_eq!(
             outcome.tokens_per_second,
-            Some(20.0),
+            Some(10.0),
             "decode rate comes from the bounded final timing frame"
         );
         let inspection = outcome.inspection.unwrap();
@@ -995,7 +1053,7 @@ mod tests {
         assert_eq!(truncated.usage.input_tokens, 13);
         assert_eq!(truncated.usage.output_tokens, 2);
         assert!(truncated.usage_measured);
-        assert_eq!(truncated.tokens_per_second, Some(20.0));
+        assert_eq!(truncated.tokens_per_second, Some(10.0));
         assert!(truncated.tool_request.is_none());
         let partial_inspection = truncated.inspection.unwrap();
         assert_eq!(partial_inspection.tokens.len(), 1);
