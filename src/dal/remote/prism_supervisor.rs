@@ -17,6 +17,7 @@ const SERVER_SHA256: &str = "89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb
 struct OwnedServer {
     profile: ModelProfile,
     pid: u32,
+    stopping: bool,
     child: Child,
 }
 
@@ -39,7 +40,7 @@ impl PrismSupervisor {
     pub async fn is_running(&self, profile: ModelProfile) -> Result<bool, DriverError> {
         let mut slot = self.child.lock().await;
         match slot.as_mut() {
-            Some(owned) if owned.profile == profile => Ok(owned
+            Some(owned) if owned.profile == profile && !owned.stopping => Ok(owned
                 .child
                 .try_wait()
                 .map_err(|_| DriverError::Ollama)?
@@ -67,6 +68,7 @@ impl PrismSupervisor {
         let mut slot = self.child.lock().await;
         if let Some(owned) = slot.as_mut() {
             if owned.profile == profile
+                && !owned.stopping
                 && owned
                     .child
                     .try_wait()
@@ -166,6 +168,7 @@ impl PrismSupervisor {
         *slot = Some(OwnedServer {
             profile,
             pid,
+            stopping: false,
             child,
         });
         Ok(())
@@ -229,6 +232,7 @@ async fn stop_owned(slot: &mut Option<OwnedServer>) -> Result<(), DriverError> {
     let Some(owned) = slot.as_mut() else {
         return Ok(());
     };
+    owned.stopping = true;
     stop_handle(owned).await?;
     if slot.is_some() {
         *slot = None;
@@ -305,6 +309,7 @@ mod tests {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
                 pid,
+                stopping: false,
                 child,
             })),
         };
@@ -331,6 +336,7 @@ mod tests {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
                 pid,
+                stopping: false,
                 child,
             })),
         };
@@ -349,6 +355,73 @@ mod tests {
         assert!(
             supervisor
                 .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+                .await
+                .is_err()
+        );
+        assert!(supervisor.child.lock().await.is_none());
+        #[cfg(unix)]
+        assert!(!process_group_exists(pid));
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_marks_same_profile_unreusable_until_cleanup_retries() {
+        use tokio::io::AsyncBufReadExt;
+        let mut command = Command::new("/usr/bin/python3");
+        command
+            .args([
+                "-u",
+                "-c",
+                "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(30)",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command.spawn().expect("test child");
+        let pid = child.id().unwrap();
+        let mut stdout = tokio::io::BufReader::new(child.stdout.take().unwrap());
+        let mut ready = String::new();
+        tokio::time::timeout(Duration::from_secs(2), stdout.read_line(&mut ready))
+            .await
+            .expect("child initialized")
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        // Restore the child handle after reading its readiness line.
+        child.stdout = Some(stdout.into_inner());
+        let supervisor = std::sync::Arc::new(PrismSupervisor {
+            child: Mutex::new(Some(OwnedServer {
+                profile: ModelProfile::Bonsai25Official,
+                pid,
+                stopping: false,
+                child,
+            })),
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), supervisor.stop())
+                .await
+                .is_err(),
+            "ignored SIGTERM keeps the stop future pending"
+        );
+        assert!(
+            supervisor
+                .child
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|owned| owned.stopping)
+        );
+        assert!(
+            !supervisor
+                .is_running(ModelProfile::Bonsai25Official)
+                .await
+                .unwrap()
+        );
+        let config = Config::default();
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+        assert!(
+            supervisor
+                .ensure(&config, ModelProfile::Bonsai25Official, &mut cancel)
                 .await
                 .is_err()
         );

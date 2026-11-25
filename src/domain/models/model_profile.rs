@@ -49,7 +49,7 @@ impl ModelProfile {
         match self {
             Self::CortexT0 => &["text", "vision", "prompted-json", "tool-calls"],
             Self::Bonsai25Uncensored | Self::Bonsai25Official => {
-                &["text", "prompted-json", "tool-calls"]
+                &["text", "vision", "prompted-json", "tool-calls"]
             }
         }
     }

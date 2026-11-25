@@ -105,11 +105,44 @@ pub async fn run<T: PipelineData>(
     let previous = stages.last().expect("accepted");
     let start = Instant::now();
     reporter.start(StageName::Gather);
-    let (mut files, mut memory, mut web) = tokio::join!(
-        services.files(previous),
-        services.memory(previous),
-        services.web(previous)
-    );
+    let files_first = if previous.output.data.files_before_other_gather() {
+        Some(services.files(previous).await)
+    } else {
+        None
+    };
+    if let Some(files) = files_first.as_ref()
+        && files.status.terminal()
+    {
+        let result = finish(
+            StageName::Gather,
+            start,
+            Some(previous),
+            StageValue {
+                status: files.status,
+                output: StageOutput {
+                    data: files.output.data.clone(),
+                    texts: files.output.texts.clone(),
+                    calls: files.output.calls.clone(),
+                    notices: files.output.notices.clone(),
+                },
+            },
+            reporter,
+        );
+        stages.push(result);
+        save(&mut stages, services, reporter).await;
+        return PipelineResult { stages };
+    }
+    let (mut files, mut memory, mut web) = match files_first {
+        Some(files) => {
+            let (memory, web) = tokio::join!(services.memory(previous), services.web(previous));
+            (files, memory, web)
+        }
+        None => tokio::join!(
+            services.files(previous),
+            services.memory(previous),
+            services.web(previous)
+        ),
+    };
     let mut notices = vec![];
     let mut cancelled = false;
     let mut fatal = None;
@@ -124,6 +157,7 @@ pub async fn run<T: PipelineData>(
                     process_numbers::HEAVY_LOAD.number,
                     process_numbers::QUEUE_FAULT.number,
                     process_numbers::OLLAMA_FAILED.number,
+                    process_numbers::INPUT_TOKEN_LIMIT.number,
                 ]
                 .contains(&process.number) =>
             {

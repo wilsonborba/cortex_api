@@ -186,12 +186,6 @@ impl Run {
                 input_id: input.input_id,
                 output_id: output.output_id,
             };
-            if !chat.files.iter().all(|f| f.image.is_none())
-                && input.model_id
-                    != crate::domain::models::model_profile::ModelProfile::CortexT0.id()
-            {
-                return Err(process_numbers::INVALID_DATA);
-            }
             return Ok(self
                 .accepted(
                     turn,
@@ -247,12 +241,6 @@ impl Run {
                 )
             }
         };
-        if !images.is_empty()
-            && prepared.input.model_id
-                != crate::domain::models::model_profile::ModelProfile::CortexT0.id()
-        {
-            return Err(process_numbers::INVALID_DATA);
-        }
         let recent = match &prepared.new_chat {
             Some(_) => vec![],
             None => rt
@@ -448,6 +436,49 @@ impl StageServices<Turn> for Run {
             turn.files = files;
             let mut value = StageValue::ok(turn);
             value.output.notices = notices;
+            let accepted = value.output.data.accepted.clone().expect("accepted");
+            if accepted.model.profile().uses_prism() && !accepted.images.is_empty() {
+                if *self.cancel.borrow() {
+                    value.status = StageStatus::Cancelled;
+                    return value;
+                }
+                let vision_model = accepted.model.clone().with_profile(
+                    crate::domain::models::model_profile::ModelProfile::CortexT0,
+                    true,
+                );
+                match self
+                    .runtime
+                    .thinking
+                    .describe_images_for_text_profile(
+                        &vision_model,
+                        &accepted.question,
+                        &value.output.data.files,
+                        accepted.images.clone(),
+                        value.output.data.token_budget.clone(),
+                        &self.events,
+                        self.cancel.clone(),
+                    )
+                    .await
+                {
+                    Ok((description, call)) => {
+                        if !description.trim().is_empty() {
+                            value.output.data.files.push(ContextText {
+                                label: "Image description".into(),
+                                source: None,
+                                text: description,
+                            });
+                        }
+                        value.output.calls.push(call);
+                    }
+                    Err(crate::domain::models::driver::DriverError::Cancelled) => {
+                        value.status = StageStatus::Cancelled;
+                    }
+                    Err(crate::domain::models::driver::DriverError::InvalidInput) => {
+                        value.status = StageStatus::Failed(process_numbers::INPUT_TOKEN_LIMIT);
+                    }
+                    Err(error) => value.status = driver_status(error),
+                }
+            }
             value
         })
     }
@@ -580,7 +611,11 @@ impl StageServices<Turn> for Run {
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
-                        images: accepted.images.clone(),
+                        images: if accepted.model.profile().uses_prism() {
+                            vec![]
+                        } else {
+                            accepted.images.clone()
+                        },
                         prefix: None,
                         tools_enabled: accepted.tools_enabled,
                         budget: turn.token_budget.clone(),
@@ -623,7 +658,11 @@ impl StageServices<Turn> for Run {
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
-                        images: accepted.images.clone(),
+                        images: if accepted.model.profile().uses_prism() {
+                            vec![]
+                        } else {
+                            accepted.images.clone()
+                        },
                         prefix: continuation.as_ref().map(|c| c.prefix.clone()),
                         tools_enabled: accepted.tools_enabled,
                         budget: turn.token_budget.clone(),

@@ -46,8 +46,10 @@ Bonsai 2.5 T1 is disabled by default. To enable it, set the service-only
 file. The API starts one owned Prism `llama-server` on loopback when a T1 chat
 needs it, then stops it before local T0 inference or Whisper uses the GPU.
 Omitted model selection defaults to the evaluated AtomicChat uncensored profile;
-the official profile remains selectable. Both are text-only. Image requests keep
-the existing T0 vision route.
+the official profile remains selectable. Both profiles use text-only native
+calls. On T1 image requests, one bounded call through the existing T0 vision
+route adds a description before context assembly; every T1 call receives no
+image payload. T0 image requests keep their existing route.
 
 Provision the pinned local files before enabling T1:
 

@@ -79,6 +79,10 @@ impl OutputModel {
         };
         self
     }
+    pub fn with_profile(mut self, profile: ModelProfile, has_images: bool) -> Self {
+        self.profile = profile;
+        self.with_images(has_images)
+    }
 }
 #[derive(Clone)]
 pub struct CallInput {
