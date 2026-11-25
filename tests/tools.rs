@@ -29,6 +29,21 @@ fn provider_requests_are_allowlisted_strict_and_bounded() {
         )
         .is_err()
     );
+    for arguments in [
+        json!({"path":"src/main.rs","start_line":0}),
+        json!({"path":"src/main.rs","end_line":0}),
+        json!({"path":"src/main.rs","start_line":0,"end_line":0}),
+        json!({"path":"src/main.rs","start_line":1,"end_line":501}),
+    ] {
+        assert!(ToolRequest::from_provider("view_file", arguments).is_err());
+    }
+    assert!(
+        ToolRequest::from_provider(
+            "view_file",
+            json!({"path":"src/main.rs","start_line":1,"end_line":500}),
+        )
+        .is_ok()
+    );
     assert!(ToolRequest::from_provider("grep_search", json!({"query":"x","paths":[]})).is_err());
 }
 

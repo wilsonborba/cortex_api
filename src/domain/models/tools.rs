@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
+const MAX_VIEW_FILE_LINES: u32 = 500;
 pub const MAX_RESULT_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,9 +108,11 @@ impl ToolRequest {
                     serde_json::from_value(arguments).map_err(|_| ToolError::InvalidRequest)?;
                 let first_line = args.start_line.unwrap_or(1);
                 if !bounded_string(&args.path, 1024)
-                    || args
-                        .end_line
-                        .is_some_and(|end| end < first_line || end.saturating_sub(first_line) > 500)
+                    || args.start_line == Some(0)
+                    || args.end_line == Some(0)
+                    || args.end_line.is_some_and(|end| {
+                        end < first_line || end.saturating_sub(first_line) >= MAX_VIEW_FILE_LINES
+                    })
                 {
                     return Err(ToolError::InvalidRequest);
                 }
