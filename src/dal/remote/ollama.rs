@@ -309,13 +309,7 @@ impl Ollama {
         if input.allow_tools && input.role == "answer" && input.prefix.is_none() {
             // Tool-call argument objects are provider-complete, never streamed fragments.
             body["stream"] = json!(false);
-            body["tools"] = json!([
-                {"type":"function","function":{"name":"invoke_subagent","description":"Delegate a bounded task to a mapped child agent.","parameters":{"type":"object","properties":{"role":{"type":"string"},"task":{"type":"string"},"context":{"type":"string"}},"required":["role","task"],"additionalProperties":false}}},
-                {"type":"function","function":{"name":"view_file","description":"Read a bounded section of a workspace file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}}},
-                {"type":"function","function":{"name":"grep_search","description":"Search selected workspace paths.","parameters":{"type":"object","properties":{"query":{"type":"string"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":32},"max_results":{"type":"integer","minimum":1,"maximum":100}},"required":["query","paths"],"additionalProperties":false}}},
-                {"type":"function","function":{"name":"replace_file_content","description":"Request an exact workspace file edit; the CLI must obtain approval first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"find":{"type":"string"},"replace":{"type":"string"}},"required":["path","find","replace"],"additionalProperties":false}}},
-                {"type":"function","function":{"name":"run_command","description":"Request a workspace command; the CLI must obtain approval first.","parameters":{"type":"object","properties":{"cwd":{"type":"string"},"argv":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":64}},"required":["cwd","argv"],"additionalProperties":false}}}
-            ]);
+            body["tools"] = crate::domain::models::tools::provider_definitions();
             collected.probabilities = false;
         }
         if input.role == "answer" && collected.probabilities {

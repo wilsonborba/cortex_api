@@ -13,6 +13,7 @@ pub struct Chat {
     pub user_id: String,
     pub title: String,
     pub persona_id: Option<String>,
+    pub model_id: String,
     pub is_pinned: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -27,7 +28,12 @@ pub struct ChatInput {
     pub use_memory: bool,
     pub memory_topic: Option<String>,
     pub thinking: bool,
+    #[serde(default = "legacy_model_id")]
+    pub model_id: String,
     pub created_at: DateTime<Utc>,
+}
+fn legacy_model_id() -> String {
+    "cortex-t0".into()
 }
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, PartialEq, Eq)]
 pub struct InputFile {

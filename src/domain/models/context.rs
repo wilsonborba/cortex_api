@@ -15,6 +15,8 @@ pub struct Exchange {
 /// fields marked in_context. History has only input and final answer text.
 #[derive(Default)]
 pub struct ContextInput {
+    pub context_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
     pub question: String,
     pub thinking: bool,
     pub history: Vec<Exchange>, // newest first

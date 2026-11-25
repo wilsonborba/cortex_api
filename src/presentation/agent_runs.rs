@@ -544,6 +544,7 @@ fn start_bound_child(
         }
         let body = crate::domain::models::chat_session::NewChat {
             app_id: "cortex".into(),
+            model_id: None,
             text: task,
             file_ids: vec![],
             stream: true,

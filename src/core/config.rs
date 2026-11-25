@@ -106,6 +106,10 @@ pub struct Config {
     pub worker_listen: SocketAddr,
     pub worker_timeout: std::time::Duration,
     pub ollama_url: String,
+    /// Loopback-only OpenAI-compatible endpoint for the single active Prism model.
+    pub prism_url: String,
+    /// T1 is opt-in through the service environment; no model is loaded at startup.
+    pub bonsai_enabled: bool,
     pub model_context_tokens: u64,
     pub ollama_keep_alive: String,
     pub ollama_connect_timeout: std::time::Duration,
@@ -142,11 +146,27 @@ pub struct Config {
 
 impl Config {
     pub fn production() -> Self {
-        Self {
+        let mut config = Self {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8003),
             hippocampus_url: "http://127.0.0.1:8001".into(),
             ..Self::default()
+        };
+        config.bonsai_enabled = std::env::var("CORTEX_BONSAI_ENABLED")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+        if let Ok(candidate) = std::env::var("CORTEX_PRISM_URL")
+            && let Ok(url) = url::Url::parse(&candidate)
+            && url.scheme() == "http"
+            && url
+                .host_str()
+                .is_some_and(|host| host == "127.0.0.1" || host == "::1")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+        {
+            config.prism_url = candidate.trim_end_matches('/').to_owned();
         }
+        config
     }
 }
 
@@ -253,6 +273,8 @@ impl Default for Config {
             worker_listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 18090),
             worker_timeout: std::time::Duration::from_secs(900),
             ollama_url: "http://127.0.0.1:11434".into(),
+            prism_url: "http://127.0.0.1:49100".into(),
+            bonsai_enabled: false,
             model_context_tokens: 8192,
             ollama_keep_alive: "2m".into(),
             ollama_connect_timeout: std::time::Duration::from_secs(5),

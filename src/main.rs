@@ -111,8 +111,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let queue = Scheduler::new(ledger.clone());
         let ollama = std::sync::Arc::new(Ollama::new(config.clone(), queue.clone()));
-        let driver: std::sync::Arc<dyn cortex_api::domain::models::driver::ModelDriver> =
+        let ollama_driver: std::sync::Arc<dyn cortex_api::domain::models::driver::ModelDriver> =
             ollama.clone();
+        let prism: std::sync::Arc<dyn cortex_api::domain::models::driver::ModelDriver> =
+            std::sync::Arc::new(cortex_api::dal::remote::prism::Prism::new(
+                config.clone(),
+                queue.clone(),
+            ));
+        let driver: std::sync::Arc<dyn cortex_api::domain::models::driver::ModelDriver> =
+            std::sync::Arc::new(cortex_api::dal::remote::model_router::ModelRouter::new(
+                ollama_driver,
+                prism,
+            ));
         let chats = Chats {
             pool: chat_pool.clone(),
         };

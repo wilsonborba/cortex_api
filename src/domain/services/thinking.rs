@@ -52,6 +52,7 @@ impl Thinking {
         max_tokens: u32,
     ) -> Result<CallInput, DriverError> {
         let system = format!("{}\n{instruction}", input.context.system);
+        let context_tokens = input.model.context_tokens(&self.config);
         let render = |cap: usize| {
             let notes: Vec<_> = notes
                 .iter()
@@ -81,7 +82,7 @@ impl Thinking {
                     .saturating_add(self.config.estimate_tokens(&prompt))
                     .saturating_add(self.config.chat_template_token_reserve)
                     .saturating_add(u64::from(max_tokens))
-                    <= self.config.model_context_tokens;
+                    <= context_tokens;
             (prompt, fits)
         };
         if !render(0).1 {
@@ -128,6 +129,7 @@ impl Thinking {
         let output_allowance = remaining.saturating_sub(prompt_tokens).min(
             self.config
                 .model_context_tokens
+                .min(input.model.context_tokens(&self.config))
                 .saturating_sub(prompt_tokens),
         );
         if output_allowance == 0 {
@@ -145,6 +147,7 @@ impl Thinking {
             context_tokens: self
                 .config
                 .model_context_tokens
+                .min(input.model.context_tokens(&self.config))
                 .min(remaining)
                 .min(u64::from(u32::MAX)) as u32,
             prefix: None,
@@ -378,7 +381,7 @@ impl Thinking {
                 &exchanges,
                 "answer",
                 &self.config.thinking_final_instruction,
-                self.config.answer_token_reserve as u32,
+                input.model.max_output_tokens(&self.config) as u32,
             )?;
             call.prefix = input.prefix.clone();
             call.allow_tools = input.tools_enabled && input.prefix.is_none();

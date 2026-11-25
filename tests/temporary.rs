@@ -8,7 +8,7 @@ use cortex_api::{
             context::ContextText,
             history::{FinishedOutput, FinishedStatus},
             identity::Caller,
-            temporary::TemporaryFile,
+            temporary::{TemporaryChat, TemporaryFile},
         },
         services::temporary::TemporaryChats,
     },
@@ -26,6 +26,25 @@ fn fixture_caller() -> Caller {
 fn body() -> NewChat {
     serde_json::from_value(json!({"app_id":"cortex","text":"first question","temporary":true}))
         .unwrap()
+}
+
+#[test]
+fn legacy_temporary_chat_and_input_json_default_to_t0() {
+    let session = Uuid::now_v7();
+    let input_id = Uuid::now_v7();
+    let input: cortex_api::domain::models::storage::ChatInput = serde_json::from_value(json!({
+        "input_id":input_id,"session_id":session,"text":"legacy","needs_web":false,
+        "web_mode":"fast","use_memory":false,"memory_topic":null,"thinking":false,
+        "created_at":"2030-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    assert_eq!(input.model_id, "cortex-t0");
+    let chat: TemporaryChat = serde_json::from_value(json!({
+        "session_id":session,"title":"legacy","persona_id":null,
+        "inputs":[input],"outputs":[],"files":[]
+    }))
+    .unwrap();
+    assert_eq!(chat.model_id, "cortex-t0");
 }
 #[tokio::test]
 async fn redis_down_refuses_start_file_and_continue() {
@@ -86,7 +105,8 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
         eprintln!("Skipping temporary cache test: CORTEX_TEST_REDIS_URL is not set");
         return;
     };
-    let config = Config::default();
+    let mut config = Config::default();
+    config.bonsai_enabled = true;
     let chats = TemporaryChats::new(&config, cache.clone());
     let actor = fixture_caller();
     let file_id = chats
@@ -112,6 +132,8 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
         .await
         .unwrap();
     let id = first.session_id;
+    assert_eq!(first.model_id, "bonsai25-uncensored");
+    assert_eq!(first.inputs[0].model_id, "bonsai25-uncensored");
     let key = CacheKey::TemporaryChat(id.to_string());
     let file_key = CacheKey::TemporaryChat(file_id.to_string());
     let client = redis::Client::open(test_redis_url)
@@ -169,6 +191,20 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
         .unwrap();
     assert!(finish_ttl > 0 && finish_ttl <= 2000);
     assert!(chats.finish(&actor, &done).await.is_err());
+    let official_next: NextInput = serde_json::from_value(json!({
+        "text":"switch to official","file_ids":[file_id.to_string()],
+        "model_id":"bonsai25-official"
+    }))
+    .unwrap();
+    let official = chats
+        .append(&actor, id, official_next, chrono::Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(official.model_id, "bonsai25-official");
+    assert_eq!(
+        official.inputs.last().unwrap().model_id,
+        "bonsai25-official"
+    );
     let next = || {
         serde_json::from_value::<NextInput>(
             json!({"text":"follow up","file_ids":[file_id.to_string()]}),
@@ -182,8 +218,8 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
     );
     assert!(a.is_ok() && b.is_ok());
     let state = chats.get(&actor, id).await.unwrap();
-    assert_eq!(state.inputs.len(), 3);
-    assert_eq!(state.outputs.len(), 3);
+    assert_eq!(state.inputs.len(), 4);
+    assert_eq!(state.outputs.len(), 4);
     assert_eq!(state.files.len(), 1);
     assert_eq!(state.outputs[0].output.status, "done");
     let refreshed: i64 = redis::cmd("PTTL")

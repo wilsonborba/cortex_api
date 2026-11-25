@@ -1,6 +1,8 @@
 pub mod cache;
+pub mod model_router;
 pub mod ollama;
 pub mod openalex;
+pub mod prism;
 pub mod reddit;
 pub mod runs;
 pub mod usage;

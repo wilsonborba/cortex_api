@@ -40,9 +40,9 @@ impl AcceptedTurn {
     pub fn with_persona(self, persona_id: Option<String>) -> Self {
         Self { persona_id, ..self }
     }
-    pub fn with_images(self, caller: &Caller, images: Vec<String>) -> Self {
+    pub fn with_images(self, _caller: &Caller, images: Vec<String>) -> Self {
         Self {
-            model: OutputModel::new(caller, self.ids.output_id, !images.is_empty()),
+            model: self.model.clone().with_images(!images.is_empty()),
             images,
             ..self
         }

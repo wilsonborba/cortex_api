@@ -52,6 +52,7 @@ async fn relational_roundtrip_scoping_cascade_and_reversible_migration() {
         user_id: owner.user_id.clone(),
         title: "Synthetic answer".into(),
         persona_id: None,
+        model_id: "cortex-t0".into(),
         is_pinned: false,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
@@ -66,6 +67,7 @@ async fn relational_roundtrip_scoping_cascade_and_reversible_migration() {
         use_memory: false,
         memory_topic: None,
         thinking: false,
+        model_id: "cortex-t0".into(),
         created_at: chrono::Utc::now(),
     };
     repo.insert_input(&owner, &input).await.unwrap();
