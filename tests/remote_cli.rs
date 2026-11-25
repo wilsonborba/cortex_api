@@ -855,7 +855,31 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
             Some(json!({"call_id":call,"task":"client supplied task"})),
         )
         .await;
-        assert_eq!(client_authority_status, StatusCode::BAD_REQUEST);
+        assert_eq!(client_authority_status, StatusCode::UNPROCESSABLE_ENTITY);
+        let child_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM remote_cli_children WHERE session_id = $1",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let child_action_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM remote_cli_child_actions WHERE session_id = $1",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (events_after_rejection, _) = remote_cli
+            .ctrl_events_since(&first_session, "owner", 0)
+            .await
+            .unwrap();
+        assert_eq!(child_count, 0, "rejected client task must not create a child");
+        assert_eq!(child_action_count, 0, "rejected client task must not create actions");
+        assert!(
+            events_after_rejection.is_empty(),
+            "rejected client task must not publish a provider-side effect"
+        );
 
         let path = format!("/remote/sessions/{first_session}/outputs/{chat}/{output}/actions");
         let (status, first) = json_req(
