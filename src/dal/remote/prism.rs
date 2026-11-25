@@ -24,6 +24,7 @@ pub struct Prism {
     client: reqwest::Client,
     queue: Scheduler,
     config: Config,
+    supervisor: Option<std::sync::Arc<super::prism_supervisor::PrismSupervisor>>,
 }
 
 impl Prism {
@@ -39,7 +40,18 @@ impl Prism {
                 .expect("Prism client"),
             queue,
             config,
+            supervisor: None,
         }
+    }
+
+    pub fn managed(
+        config: Config,
+        queue: Scheduler,
+        supervisor: std::sync::Arc<super::prism_supervisor::PrismSupervisor>,
+    ) -> Self {
+        let mut prism = Self::new(config, queue);
+        prism.supervisor = Some(supervisor);
+        prism
     }
 }
 
@@ -62,16 +74,30 @@ fn messages(input: &CallInput) -> Result<Vec<Value>, DriverError> {
     Ok(messages)
 }
 
-impl ModelDriver for Prism {
-    fn call<'a>(
+impl Prism {
+    pub fn call_with_permit<'a>(
+        &'a self,
+        output: &'a OutputModel,
+        input: CallInput,
+        events: mpsc::UnboundedSender<DriverEvent>,
+        cancel: watch::Receiver<bool>,
+        permit: crate::domain::services::balancer::Permit,
+    ) -> Pending<'a, Result<CallOutcome, DriverError>> {
+        self.call_inner(output, input, events, cancel, Some(permit))
+    }
+
+    fn call_inner<'a>(
         &'a self,
         output: &'a OutputModel,
         input: CallInput,
         events: mpsc::UnboundedSender<DriverEvent>,
         mut cancel: watch::Receiver<bool>,
+        existing_permit: Option<crate::domain::services::balancer::Permit>,
     ) -> Pending<'a, Result<CallOutcome, DriverError>> {
         Box::pin(async move {
-            if !output.profile().uses_prism()
+            if !self.config.bonsai_enabled
+                || !self.config.prism_url_is_loopback()
+                || !output.profile().uses_prism()
                 || !input.temperature.is_finite()
                 || input.temperature < 0.0
                 || input.max_tokens == 0
@@ -104,54 +130,90 @@ impl ModelDriver for Prism {
             let _ = events.send(DriverEvent::Waiting);
             let started_at = Utc::now();
             let start = Instant::now();
-            let permit = tokio::select! {
-                biased;
-                _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                p = self.queue.acquire(output.actor.clone(), output.output_id) => p.map_err(DriverError::Queue)?,
+            let permit = match existing_permit {
+                Some(permit) => permit,
+                None => tokio::select! {
+                    biased;
+                    _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
+                    p = self.queue.acquire(output.actor.clone(), output.output_id) => p.map_err(DriverError::Queue)?,
+                },
             };
-            let props_url = format!("{}/props", self.config.prism_url.trim_end_matches('/'));
-            let props = tokio::select! {
-                biased;
-                _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                response = self.client.get(props_url).send() => response.map_err(|_| DriverError::Ollama)?,
-            };
-            if !props.status().is_success() {
-                return Err(DriverError::Ollama);
-            }
-            let props = read_limited_json(props, 64 * 1024, &mut cancel).await?;
             let profile = output.profile();
+            if let Some(supervisor) = &self.supervisor {
+                let _ = events.send(DriverEvent::ModelLoading {
+                    model: profile
+                        .runtime_alias()
+                        .ok_or(DriverError::InvalidInput)?
+                        .into(),
+                });
+                tokio::select! {
+                    biased;
+                    _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
+                    result = supervisor.ensure(&self.config, profile) => result?,
+                }
+            }
             let expected_alias = profile.runtime_alias().ok_or(DriverError::InvalidInput)?;
             let expected_file = profile
                 .artifact_filename()
                 .ok_or(DriverError::InvalidInput)?;
-            let models_url = format!("{}/v1/models", self.config.prism_url.trim_end_matches('/'));
-            let models = tokio::select! {
-                biased;
-                _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                response = self.client.get(models_url).send() => response.map_err(|_| DriverError::Ollama)?,
+            let readiness = async {
+                let props_url = format!("{}/props", self.config.prism_url.trim_end_matches('/'));
+                let props = tokio::select! {
+                    biased;
+                    _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
+                    response = self.client.get(props_url).send() => response.map_err(|_| DriverError::Ollama)?,
+                };
+                if !props.status().is_success() {
+                    return Err(DriverError::Ollama);
+                }
+                let props = read_limited_json(props, 64 * 1024, &mut cancel).await?;
+                let models_url =
+                    format!("{}/v1/models", self.config.prism_url.trim_end_matches('/'));
+                let models = tokio::select! {
+                    biased;
+                    _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
+                    response = self.client.get(models_url).send() => response.map_err(|_| DriverError::Ollama)?,
+                };
+                if !models.status().is_success() {
+                    return Err(DriverError::Ollama);
+                }
+                let models = read_limited_json(models, 64 * 1024, &mut cancel).await?;
+                let alias_matches = models
+                    .pointer("/data")
+                    .and_then(Value::as_array)
+                    .is_some_and(|data| {
+                        data.iter().any(|model| {
+                            model.get("id").and_then(Value::as_str) == Some(expected_alias)
+                        })
+                    });
+                let path_matches = props
+                    .get("model_path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| path.ends_with(expected_file));
+                let context_ready = props
+                    .pointer("/default_generation_settings/n_ctx")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|ctx| ctx >= u64::from(input.context_tokens));
+                if alias_matches && path_matches && context_ready {
+                    Ok(())
+                } else {
+                    Err(DriverError::Ollama)
+                }
             };
-            if !models.status().is_success() {
-                return Err(DriverError::Ollama);
+            let mut ready = tokio::time::timeout(std::time::Duration::from_secs(120), readiness)
+                .await
+                .unwrap_or(Err(DriverError::Ollama));
+            if ready.is_ok()
+                && let Some(supervisor) = &self.supervisor
+                && !supervisor.is_running(profile).await.unwrap_or(false)
+            {
+                ready = Err(DriverError::Ollama);
             }
-            let models = read_limited_json(models, 64 * 1024, &mut cancel).await?;
-            let alias_matches = models
-                .pointer("/data")
-                .and_then(Value::as_array)
-                .is_some_and(|data| {
-                    data.iter().any(|model| {
-                        model.get("id").and_then(Value::as_str) == Some(expected_alias)
-                    })
-                });
-            let path_matches = props
-                .get("model_path")
-                .and_then(Value::as_str)
-                .is_some_and(|path| path.ends_with(expected_file));
-            let context_ready = props
-                .pointer("/default_generation_settings/n_ctx")
-                .and_then(Value::as_u64)
-                .is_some_and(|ctx| ctx >= u64::from(input.context_tokens));
-            if !alias_matches || !path_matches || !context_ready {
-                return Err(DriverError::Ollama);
+            if let Err(error) = ready {
+                if let Some(supervisor) = &self.supervisor {
+                    let _ = supervisor.stop().await;
+                }
+                return Err(error);
             }
             let ready_ms = start.elapsed().as_millis() as u64;
             let _ = events.send(DriverEvent::ModelReady {
@@ -377,6 +439,18 @@ impl ModelDriver for Prism {
     }
 }
 
+impl ModelDriver for Prism {
+    fn call<'a>(
+        &'a self,
+        output: &'a OutputModel,
+        input: CallInput,
+        events: mpsc::UnboundedSender<DriverEvent>,
+        cancel: watch::Receiver<bool>,
+    ) -> Pending<'a, Result<CallOutcome, DriverError>> {
+        self.call_inner(output, input, events, cancel, None)
+    }
+}
+
 async fn cancelled(cancel: &mut watch::Receiver<bool>) {
     loop {
         if *cancel.borrow() {
@@ -526,6 +600,7 @@ mod tests {
         let queue = Scheduler::new(ledger.clone());
         let mut config = Config::default();
         config.prism_url = base;
+        config.bonsai_enabled = true;
         (Prism::new(config, queue), ledger)
     }
 

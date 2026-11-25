@@ -1,20 +1,32 @@
-use crate::domain::models::{
-    driver::{CallInput, CallOutcome, DriverError, DriverEvent, ModelDriver, OutputModel},
-    usage::Pending,
+use crate::{
+    dal::remote::{ollama::Ollama, prism::Prism},
+    domain::{
+        models::{
+            driver::{CallInput, CallOutcome, DriverError, DriverEvent, ModelDriver, OutputModel},
+            usage::Pending,
+        },
+        services::balancer::Scheduler,
+    },
 };
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
-/// Routes profiles through existing engines while both engines share the same
-/// Scheduler instance. It intentionally does not acquire a second permit.
+/// Routes through one existing Scheduler. Prism transitions acquire here so
+/// T0 and Prism teardown/load happen under the same permit; Ollama retains its
+/// existing acquisition path for T0 requests.
 pub struct ModelRouter {
-    ollama: Arc<dyn ModelDriver>,
-    prism: Arc<dyn ModelDriver>,
+    ollama: Arc<Ollama>,
+    prism: Arc<Prism>,
+    queue: Scheduler,
 }
 
 impl ModelRouter {
-    pub fn new(ollama: Arc<dyn ModelDriver>, prism: Arc<dyn ModelDriver>) -> Self {
-        Self { ollama, prism }
+    pub fn new(ollama: Arc<Ollama>, prism: Arc<Prism>, queue: Scheduler) -> Self {
+        Self {
+            ollama,
+            prism,
+            queue,
+        }
     }
 }
 
@@ -24,10 +36,21 @@ impl ModelDriver for ModelRouter {
         output: &'a OutputModel,
         input: CallInput,
         events: mpsc::UnboundedSender<DriverEvent>,
-        cancel: watch::Receiver<bool>,
+        mut cancel: watch::Receiver<bool>,
     ) -> Pending<'a, Result<CallOutcome, DriverError>> {
         if output.profile().uses_prism() {
-            self.prism.call(output, input, events, cancel)
+            Box::pin(async move {
+                let _ = events.send(DriverEvent::Waiting);
+                let permit = tokio::select! {
+                    biased;
+                    _ = async { loop { if *cancel.borrow() { return; } if cancel.changed().await.is_err() { std::future::pending::<()>().await; } } } => return Err(DriverError::Cancelled),
+                    p = self.queue.acquire(output.actor.clone(), output.output_id) => p.map_err(DriverError::Queue)?,
+                };
+                self.ollama.release_models_for_local_job(&permit).await?;
+                self.prism
+                    .call_with_permit(output, input, events, cancel, permit)
+                    .await
+            })
         } else {
             self.ollama.call(output, input, events, cancel)
         }

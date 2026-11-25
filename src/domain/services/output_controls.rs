@@ -15,6 +15,7 @@ pub struct Control {
     pub live: broadcast::Sender<StoredEvent>,
     pub tools: ToolControl,
     pub(crate) tool_gate: Arc<Mutex<bool>>,
+    model_profile: Arc<Mutex<Option<crate::domain::models::model_profile::ModelProfile>>>,
 }
 impl Control {
     pub fn new(
@@ -29,7 +30,16 @@ impl Control {
             live,
             tools,
             tool_gate: Arc::new(Mutex::new(false)),
+            model_profile: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_model_profile(&self, profile: crate::domain::models::model_profile::ModelProfile) {
+        *self.model_profile.lock().unwrap_or_else(|e| e.into_inner()) = Some(profile);
+    }
+
+    pub fn model_profile(&self) -> Option<crate::domain::models::model_profile::ModelProfile> {
+        *self.model_profile.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Cancellation and a child tool result share one gate so no result can be
@@ -71,6 +81,28 @@ impl OutputControls {
 mod tests {
     use super::*;
     use crate::domain::models::tools::{ToolName, ToolResult};
+
+    #[test]
+    fn active_output_keeps_selected_profile_for_bound_children() {
+        let (cancel, _) = watch::channel(false);
+        let (stop_thinking, _) = watch::channel(false);
+        let (live, _) = broadcast::channel(1);
+        let (result_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let control = Control::new(
+            Arc::new(cancel),
+            Arc::new(stop_thinking),
+            live,
+            ToolControl::new(result_tx),
+        );
+        for profile in [
+            crate::domain::models::model_profile::ModelProfile::CortexT0,
+            crate::domain::models::model_profile::ModelProfile::Bonsai25Official,
+            crate::domain::models::model_profile::ModelProfile::Bonsai25Uncensored,
+        ] {
+            control.set_model_profile(profile);
+            assert_eq!(control.model_profile(), Some(profile));
+        }
+    }
 
     #[tokio::test]
     async fn cancellation_gate_rejects_late_child_result_and_orders_prior_result() {

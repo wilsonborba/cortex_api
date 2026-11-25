@@ -425,6 +425,7 @@ impl StageServices<Turn> for Run {
         Box::pin(async move {
             match self.accept_turn(&turn).await {
                 Ok(accepted) => {
+                    self.control.set_model_profile(accepted.model.profile());
                     // Open controls before publishing ids so a client reacting to
                     // the first SSE event can cancel immediately.
                     self.runtime

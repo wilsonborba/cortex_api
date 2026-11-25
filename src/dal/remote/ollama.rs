@@ -58,6 +58,7 @@ pub struct Ollama {
     client: reqwest::Client,
     config: Config,
     queue: Scheduler,
+    prism_supervisor: Option<std::sync::Arc<super::prism_supervisor::PrismSupervisor>>,
 }
 struct Collected {
     text: String,
@@ -82,7 +83,15 @@ impl Ollama {
                 .expect("Ollama client"),
             config,
             queue,
+            prism_supervisor: None,
         }
+    }
+    pub fn with_prism_supervisor(
+        mut self,
+        supervisor: std::sync::Arc<super::prism_supervisor::PrismSupervisor>,
+    ) -> Self {
+        self.prism_supervisor = Some(supervisor);
+        self
     }
     async fn post(&self, path: &str, body: &Value) -> Result<reqwest::Response, DriverError> {
         self.post_to(&self.config.ollama_url, path, body).await
@@ -105,6 +114,29 @@ impl Ollama {
         }
         Ok(response)
     }
+    async fn running_models(&self) -> Result<RunningModels, DriverError> {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let response = self
+                .client
+                .get(format!(
+                    "{}/api/ps",
+                    self.config.ollama_url.trim_end_matches('/')
+                ))
+                .send()
+                .await
+                .map_err(|_| DriverError::Ollama)?;
+            if !response.status().is_success() {
+                return Err(DriverError::Ollama);
+            }
+            let bytes = response.bytes().await.map_err(|_| DriverError::Ollama)?;
+            if bytes.len() > 64 * 1024 {
+                return Err(DriverError::Ollama);
+            }
+            serde_json::from_slice(&bytes).map_err(|_| DriverError::Ollama)
+        })
+        .await
+        .map_err(|_| DriverError::Ollama)?
+    }
     async fn prepare(
         &self,
         _permit: &Permit,
@@ -112,6 +144,9 @@ impl Ollama {
         context_tokens: u32,
         events: &mpsc::UnboundedSender<DriverEvent>,
     ) -> Result<u64, DriverError> {
+        if let Some(supervisor) = &self.prism_supervisor {
+            supervisor.stop().await?;
+        }
         let response = self
             .client
             .get(format!(
@@ -159,25 +194,24 @@ impl Ollama {
         Ok(load_ms)
     }
     pub async fn release_models_for_local_job(&self, _permit: &Permit) -> Result<(), DriverError> {
-        let response = self
-            .client
-            .get(format!(
-                "{}/api/ps",
-                self.config.ollama_url.trim_end_matches('/')
-            ))
-            .send()
-            .await
-            .map_err(|_| DriverError::Ollama)?;
-        if !response.status().is_success() {
-            return Err(DriverError::Ollama);
+        if let Some(supervisor) = &self.prism_supervisor {
+            supervisor.stop().await?;
         }
-        let models: RunningModels = response.json().await.map_err(|_| DriverError::Ollama)?;
+        let models = self.running_models().await?;
         for model in models.models {
-            self.post(
-                "/api/generate",
-                &json!({"model":model.name,"keep_alive":0,"stream":false}),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.post(
+                    "/api/generate",
+                    &json!({"model":model.name,"keep_alive":0,"stream":false}),
+                ),
             )
-            .await?;
+            .await
+            .map_err(|_| DriverError::Ollama)??;
+        }
+        let remaining = self.running_models().await?;
+        if !remaining.models.is_empty() {
+            return Err(DriverError::Ollama);
         }
         Ok(())
     }

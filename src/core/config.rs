@@ -108,6 +108,10 @@ pub struct Config {
     pub ollama_url: String,
     /// Loopback-only OpenAI-compatible endpoint for the single active Prism model.
     pub prism_url: String,
+    /// Installed Prism llama.cpp server. This is process configuration, never client input.
+    pub prism_server_path: std::path::PathBuf,
+    /// Installed allowlisted Bonsai artifacts. Filenames come only from ModelProfile.
+    pub bonsai_model_directory: std::path::PathBuf,
     /// T1 is opt-in through the service environment; no model is loaded at startup.
     pub bonsai_enabled: bool,
     pub model_context_tokens: u64,
@@ -145,6 +149,18 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn prism_url_is_loopback(&self) -> bool {
+        url::Url::parse(&self.prism_url).is_ok_and(|url| {
+            url.scheme() == "http"
+                && url.host_str() == Some("127.0.0.1")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && (url.path().is_empty() || url.path() == "/")
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+    }
+
     pub fn production() -> Self {
         let mut config = Self {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8003),
@@ -156,9 +172,8 @@ impl Config {
         if let Ok(candidate) = std::env::var("CORTEX_PRISM_URL")
             && let Ok(url) = url::Url::parse(&candidate)
             && url.scheme() == "http"
-            && url
-                .host_str()
-                .is_some_and(|host| host == "127.0.0.1" || host == "::1")
+            && (url.path().is_empty() || url.path() == "/")
+            && url.host_str().is_some_and(|host| host == "127.0.0.1")
             && url.username().is_empty()
             && url.password().is_none()
             && url.query().is_none()
@@ -274,6 +289,8 @@ impl Default for Config {
             worker_timeout: std::time::Duration::from_secs(900),
             ollama_url: "http://127.0.0.1:11434".into(),
             prism_url: "http://127.0.0.1:49100".into(),
+            prism_server_path: "models/prism/llama-server".into(),
+            bonsai_model_directory: "models/bonsai".into(),
             bonsai_enabled: false,
             model_context_tokens: 8192,
             ollama_keep_alive: "2m".into(),
