@@ -4,6 +4,7 @@ use crate::{
     core::config::Config,
     domain::models::{driver::DriverError, model_profile::ModelProfile},
 };
+use reqwest::header::HeaderValue;
 use sha2::{Digest, Sha256};
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -14,8 +15,13 @@ use tokio::{
 
 const SERVER_SHA256: &str = "89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c";
 
+fn new_api_key() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 struct OwnedServer {
     profile: ModelProfile,
+    api_key: String,
     pid: u32,
     stopping: bool,
     child: Child,
@@ -92,6 +98,9 @@ impl PrismSupervisor {
         if *cancel.borrow() {
             return Err(DriverError::Cancelled);
         }
+        // The pinned server reads LLAMA_API_KEY. Generate a distinct bearer key
+        // for every owned child; it never enters Config, argv, or logs.
+        let api_key = new_api_key();
         let endpoint = url::Url::parse(&config.prism_url).map_err(|_| DriverError::InvalidInput)?;
         let port = endpoint
             .port_or_known_default()
@@ -107,6 +116,7 @@ impl PrismSupervisor {
             library_path.push(existing);
         }
         command.env("LD_LIBRARY_PATH", library_path);
+        command.env("LLAMA_API_KEY", &api_key);
         command
             .args([
                 "--host",
@@ -143,6 +153,9 @@ impl PrismSupervisor {
                 "0",
                 "--jinja",
                 "--no-webui",
+                "--cors-origins",
+                "localhost",
+                "--no-cors-credentials",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -166,11 +179,35 @@ impl PrismSupervisor {
         let pid = child.id().ok_or(DriverError::Ollama)?;
         *slot = Some(OwnedServer {
             profile,
+            api_key,
             pid,
             stopping: false,
             child,
         });
         Ok(())
+    }
+
+    async fn authorization_header(
+        &self,
+        profile: ModelProfile,
+    ) -> Result<HeaderValue, DriverError> {
+        let mut slot = self.child.lock().await;
+        let owned = slot.as_mut().ok_or(DriverError::Ollama)?;
+        if owned.profile != profile || owned.stopping {
+            return Err(DriverError::Ollama);
+        }
+        if owned
+            .child
+            .try_wait()
+            .map_err(|_| DriverError::Ollama)?
+            .is_some()
+        {
+            return Err(DriverError::Ollama);
+        }
+        let mut header = HeaderValue::from_str(&format!("Bearer {}", owned.api_key))
+            .map_err(|_| DriverError::Ollama)?;
+        header.set_sensitive(true);
+        Ok(header)
     }
 }
 
@@ -186,6 +223,13 @@ impl super::prism::PrismProcessControl for PrismSupervisor {
 
     fn stop<'a>(&'a self) -> crate::domain::models::usage::Pending<'a, Result<(), DriverError>> {
         Box::pin(async move { PrismSupervisor::stop(self).await })
+    }
+
+    fn authorization_header<'a>(
+        &'a self,
+        profile: ModelProfile,
+    ) -> crate::domain::models::usage::Pending<'a, Result<HeaderValue, DriverError>> {
+        Box::pin(async move { PrismSupervisor::authorization_header(self, profile).await })
     }
 
     fn is_running<'a>(
@@ -291,6 +335,15 @@ fn process_group_exists(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_prism_child_gets_a_fresh_api_key() {
+        let first = new_api_key();
+        let restarted = new_api_key();
+        assert_ne!(first, restarted);
+        assert_eq!(first.len(), 36);
+        assert_eq!(restarted.len(), 36);
+    }
     use crate::{
         dal::remote::{model_router::ModelRouter, ollama::Ollama, prism::Prism},
         domain::{
@@ -1722,6 +1775,7 @@ mod tests {
         let supervisor = PrismSupervisor {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
+                api_key: new_api_key(),
                 pid,
                 stopping: false,
                 child,
@@ -1749,6 +1803,7 @@ mod tests {
         let supervisor = PrismSupervisor {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
+                api_key: new_api_key(),
                 pid,
                 stopping: false,
                 child,
@@ -1765,6 +1820,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(supervisor.child.lock().await.as_ref().unwrap().pid, pid);
+        let first_header = supervisor
+            .authorization_header(ModelProfile::Bonsai25Official)
+            .await
+            .unwrap();
+        assert!(first_header.is_sensitive());
+        let first_secret = std::str::from_utf8(first_header.as_bytes()).unwrap();
+        assert!(!format!("{first_header:?}").contains(first_secret));
+        assert_eq!(
+            supervisor
+                .authorization_header(ModelProfile::Bonsai25Official)
+                .await
+                .unwrap(),
+            first_header,
+            "a healthy same-profile child keeps its key"
+        );
+        assert!(
+            supervisor
+                .authorization_header(ModelProfile::Bonsai25Uncensored)
+                .await
+                .is_err()
+        );
 
         assert!(
             supervisor
@@ -1773,8 +1849,81 @@ mod tests {
                 .is_err()
         );
         assert!(supervisor.child.lock().await.is_none());
+        assert!(
+            supervisor
+                .authorization_header(ModelProfile::Bonsai25Official)
+                .await
+                .is_err()
+        );
         #[cfg(unix)]
         assert!(!process_group_exists(pid));
+
+        let mut replacement = Command::new("/usr/bin/sleep");
+        replacement
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        replacement.process_group(0);
+        let child = replacement.spawn().expect("replacement test child");
+        let replacement_pid = child.id().unwrap();
+        let replacement_key = new_api_key();
+        *supervisor.child.lock().await = Some(OwnedServer {
+            profile: ModelProfile::Bonsai25Uncensored,
+            api_key: replacement_key.clone(),
+            pid: replacement_pid,
+            stopping: false,
+            child,
+        });
+        let replacement_header = supervisor
+            .authorization_header(ModelProfile::Bonsai25Uncensored)
+            .await
+            .unwrap();
+        assert_ne!(replacement_header, first_header);
+        assert_eq!(
+            std::str::from_utf8(replacement_header.as_bytes()).unwrap(),
+            format!("Bearer {replacement_key}")
+        );
+        supervisor.stop().await.unwrap();
+        assert!(
+            supervisor
+                .authorization_header(ModelProfile::Bonsai25Uncensored)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_rejects_missing_or_exited_owned_child() {
+        let supervisor = PrismSupervisor::new();
+        assert!(
+            supervisor
+                .authorization_header(ModelProfile::Bonsai25Official)
+                .await
+                .is_err()
+        );
+
+        let mut command = Command::new("/usr/bin/true");
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command.spawn().expect("short-lived test child");
+        let pid = child.id().unwrap();
+        child.wait().await.unwrap();
+        *supervisor.child.lock().await = Some(OwnedServer {
+            profile: ModelProfile::Bonsai25Official,
+            api_key: new_api_key(),
+            pid,
+            stopping: false,
+            child,
+        });
+        assert!(
+            supervisor
+                .authorization_header(ModelProfile::Bonsai25Official)
+                .await
+                .is_err()
+        );
+        supervisor.child.lock().await.take();
     }
 
     #[tokio::test]
@@ -1806,6 +1955,7 @@ mod tests {
         let supervisor = std::sync::Arc::new(PrismSupervisor {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
+                api_key: new_api_key(),
                 pid,
                 stopping: false,
                 child,
@@ -1824,6 +1974,12 @@ mod tests {
                 .await
                 .as_ref()
                 .is_some_and(|owned| owned.stopping)
+        );
+        assert!(
+            supervisor
+                .authorization_header(ModelProfile::Bonsai25Official)
+                .await
+                .is_err()
         );
         assert!(
             !supervisor
