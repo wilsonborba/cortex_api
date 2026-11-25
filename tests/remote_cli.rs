@@ -909,6 +909,11 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
             .await
             .unwrap();
         assert_eq!(events.len(), 1, "registration retry must not republish approval");
+        assert_eq!(
+            events[0].payload["action"],
+            first["data"]["display"],
+            "persisted approval event must retain the action description"
+        );
 
         let second_path = format!("/remote/sessions/{second_session}/outputs/{chat}/{output}/actions");
         let (second_status, _) = json_req(

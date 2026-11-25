@@ -927,7 +927,7 @@ async fn create_output_action(
     if is_new {
         let event = json!({
             "approval_id": created.action_id.to_string(),
-            "action_text": created.display.clone(),
+            "action": created.display.clone(),
         });
         let remote_session_text = remote_session.to_string();
         if let Err(error) = state
