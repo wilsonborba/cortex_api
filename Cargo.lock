@@ -551,6 +551,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tesseract",
  "text-splitter",

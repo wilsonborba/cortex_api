@@ -8,6 +8,7 @@ use cortex_api::{
             identity::Caller,
             run_record::ModelCall,
             thinking::ThinkingInput,
+            tools::{ToolControl, ToolName, ToolRequest, ToolResult},
             usage::Pending,
         },
         services::{context::assemble, events::channel, thinking::Thinking},
@@ -17,6 +18,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
+use std::time::Duration;
 use tokio::sync::{Semaphore, mpsc, watch};
 use uuid::Uuid;
 struct Double {
@@ -25,6 +27,74 @@ struct Double {
     claims: bool,
     slow: bool,
     entered: Semaphore,
+}
+struct ToolDriver {
+    calls: Mutex<Vec<CallInput>>,
+}
+impl ModelDriver for ToolDriver {
+    fn call<'a>(
+        &'a self,
+        output: &'a OutputModel,
+        input: CallInput,
+        events: mpsc::UnboundedSender<DriverEvent>,
+        _: watch::Receiver<bool>,
+    ) -> Pending<'a, Result<CallOutcome, DriverError>> {
+        Box::pin(async move {
+            let request = if input.allow_tools && input.tool_history.is_empty() {
+                Some(
+                    ToolRequest::from_provider(
+                        "view_file",
+                        serde_json::json!({"path":"README.md"}),
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
+            if request.is_none()
+                && input
+                    .tool_history
+                    .first()
+                    .is_some_and(|exchange| exchange.output != "file contents")
+            {
+                return Err(DriverError::InvalidInput);
+            }
+            let text = if request.is_some() {
+                String::new()
+            } else {
+                "Resumed answer".into()
+            };
+            self.calls.lock().unwrap().push(input.clone());
+            if !text.is_empty() {
+                let _ = events.send(DriverEvent::Token {
+                    role: input.role.clone(),
+                    text: text.clone(),
+                });
+            }
+            let now = chrono::Utc::now();
+            Ok(CallOutcome {
+                inspection: None,
+                text,
+                usage: ModelCall {
+                    images: Some(0),
+                    audio: None,
+                    role: input.role,
+                    model: output.name(&Config::default()).into(),
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    time_to_first_token_ms: Some(1),
+                    total_ms: 2,
+                    started_at: now,
+                    finished_at: now,
+                },
+                usage_measured: true,
+                error: None,
+                load_ms: 0,
+                tokens_per_second: None,
+                tool_request: request,
+            })
+        })
+    }
 }
 impl ModelDriver for Double {
     fn call<'a>(
@@ -82,9 +152,11 @@ impl ModelDriver for Double {
                     started_at: now,
                     finished_at: now,
                 },
+                usage_measured: true,
                 error: stopped.then_some(DriverError::Cancelled),
                 load_ms: 0,
                 tokens_per_second: None,
+                tool_request: None,
             })
         })
     }
@@ -138,6 +210,8 @@ async fn none_path_and_second_round_cap_stream_every_role_with_one_model() {
             context: &context,
             images: vec!["fixture image".into()],
             prefix: None,
+            tools_enabled: false,
+            budget: None,
         };
         let (sink, mut rx, events) = channel(&config, None);
         let (_stop, stop) = watch::channel(false);
@@ -213,6 +287,8 @@ async fn full_180_second_limit_is_a_notice_and_keeps_attempt_usage() {
         context: &context,
         images: vec![],
         prefix: None,
+        tools_enabled: false,
+        budget: None,
     };
     let (sink, _rx, events) = channel(&config, None);
     let (_stop, stop) = watch::channel(false);
@@ -244,6 +320,8 @@ async fn stop_thinking_keeps_notes_and_continues_but_cancel_stops_output() {
             context: &context,
             images: vec![],
             prefix: None,
+            tools_enabled: false,
+            budget: None,
         };
         let (sink, mut rx, events) = channel(&config, None);
         let (stop_tx, stop) = watch::channel(false);
@@ -274,4 +352,168 @@ async fn stop_thinking_keeps_notes_and_continues_but_cancel_stops_output() {
         }
         assert_eq!(stopped, !whole);
     }
+}
+
+#[tokio::test]
+async fn answer_emits_a_typed_call_waits_for_one_result_and_resumes_the_same_output() {
+    let config = Config::default();
+    let driver = Arc::new(ToolDriver {
+        calls: Mutex::new(vec![]),
+    });
+    let service = Thinking::new(&config, driver.clone());
+    let context = context(&config);
+    let model = model();
+    let input = ThinkingInput {
+        model: &model,
+        context: &context,
+        images: vec![],
+        prefix: None,
+        tools_enabled: true,
+        budget: None,
+    };
+    let thinking = cortex_api::domain::models::thinking::ThinkingResult::default();
+    let (sink, mut events_rx, events_task) = channel(&config, None);
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+    let control = ToolControl::new(result_tx);
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let (outcome, tool_events) = {
+        let answer =
+            service.answer_with_tools(&input, &thinking, &sink, cancel, &control, &mut result_rx);
+        tokio::pin!(answer);
+        let mut tool_events = 0;
+        let outcome = loop {
+            tokio::select! {
+                event = events_rx.recv() => {
+                    let event = event.expect("event stream open");
+                    if let NativeEvent::ToolCall(request) = event.event {
+                        tool_events += 1;
+                        assert_eq!(request.name, ToolName::ViewFile);
+                        control.submit(ToolResult { call_id: request.call_id, name: request.name, output: "file contents".into() }).unwrap();
+                    }
+                }
+                result = &mut answer => break result.unwrap(),
+            }
+        };
+        (outcome, tool_events)
+    };
+    assert_eq!(tool_events, 1);
+    assert_eq!(outcome.text, "Resumed answer");
+    {
+        let calls = driver.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].tool_history[0].output, "file contents");
+    }
+    drop(sink);
+    events_task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_tool_expires_and_rejects_a_late_result() {
+    let config = Config::default();
+    let driver = Arc::new(ToolDriver {
+        calls: Mutex::new(vec![]),
+    });
+    let service = Thinking::new(&config, driver);
+    let context = context(&config);
+    let model = model();
+    let input = ThinkingInput {
+        model: &model,
+        context: &context,
+        images: vec![],
+        prefix: None,
+        tools_enabled: true,
+        budget: None,
+    };
+    let thinking = cortex_api::domain::models::thinking::ThinkingResult::default();
+    let (sink, mut events_rx, events_task) = channel(&config, None);
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+    let control = ToolControl::new(result_tx);
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let outcome = {
+        let answer =
+            service.answer_with_tools(&input, &thinking, &sink, cancel, &control, &mut result_rx);
+        tokio::pin!(answer);
+        let request = loop {
+            tokio::select! {
+                event = events_rx.recv() => {
+                    if let Some(event) = event
+                        && let NativeEvent::ToolCall(request) = event.event
+                    {
+                        break request;
+                    }
+                }
+                _ = &mut answer => panic!("pending tool should wait for expiry"),
+            }
+        };
+        tokio::time::advance(Duration::from_secs(120)).await;
+        let outcome = answer.await;
+        (request, outcome)
+    };
+    assert!(matches!(outcome.1, Err(DriverError::InvalidInput)));
+    assert!(
+        control
+            .submit(ToolResult {
+                call_id: outcome.0.call_id,
+                name: outcome.0.name,
+                output: "late".into(),
+            })
+            .is_err()
+    );
+    drop(sink);
+    events_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_a_pending_tool_rejects_its_result() {
+    let config = Config::default();
+    let driver = Arc::new(ToolDriver {
+        calls: Mutex::new(vec![]),
+    });
+    let service = Thinking::new(&config, driver);
+    let context = context(&config);
+    let model = model();
+    let input = ThinkingInput {
+        model: &model,
+        context: &context,
+        images: vec![],
+        prefix: None,
+        tools_enabled: true,
+        budget: None,
+    };
+    let thinking = cortex_api::domain::models::thinking::ThinkingResult::default();
+    let (sink, mut events_rx, events_task) = channel(&config, None);
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+    let control = ToolControl::new(result_tx);
+    let (cancel_tx, cancel) = watch::channel(false);
+    let outcome = {
+        let answer =
+            service.answer_with_tools(&input, &thinking, &sink, cancel, &control, &mut result_rx);
+        tokio::pin!(answer);
+        let request = loop {
+            tokio::select! {
+                event = events_rx.recv() => {
+                    if let Some(event) = event
+                        && let NativeEvent::ToolCall(request) = event.event
+                    {
+                        break request;
+                    }
+                }
+                _ = &mut answer => panic!("pending tool should wait for a result"),
+            }
+        };
+        cancel_tx.send(true).unwrap();
+        (request, answer.await)
+    };
+    assert!(matches!(outcome.1, Err(DriverError::Cancelled)));
+    assert!(
+        control
+            .submit(ToolResult {
+                call_id: outcome.0.call_id,
+                name: outcome.0.name,
+                output: "cancelled".into(),
+            })
+            .is_err()
+    );
+    drop(sink);
+    events_task.await.unwrap();
 }

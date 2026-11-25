@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hippocampus = cortex_api::dal::remote::hippocampus::Hippocampus::new(&config)
         .map_err(|_| "The Hippocampus URL is not valid")?
         .with_overview_cache(cortex_api::dal::remote::cache::RedisCache::from_environment());
-    let (runtime, personas) = {
+    let (runtime, personas, agent_runs) = {
         use cortex_api::{
             dal::{
                 local::{
@@ -121,6 +121,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             hippocampus: hippocampus.clone(),
             shield: shield.clone(),
         };
+        let agent_runs = cortex_api::domain::services::agent_runs::AgentRunService::new(
+            std::sync::Arc::new(
+                cortex_api::dal::local::agent_runs::PostgresAgentRunStore::new(chat_pool.clone()),
+            ),
+            120_000,
+            4,
+            2,
+            8192,
+        );
         let runtime = std::sync::Arc::new(ChatRuntime {
             history: History::new(chats.clone(), RedisCache::from_environment(), &config)
                 .map_err(|_| "The history cache config is not valid")?,
@@ -203,12 +212,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             journal: EventJournal::new(RedisCache::from_environment(), &config)
                 .map_err(|_| "The event journal config is not valid")?,
             controls: Default::default(),
+            agent_runs: agent_runs.clone(),
             personas: personas.clone(),
             shield,
             chats,
             config: config.clone(),
         });
-        (runtime, personas)
+        (runtime, personas, agent_runs)
     };
     let remote_cli = cortex_api::domain::services::remote_cli::RemoteCliService::new(
         std::sync::Arc::new(
@@ -269,10 +279,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
             cache: cortex_api::dal::remote::cache::RedisCache::from_environment(),
         },
-        chats: cortex_api::dal::local::chats::Chats { pool: chat_pool },
+        chats: cortex_api::dal::local::chats::Chats {
+            pool: chat_pool.clone(),
+        },
         logs,
         ledger,
         remote_cli,
+        agent_runs,
     });
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address = %config.listen, "Server started");

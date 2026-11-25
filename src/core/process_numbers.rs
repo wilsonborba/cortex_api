@@ -236,6 +236,14 @@ pub const WEB_RATE_LIMITED: ProcessNumber = ProcessNumber {
     number: 1056,
     message: "The web source rate limit was reached",
 };
+pub const AGENT_RUN_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1057,
+    message: "The child run or action was not found",
+};
+pub const AGENT_RUN_CONFLICT: ProcessNumber = ProcessNumber {
+    number: 1058,
+    message: "The child run or action is no longer pending",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -294,6 +302,8 @@ pub const REGISTRY: &[ProcessNumber] = &[
     REMOTE_CLI_UNAVAILABLE,
     WEB_SOURCE_BLOCKED,
     WEB_RATE_LIMITED,
+    AGENT_RUN_NOT_FOUND,
+    AGENT_RUN_CONFLICT,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

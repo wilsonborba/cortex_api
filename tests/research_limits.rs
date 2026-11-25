@@ -71,9 +71,11 @@ impl ModelDriver for NoDriver {
                     started_at: now,
                     finished_at: now,
                 },
+                usage_measured: true,
                 error: None,
                 load_ms: 0,
                 tokens_per_second: None,
+                tool_request: None,
             })
         })
     }

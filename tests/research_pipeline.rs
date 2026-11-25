@@ -115,9 +115,11 @@ impl ModelDriver for TestModelDriver {
                     started_at: now,
                     finished_at: now,
                 },
+                usage_measured: true,
                 error: None,
                 load_ms: 0,
                 tokens_per_second: None,
+                tool_request: None,
             })
         })
     }
@@ -588,6 +590,7 @@ async fn chat_runtime_end_to_end_uses_catalog_router_and_saves_only_labeled_read
         },
         journal: EventJournal::new(cache, &config).unwrap(),
         controls: Default::default(),
+        agent_runs: cortex_api::domain::services::agent_runs::AgentRunService::in_memory(120_000),
         personas,
         shield,
         chats: chats.clone(),

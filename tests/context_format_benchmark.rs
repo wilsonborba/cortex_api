@@ -183,6 +183,7 @@ fn runtime(
         },
         journal: EventJournal::new(cache, config).unwrap(),
         controls: Default::default(),
+        agent_runs: cortex_api::domain::services::agent_runs::AgentRunService::in_memory(120_000),
         personas,
         shield,
         chats,

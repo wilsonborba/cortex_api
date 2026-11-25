@@ -142,6 +142,21 @@ pub trait RemoteCliStore: Send + Sync {
         session_ttl_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<RemoteCliEvent, RemoteCliError>> + Send + 'a>>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn answer_bound_output_action<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _caller: &'a str,
+        _chat_session_id: Uuid,
+        _output_id: Uuid,
+        _action_id: Uuid,
+        _approved: bool,
+        _now_ms: u64,
+        _command_ttl_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<RemoteCliEvent, RemoteCliError>> + Send + 'a>> {
+        Box::pin(async { Err(RemoteCliError::NotFound) })
+    }
+
     fn expire_pending_commands<'a>(
         &'a self,
         now_ms: u64,
@@ -909,6 +924,35 @@ impl RemoteCliService {
                 now_ms,
                 self.command_ttl_ms,
                 self.session_ttl_ms,
+            )
+            .await?;
+        self.notify_cli(session_id, ev.id).await;
+        self.notify_ctrl(session_id, 0).await;
+        Ok(ev)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn answer_bound_output_action(
+        &self,
+        session_id: &str,
+        caller: &str,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+        approved: bool,
+        now_ms: u64,
+    ) -> Result<RemoteCliEvent, RemoteCliError> {
+        let ev = self
+            .store
+            .answer_bound_output_action(
+                session_id,
+                caller,
+                chat_session_id,
+                output_id,
+                action_id,
+                approved,
+                now_ms,
+                self.command_ttl_ms,
             )
             .await?;
         self.notify_cli(session_id, ev.id).await;
