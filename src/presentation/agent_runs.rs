@@ -634,6 +634,7 @@ fn start_bound_child(
         let provider_completed = finished
             .as_ref()
             .is_some_and(|run| run.error.is_none() && run.output.is_some());
+        let settlement_usage = token_budget.settlement_usage();
         let budget_settled = if provider_completed && !cancelled {
             state
                 .service
@@ -642,13 +643,29 @@ fn start_bound_child(
                     &owner,
                     remote_session,
                     child.child_id,
-                    token_budget.settlement_usage(),
+                    settlement_usage,
                     now(),
                 )
                 .await
                 .is_ok()
                 && parent_budget.as_ref().is_none_or(|budget| {
-                    budget.settle_reservation(child.child_id, token_budget.settlement_usage())
+                    budget.settle_reservation(child.child_id, settlement_usage)
+                })
+        } else if cancelled || *parent_control.cancel.borrow() {
+            state
+                .service
+                .store
+                .settle_child_budget(
+                    &owner,
+                    remote_session,
+                    child.child_id,
+                    settlement_usage,
+                    now(),
+                )
+                .await
+                .is_ok()
+                && parent_budget.as_ref().is_none_or(|budget| {
+                    budget.settle_reservation(child.child_id, settlement_usage)
                 })
         } else {
             false
