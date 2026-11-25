@@ -190,15 +190,16 @@ async fn stop_owned(slot: &mut Option<OwnedServer>) -> Result<(), DriverError> {
     let Some(mut owned) = slot.take() else {
         return Ok(());
     };
+    let pid = owned.child.id();
     #[cfg(unix)]
-    if let Some(pid) = owned.child.id() {
+    if let Some(pid) = pid {
         // SAFETY: the child was started in a new process group owned by this instance.
         let _ = unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
     }
     let result = tokio::time::timeout(Duration::from_secs(5), owned.child.wait()).await;
     if !matches!(result, Ok(Ok(_))) {
         #[cfg(unix)]
-        if let Some(pid) = owned.child.id() {
+        if let Some(pid) = pid {
             // SAFETY: same owned process group as above; only our process group is signalled.
             let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         }
@@ -208,7 +209,40 @@ async fn stop_owned(slot: &mut Option<OwnedServer>) -> Result<(), DriverError> {
             .map_err(|_| DriverError::Ollama)?
             .map_err(|_| DriverError::Ollama)?;
     }
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        let group_exited = tokio::time::timeout(Duration::from_secs(5), async {
+            while process_group_exists(pid) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !group_exited {
+            // SAFETY: pid is the process-group ID assigned to this owned child.
+            let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            let killed = tokio::time::timeout(Duration::from_secs(2), async {
+                while process_group_exists(pid) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .is_ok();
+            if !killed {
+                return Err(DriverError::Ollama);
+            }
+        }
+    }
     Ok(())
+}
+
+#[cfg(unix)]
+fn process_group_exists(pid: u32) -> bool {
+    // SAFETY: signal 0 only checks the existence of the supervisor-owned group.
+    if unsafe { libc::kill(-(pid as i32), 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 #[cfg(test)]
