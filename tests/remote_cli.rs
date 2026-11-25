@@ -3,7 +3,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use futures_util::StreamExt;
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::Duration;
@@ -766,6 +766,14 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
     sqlx::migrate!().run(&pool).await.unwrap();
 
     async {
+        let golden: Value =
+            serde_json::from_str(include_str!("fixtures/output_action_digest.json")).unwrap();
+        let call = Uuid::parse_str(golden["call_id"].as_str().unwrap()).unwrap();
+        let command_arguments: Value = serde_json::from_str(
+            golden["valid_command"]["arguments_raw"].as_str().unwrap(),
+        )
+        .unwrap();
+        let cli_digest = golden["valid_command"]["digest"].as_str().unwrap();
         let cache = RedisCache::new(None, Duration::from_millis(25));
         let config = Config::default();
         let remote_cli = RemoteCliService::new(
@@ -801,7 +809,6 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         let chat = Uuid::now_v7();
         let input = Uuid::now_v7();
         let output = Uuid::now_v7();
-        let call = Uuid::now_v7();
         let now = chrono::Utc::now();
         sqlx::query("INSERT INTO chats(session_id,app_id,user_id,title,created_at,updated_at) VALUES($1,'cortex','owner','output action route test',$2,$2)")
             .bind(chat).bind(now).execute(&pool).await.unwrap();
@@ -815,7 +822,7 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         assert!(tools.set_pending(cortex_api::domain::models::tools::PendingTool {
             call_id: call,
             name: cortex_api::domain::models::tools::ToolName::RunCommand,
-            arguments: json!({"cwd":".","argv":["true"]}),
+            arguments: command_arguments,
         }));
         let (cancel, _) = watch::channel(false);
         let (stop_thinking, _) = watch::channel(false);
@@ -860,6 +867,7 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(first["data"]["action_digest"], cli_digest);
         let action_id = first["data"]["action_id"].as_str().unwrap();
         let (retry_status, retry) = json_req(
             &app,
@@ -901,8 +909,7 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         .await;
         assert_eq!(answer_status, StatusCode::OK);
         let claim_path = format!("{path}/{action_id}/claim");
-        let digest = first["data"]["action_digest"].as_str().unwrap();
-        let claim = json!({"call_id":call,"action_digest":digest});
+        let claim = json!({"call_id":call,"action_digest":cli_digest});
         let (claim_status, _) = json_req(
             &app,
             "POST",
