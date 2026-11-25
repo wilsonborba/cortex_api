@@ -780,10 +780,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "requires explicit global heavy/GPU locks; real local models and runtime"]
-    async fn gpu_model_router_acceptance_uncensored_official_t0_and_cancel() {
-        use futures_util::FutureExt;
+    async fn evaluation_model_router_setup()
+    -> (Config, Scheduler, Arc<PrismSupervisor>, Arc<ModelRouter>) {
         evaluation_resources_ok(7600)
             .expect("safe host resources before model use; MTP requires headroom");
         let available = std::net::TcpListener::bind("127.0.0.1:0").expect("free loopback port");
@@ -839,7 +837,247 @@ mod tests {
             queue.clone(),
             supervisor.clone(),
         ));
-        let router = Arc::new(ModelRouter::new(ollama, prism, queue));
+        let router = Arc::new(ModelRouter::new(ollama, prism, queue.clone()));
+        (config, queue, supervisor, router)
+    }
+
+    async fn evaluation_cancellation_case(
+        router: &Arc<ModelRouter>,
+        queue: &Scheduler,
+        supervisor: &Arc<PrismSupervisor>,
+        profile: ModelProfile,
+        owned_t0: &mut bool,
+    ) {
+        let cancel_output = evaluation_output(profile, false);
+        let (events, mut event_rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let cancel_call = router.call(
+            &cancel_output,
+            eval_input(
+                "Write a detailed explanation with many examples of Rust ownership and borrowing.",
+                vec![],
+                None,
+                false,
+            ),
+            events,
+            cancel_rx,
+        );
+        tokio::pin!(cancel_call);
+        let mut saw_cancel_token = false;
+        let mut saw_queued_wait = false;
+        let mut t1_events_open = true;
+        let mut t0_events_open = true;
+        let mut queued_registered = false;
+        let mut pressure_detected = false;
+        let mut cancel_result = None;
+        let mut queued_result = None;
+        let mut observation_monitor = tokio::time::interval(Duration::from_secs(5));
+        // First establish that the selected T1 profile really owns the slot
+        // and emits a token. Only then enqueue T0; otherwise a scheduler race
+        // can make the test observe T0 before Prism ever starts.
+        let t1_observation = tokio::time::timeout(Duration::from_secs(180), async {
+            while !saw_cancel_token && cancel_result.is_none() {
+                tokio::select! {
+                    biased;
+                    event = event_rx.recv(), if t1_events_open => {
+                        match event {
+                            Some(DriverEvent::Token { .. }) => saw_cancel_token = true,
+                            None => t1_events_open = false,
+                            _ => {}
+                        }
+                    }
+                    result = &mut cancel_call, if cancel_result.is_none() => cancel_result = Some(result),
+                    _ = observation_monitor.tick() => {
+                        if evaluation_resources_ok(700).is_err() {
+                            pressure_detected = true;
+                            let _ = cancel_tx.send(true);
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+
+        let t1_ready = t1_observation.is_ok()
+            && !pressure_detected
+            && saw_cancel_token
+            && cancel_result.is_none();
+        eprintln!(
+            "EVAL {}",
+            serde_json::json!({"case":"cancellation-t1-observation","profile":profile.id(),"t1_token_observed":saw_cancel_token,"observation_timed_out":t1_observation.is_err(),"resource_pressure":pressure_detected,"t1_finished_before_token":cancel_result.is_some(),"t1_result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err())),"t1_partial":cancel_result.as_ref().and_then(|result|result.as_ref().ok()).map(|outcome|outcome.text.as_str())})
+        );
+        if !t1_ready {
+            let _ = cancel_tx.send(true);
+            if cancel_result.is_none() {
+                match tokio::time::timeout(Duration::from_secs(90), cancel_call.as_mut()).await {
+                    Ok(result) => cancel_result = Some(result),
+                    Err(_) => {
+                        supervisor
+                            .stop()
+                            .await
+                            .expect("bounded owned Prism stop after missing T1 observation");
+                        cancel_result = Some(
+                            tokio::time::timeout(Duration::from_secs(60), cancel_call.as_mut())
+                                .await
+                                .expect("settle T1 after owned Prism teardown"),
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "EVAL {}",
+                serde_json::json!({"case":"cancellation-t1-settlement","profile":profile.id(),"result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err()))})
+            );
+            assert!(
+                t1_ready,
+                "T1 must emit a token and remain active before starting queued T0"
+            );
+        }
+
+        *owned_t0 = true;
+        let queued_output = evaluation_output(ModelProfile::CortexT0, false);
+        let (queued_events, mut queued_event_rx) = mpsc::unbounded_channel();
+        let (queued_cancel_tx, queued_cancel_rx) = watch::channel(false);
+        let queued_call = router.call(
+            &queued_output,
+            eval_input(
+                "In one sentence, define Rust ownership.",
+                vec![],
+                None,
+                false,
+            ),
+            queued_events,
+            queued_cancel_rx,
+        );
+        tokio::pin!(queued_call);
+        let queued_observation = tokio::time::timeout(Duration::from_secs(30), async {
+            while !saw_queued_wait && queued_result.is_none() {
+                tokio::select! {
+                    biased;
+                    event = queued_event_rx.recv(), if !saw_queued_wait && t0_events_open => {
+                        match event {
+                            Some(DriverEvent::Waiting) => {
+                                saw_queued_wait = true;
+                                queued_registered = queue.waiting_count() > 0;
+                            }
+                            None => t0_events_open = false,
+                            _ => {}
+                        }
+                    }
+                    result = &mut queued_call, if queued_result.is_none() => queued_result = Some(result),
+                    result = &mut cancel_call, if cancel_result.is_none() => cancel_result = Some(result),
+                    event = event_rx.recv(), if !saw_cancel_token && t1_events_open => {
+                        match event {
+                            Some(DriverEvent::Token { .. }) => saw_cancel_token = true,
+                            None => t1_events_open = false,
+                            _ => {}
+                        }
+                    }
+                    _ = observation_monitor.tick() => {
+                        if evaluation_resources_ok(700).is_err() {
+                            pressure_detected = true;
+                            let _ = cancel_tx.send(true);
+                            let _ = queued_cancel_tx.send(true);
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        eprintln!(
+            "EVAL {}",
+            serde_json::json!({"case":"cancellation-queue-observation","profile":profile.id(),"t1_token_observed":saw_cancel_token,"t0_waiting_observed":saw_queued_wait,"t0_registered_in_scheduler":queued_registered,"t0_observation_timed_out":queued_observation.is_err(),"resource_pressure":pressure_detected,"t1_finished_before_queue_observed":cancel_result.is_some(),"t1_result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err())),"t0_finished_before_wait_observed":queued_result.is_some(),"t0_result":queued_result.as_ref().map(|result|format!("{:?}",result.as_ref().err()))})
+        );
+        let _ = cancel_tx.send(true);
+        if pressure_detected {
+            let _ = queued_cancel_tx.send(true);
+        }
+        let drain = async {
+            if cancel_result.is_none() {
+                cancel_result = Some(cancel_call.as_mut().await);
+            }
+            if queued_result.is_none() {
+                queued_result = Some(queued_call.as_mut().await);
+            }
+        };
+        tokio::pin!(drain);
+        let mut drain_monitor = tokio::time::interval(Duration::from_secs(5));
+        let drained = tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                tokio::select! {
+                    _ = &mut drain => break,
+                    _ = drain_monitor.tick() => {
+                        if evaluation_resources_ok(700).is_err() {
+                            pressure_detected = true;
+                            let _ = cancel_tx.send(true);
+                            let _ = queued_cancel_tx.send(true);
+                            eprintln!("GUARD_STOP resource pressure while settling cancelled T1 and queued T0");
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .is_ok();
+        if !drained {
+            eprintln!(
+                "GUARD_STOP cancellation/queued-T0 drain exceeded 90 seconds; stopping only the owned Prism child"
+            );
+            supervisor
+                .stop()
+                .await
+                .expect("bounded owned Prism stop after drain timeout");
+            tokio::time::timeout(Duration::from_secs(60), async {
+                if cancel_result.is_none() {
+                    cancel_result = Some(cancel_call.as_mut().await);
+                }
+                if queued_result.is_none() {
+                    queued_result = Some(queued_call.as_mut().await);
+                }
+            })
+            .await
+            .expect("bounded model-future settlement after owned Prism stop");
+        }
+        let partial_result = cancel_result.expect("cancel call result collected");
+        let queued_result = queued_result.expect("queued call result collected");
+        eprintln!(
+            "EVAL {}",
+            serde_json::json!({"case":"cancellation-settlement","profile":profile.id(),"t1_result":format!("{:?}",partial_result.as_ref().err()),"t0_result":format!("{:?}",queued_result.as_ref().err()),"t1_partial":partial_result.as_ref().ok().map(|outcome|outcome.text.as_str()),"t0_text":queued_result.as_ref().ok().map(|outcome|outcome.text.as_str()),"drain_timed_out":!drained,"resource_pressure":pressure_detected})
+        );
+        assert!(
+            queued_observation.is_ok()
+                && !pressure_detected
+                && saw_cancel_token
+                && saw_queued_wait
+                && queued_registered,
+            "T1 token must precede an actually registered queued T0 before cancellation"
+        );
+        let partial = partial_result.expect("partial result survives cancellation");
+        assert_eq!(
+            partial.error,
+            Some(crate::domain::models::driver::DriverError::Cancelled)
+        );
+        assert!(!partial.text.is_empty());
+        assert!(partial.tool_request.is_none());
+        assert!(
+            supervisor.child.lock().await.is_none(),
+            "owned Prism must be reaped before permit release"
+        );
+        let queued = queued_result.expect("queued T0 runs after Prism teardown");
+        assert!(queued.error.is_none());
+        eprintln!(
+            "EVAL {}",
+            serde_json::json!({"case":"cancel-then-queued-t0","profile":profile.id(),"partial_text":partial.text,"partial_error":"cancelled","queued_t0_text":queued.text,"queued_after_teardown":true})
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit global heavy/GPU locks; real local models and runtime"]
+    async fn gpu_model_router_acceptance_uncensored_official_t0_and_cancel() {
+        use futures_util::FutureExt;
+        let (config, queue, supervisor, router) = evaluation_model_router_setup().await;
         let mut owned_t0 = false;
         let result = std::panic::AssertUnwindSafe(async {
             let mut quality_failures: Vec<String> = Vec::new();
@@ -1197,90 +1435,14 @@ mod tests {
             }
 
             for cancellation_profile in [ModelProfile::Bonsai25Uncensored, ModelProfile::Bonsai25Official] {
-            let cancel_output = evaluation_output(cancellation_profile, false);
-            let (events, mut event_rx) = mpsc::unbounded_channel();
-            let (cancel_tx, cancel_rx) = watch::channel(false);
-            let cancel_call = router.call(&cancel_output,
-                eval_input("Write a detailed explanation with many examples of Rust ownership and borrowing.", vec![], None, false),
-                events, cancel_rx);
-            tokio::pin!(cancel_call);
-            let queued_output = evaluation_output(ModelProfile::CortexT0, false);
-            let (queued_events, mut queued_event_rx) = mpsc::unbounded_channel();
-            let (queued_cancel_tx, queued_cancel_rx) = watch::channel(false);
-            let queued_call = router.call(&queued_output,
-                eval_input("In one sentence, define Rust ownership.", vec![], None, false),
-                queued_events, queued_cancel_rx);
-            tokio::pin!(queued_call);
-            let mut saw_cancel_token = false;
-            let mut saw_queued_wait = false;
-            let mut pressure_detected = false;
-            let mut cancel_result = None;
-            let mut queued_result = None;
-            let mut observation_monitor = tokio::time::interval(Duration::from_secs(5));
-            let observation = tokio::time::timeout(Duration::from_secs(180), async {
-                while !(saw_cancel_token && saw_queued_wait) && cancel_result.is_none() && queued_result.is_none() {
-                    tokio::select! {
-                        result = &mut cancel_call, if cancel_result.is_none() => cancel_result = Some(result),
-                        result = &mut queued_call, if queued_result.is_none() => queued_result = Some(result),
-                        event = event_rx.recv(), if !saw_cancel_token => {
-                            saw_cancel_token = matches!(event, Some(DriverEvent::Token { .. }));
-                        }
-                        event = queued_event_rx.recv(), if !saw_queued_wait => {
-                            saw_queued_wait = matches!(event, Some(DriverEvent::Waiting));
-                        }
-                        _ = observation_monitor.tick() => {
-                            if evaluation_resources_ok(700).is_err() {
-                                pressure_detected = true;
-                                let _ = cancel_tx.send(true);
-                                let _ = queued_cancel_tx.send(true);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }).await;
-            let _ = cancel_tx.send(true);
-            let drain = async {
-                if cancel_result.is_none() { cancel_result = Some(cancel_call.as_mut().await); }
-                if queued_result.is_none() { queued_result = Some(queued_call.as_mut().await); }
-            };
-            tokio::pin!(drain);
-            let mut drain_monitor = tokio::time::interval(Duration::from_secs(5));
-            let drained = tokio::time::timeout(Duration::from_secs(90), async {
-                loop {
-                    tokio::select! {
-                        _ = &mut drain => break,
-                        _ = drain_monitor.tick() => {
-                            if evaluation_resources_ok(700).is_err() {
-                                pressure_detected = true;
-                                let _ = cancel_tx.send(true);
-                                let _ = queued_cancel_tx.send(true);
-                                eprintln!("GUARD_STOP resource pressure while settling cancelled T1 and queued T0");
-                            }
-                        }
-                    }
-                }
-            }).await.is_ok();
-            if !drained {
-                eprintln!("GUARD_STOP cancellation/queued-T0 drain exceeded 90 seconds; stopping only the owned Prism child");
-                supervisor.stop().await.expect("bounded owned Prism stop after drain timeout");
-                tokio::time::timeout(Duration::from_secs(60), async {
-                    if cancel_result.is_none() { cancel_result = Some(cancel_call.as_mut().await); }
-                    if queued_result.is_none() { queued_result = Some(queued_call.as_mut().await); }
-                }).await.expect("bounded model-future settlement after owned Prism stop");
-            }
-            let partial_result = cancel_result.expect("cancel call result collected");
-            let queued_result = queued_result.expect("queued call result collected");
-            assert!(observation.is_ok() && !pressure_detected && saw_cancel_token && saw_queued_wait,
-                "both T1 token and queued T0 waiting state must be observed before cancellation");
-            let partial = partial_result.expect("partial result survives cancellation");
-            assert_eq!(partial.error, Some(crate::domain::models::driver::DriverError::Cancelled));
-            assert!(!partial.text.is_empty());
-            assert!(partial.tool_request.is_none());
-            assert!(supervisor.child.lock().await.is_none(), "owned Prism must be reaped before permit release");
-            let queued = queued_result.expect("queued T0 runs after Prism teardown");
-            assert!(queued.error.is_none());
-            eprintln!("EVAL {}", serde_json::json!({"case":"cancel-then-queued-t0","profile":cancellation_profile.id(),"partial_text":partial.text,"partial_error":"cancelled","queued_t0_text":queued.text,"queued_after_teardown":true}));
+                evaluation_cancellation_case(
+                    &router,
+                    &queue,
+                    &supervisor,
+                    cancellation_profile,
+                    &mut owned_t0,
+                )
+                .await;
             }
             eprintln!("QUALITY_FAILURES {}", serde_json::json!({"count":quality_failures.len(),"cases":&quality_failures}));
             assert!(quality_failures.is_empty(), "semantic quality criteria failed after all profiles and lifecycle cases; see QUALITY_FAILURES and preceding raw EVAL records");
@@ -1301,6 +1463,42 @@ mod tests {
         }.await;
         stop_result.expect("owned Prism cleanup");
         cleanup_state.expect("verify Ollama is empty or report preserved unexpected models");
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires separate explicit GPU authorization; runs only Official cancellation/queue case"]
+    async fn gpu_official_cancellation_queue_acceptance() {
+        use futures_util::FutureExt;
+
+        let (config, queue, supervisor, router) = evaluation_model_router_setup().await;
+        let mut owned_t0 = false;
+        let result = std::panic::AssertUnwindSafe(evaluation_cancellation_case(
+            &router,
+            &queue,
+            &supervisor,
+            ModelProfile::Bonsai25Official,
+            &mut owned_t0,
+        ))
+        .catch_unwind()
+        .await;
+
+        let stop_result = supervisor.stop().await;
+        let cleanup_state = async {
+            if owned_t0 {
+                let _ = unload_owned_t0(&config).await?;
+            }
+            let remaining = ollama_loaded(&config).await?;
+            if !remaining.is_empty() {
+                return Err(format!("Ollama models remain after owned cleanup; preserved without unloading: {remaining:?}"));
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        stop_result.expect("owned Official Prism cleanup");
+        cleanup_state.expect("verify Ollama is empty or preserve unexpected models");
         if let Err(panic) = result {
             std::panic::resume_unwind(panic);
         }
