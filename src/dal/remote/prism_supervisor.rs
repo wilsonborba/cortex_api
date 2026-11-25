@@ -475,6 +475,13 @@ mod tests {
                         if let Some(request) = tool_control.pending()
                             && !requests.iter().any(|seen: &PendingTool| seen.call_id == request.call_id)
                         {
+                            eprintln!("EVAL {}", serde_json::json!({"case":"synthetic-tool-request","name":request.name.as_str(),"arguments":request.arguments}));
+                            assert_eq!(request.name, ToolName::ViewFile, "reject unexpected tool before fixture response");
+                            assert_eq!(
+                                request.arguments,
+                                serde_json::json!({"path":"/evaluation-only/kite-204.txt"}),
+                                "reject unexpected tool arguments before fixture response"
+                            );
                             requests.push(request.clone());
                             tool_control.submit(ToolResult {
                                 call_id: request.call_id,
@@ -779,6 +786,7 @@ mod tests {
         let router = Arc::new(ModelRouter::new(ollama, prism, queue));
         let mut owned_t0 = false;
         let result = std::panic::AssertUnwindSafe(async {
+            let mut quality_failures: Vec<String> = Vec::new();
             let uncensored = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
             let original_question =
                 "According to the synthetic record for KITE-204, what status and retry count are recorded? Answer in one sentence.";
@@ -798,11 +806,38 @@ mod tests {
                 None,
             )
             .await;
-            assert!(!cold.text.trim().is_empty());
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-en-cold","profile":uncensored.model_id(),"text":cold.text,"error":cold.error.as_ref().map(|error| format!("{error:?}")),"ttft_ms":cold.usage.time_to_first_token_ms,"input_tokens":cold.usage.input_tokens,"output_tokens":cold.usage.output_tokens,"usage_measured":cold.usage_measured,"total_ms":cold.usage.total_ms,"tokens_per_second":cold.tokens_per_second}));
             assert_measured_answer(&cold);
-            assert!(cold.text.to_lowercase().contains("ready"));
-            assert!(cold.text.contains('2'));
-            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-en-cold","profile":uncensored.model_id(),"ttft_ms":cold.usage.time_to_first_token_ms,"input_tokens":cold.usage.input_tokens,"output_tokens":cold.usage.output_tokens,"usage_measured":cold.usage_measured,"total_ms":cold.usage.total_ms,"tokens_per_second":cold.tokens_per_second,"text":cold.text}));
+            if !(cold.text.to_lowercase().contains("ready") && cold.text.contains('2')) {
+                quality_failures.push("uncensored EN factual answer missed READY or retry_count=2".into());
+            }
+
+            let distractor_question = "According to this record, what are the status, retry count, and maintainer? If a field is absent, say so without guessing.";
+            let distractor_context = cortex_eval_context(
+                &config,
+                distractor_question,
+                vec![synthetic_evidence(
+                    "KITE-204 record with absent field",
+                    "Synthetic record KITE-204: status READY; retry_count 2; maintainer field not recorded.",
+                )],
+            );
+            let distractor = evaluation_thinking_answer(
+                &router,
+                &config,
+                &uncensored,
+                &distractor_context,
+                None,
+            ).await;
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-grounding-unsupported-field","text":distractor.text,"error":distractor.error.as_ref().map(|error|format!("{error:?}")),"usage_measured":distractor.usage_measured}));
+            assert_measured_answer(&distractor);
+            let unsupported_ack = ["not recorded", "not specified", "not provided", "unknown", "absent", "no maintainer"]
+                .iter().any(|phrase| distractor.text.to_lowercase().contains(*phrase));
+            if !(distractor.text.to_lowercase().contains("ready")
+                && distractor.text.contains('2')
+                && unsupported_ack)
+            {
+                quality_failures.push("uncensored answer failed to ground supported facts and acknowledge the absent maintainer field".into());
+            }
             let first_pid = supervisor.child.lock().await.as_ref().expect("owned uncensored child").pid;
             let first_start = process_start_ticks(first_pid).expect("read owned Prism process identity");
 
@@ -817,18 +852,15 @@ mod tests {
             )
             .await;
             let continued_answer = format!("{saved_prefix}{}", prefix.text);
-            assert!(
-                !prefix.text.trim().is_empty(),
-                "a prefix cut in the middle of the generated answer must produce visible continuation text"
-            );
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-prefix","saved_prefix":saved_prefix,"continuation_text":prefix.text,"combined_text":continued_answer,"error":prefix.error.as_ref().map(|error| format!("{error:?}")),"ttft_ms":prefix.usage.time_to_first_token_ms,"output_tokens":prefix.usage.output_tokens,"usage_measured":prefix.usage_measured,"total_ms":prefix.usage.total_ms,"tokens_per_second":prefix.tokens_per_second}));
             assert_measured_answer(&prefix);
-            assert!(continued_answer.to_lowercase().contains("ready"));
-            assert!(continued_answer.contains('2'));
+            if !(continued_answer.to_lowercase().contains("ready") && continued_answer.contains('2')) {
+                quality_failures.push("uncensored continuation omitted supported READY or retry_count=2".into());
+            }
             assert_eq!(supervisor.child.lock().await.as_ref().expect("same owned child").pid, first_pid,
                 "healthy same-profile calls reuse one process");
             assert_eq!(process_start_ticks(first_pid).as_deref(), Some(first_start.as_str()),
                 "same-profile calls preserve the original process instance");
-            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-prefix","ttft_ms":prefix.usage.time_to_first_token_ms,"output_tokens":prefix.usage.output_tokens,"usage_measured":prefix.usage_measured,"total_ms":prefix.usage.total_ms,"tokens_per_second":prefix.tokens_per_second,"text":prefix.text}));
 
             let json_context = cortex_eval_context(
                 &config,
@@ -847,9 +879,10 @@ mod tests {
             )
             .await;
             assert_measured_answer(&json);
-            let parsed: serde_json::Value = serde_json::from_str(json.text.trim()).expect("valid JSON answer");
-            assert_eq!(parsed["ok"], true); assert_eq!(parsed["count"], 3);
-            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-json","text":json.text,"usage_measured":json.usage_measured}));
+            let json_ok = serde_json::from_str::<serde_json::Value>(json.text.trim())
+                .is_ok_and(|parsed| parsed["ok"] == true && parsed["count"] == 3);
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-json","text":json.text,"valid_expected_json":json_ok,"usage_measured":json.usage_measured}));
+            if !json_ok { quality_failures.push("uncensored JSON did not match the requested schema and values".into()); }
 
             let tool_context = cortex_eval_context(
                 &config,
@@ -870,8 +903,8 @@ mod tests {
             assert_eq!(tool_requests[0].name, ToolName::ViewFile);
             assert_eq!(tool_requests[0].arguments["path"], "/evaluation-only/kite-204.txt");
             assert!(tool.usage_measured && tool.usage.output_tokens > 0 && tool.usage.total_ms > 0);
-            assert!(tool.text.to_lowercase().contains("ready") && tool.text.contains('2'));
             eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-tool-double","tool":tool_requests[0].name.as_str(),"arguments":tool_requests[0].arguments,"effects":"synthetic-only","text":tool.text,"usage_measured":tool.usage_measured}));
+            if !(tool.text.to_lowercase().contains("ready") && tool.text.contains('2')) { quality_failures.push("uncensored tool answer omitted fixture status or retry count".into()); }
 
             for (language, question, evidence) in [
                 (
@@ -906,13 +939,24 @@ mod tests {
                 assert_measured_answer(&outcome);
                 let han = outcome.text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count();
                 let thai = outcome.text.chars().filter(|c| ('\u{0e00}'..='\u{0e7f}').contains(c)).count();
-                eprintln!("EVAL {}", serde_json::json!({"case":"atomic-language","language":language,"han_codepoints":han,"thai_codepoints":thai,"text":outcome.text,"known_thai_mixed_chinese_is_quality_failure":language=="th" && han>0}));
                 assert!(outcome.error.is_none());
-                assert!(!outcome.text.trim().is_empty());
-                assert!(outcome.text.contains("None") || language == "th");
-                if language == "th" {
-                    assert!(han == 0 && thai > 0, "Thai response must use Thai script without Chinese; keep raw output in the log");
-                }
+                eprintln!("EVAL {}", serde_json::json!({"case":"atomic-language","language":language,"han_codepoints":han,"thai_codepoints":thai,"text":outcome.text,"known_thai_mixed_chinese_is_quality_failure":language=="th" && han>0}));
+                let language_ok = !outcome.text.trim().is_empty()
+                    && (outcome.text.contains("None") || language == "th")
+                    && (language != "th" || (han == 0 && thai > 0));
+                if !language_ok { quality_failures.push(format!("uncensored {language} answer failed the raw-language/content criteria")); }
+            }
+            let uncensored_pt_context = cortex_eval_context(
+                &config,
+                "Segundo a evidência sintética, qual é o status do registro KITE-204 e qual é a contagem de tentativas? Responda em português brasileiro.",
+                vec![synthetic_evidence("Registro KITE-204", "Registro sintético KITE-204: status READY; retry_count 2.")],
+            );
+            let uncensored_pt = evaluation_thinking_answer(&router, &config, &uncensored, &uncensored_pt_context, None).await;
+            assert_measured_answer(&uncensored_pt);
+            eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-pt-br","text":uncensored_pt.text,"usage_measured":uncensored_pt.usage_measured}));
+            let pt = uncensored_pt.text.to_lowercase();
+            if !(pt.contains("ready") && uncensored_pt.text.contains('2') && (pt.contains("status") || pt.contains("situação"))) {
+                quality_failures.push("uncensored PT-BR answer missed the supported status/count or language cue".into());
             }
 
             let official = evaluation_output(ModelProfile::Bonsai25Official, false);
@@ -934,7 +978,10 @@ mod tests {
             if official_pid != first_pid {
                 assert!(!process_group_exists(first_pid), "previous Prism process group must be gone");
             }
-            eprintln!("EVAL {}", serde_json::json!({"case":"official-en-switch","profile":official.model_id(),"pid":official_pid,"ttft_ms":answer.usage.time_to_first_token_ms,"total_ms":answer.usage.total_ms,"text":answer.text}));
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-en-switch","profile":official.model_id(),"pid":official_pid,"ttft_ms":answer.usage.time_to_first_token_ms,"total_ms":answer.usage.total_ms,"text":answer.text,"error":answer.error.as_ref().map(|error|format!("{error:?}"))}));
+            if !(answer.text.to_lowercase().contains("ready") && answer.text.contains('2')) {
+                quality_failures.push("official EN factual answer missed READY or retry_count=2".into());
+            }
             drop(official_child);
             let official_saved_prefix = middle_word_prefix(&answer.text)
                 .expect("official generated answer has a valid middle word boundary");
@@ -947,15 +994,12 @@ mod tests {
             )
             .await;
             let official_continued = format!("{official_saved_prefix}{}", official_prefix.text);
-            assert!(
-                !official_prefix.text.trim().is_empty(),
-                "a prefix cut in the middle of the official answer must produce visible continuation text"
-            );
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-prefix","saved_prefix":official_saved_prefix,"continuation_text":official_prefix.text,"combined_text":official_continued,"error":official_prefix.error.as_ref().map(|error|format!("{error:?}")),"ttft_ms":official_prefix.usage.time_to_first_token_ms,"usage_measured":official_prefix.usage_measured}));
             assert_measured_answer(&official_prefix);
-            assert!(official_continued.to_lowercase().contains("ready"));
-            assert!(official_continued.contains('2'));
+            if !(official_continued.to_lowercase().contains("ready") && official_continued.contains('2')) {
+                quality_failures.push("official continuation omitted supported READY or retry_count=2".into());
+            }
             assert_eq!(supervisor.child.lock().await.as_ref().expect("official same-profile child").pid, official_pid);
-            eprintln!("EVAL {}", serde_json::json!({"case":"official-prefix","ttft_ms":official_prefix.usage.time_to_first_token_ms,"usage_measured":official_prefix.usage_measured,"text":official_prefix.text}));
             let (official_tool, official_tool_requests) = evaluation_thinking_tool_double(
                 &router,
                 &config,
@@ -967,7 +1011,32 @@ mod tests {
             assert_eq!(official_tool_requests[0].name, ToolName::ViewFile);
             assert_eq!(official_tool_requests[0].arguments["path"], "/evaluation-only/kite-204.txt");
             assert!(official_tool.usage_measured && official_tool.usage.output_tokens > 0);
-            eprintln!("EVAL {}", serde_json::json!({"case":"official-tool-double","tool":official_tool_requests[0].name.as_str(),"arguments":official_tool_requests[0].arguments,"effects":"synthetic-only","usage_measured":official_tool.usage_measured}));
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-tool-double","tool":official_tool_requests[0].name.as_str(),"arguments":official_tool_requests[0].arguments,"effects":"synthetic-only","text":official_tool.text,"usage_measured":official_tool.usage_measured}));
+            if !(official_tool.text.to_lowercase().contains("ready") && official_tool.text.contains('2')) { quality_failures.push("official tool answer omitted fixture status or retry count".into()); }
+            let official_json = evaluation_thinking_answer(
+                &router,
+                &config,
+                &official,
+                &json_context,
+                None,
+            ).await;
+            assert_measured_answer(&official_json);
+            let official_json_ok = serde_json::from_str::<serde_json::Value>(official_json.text.trim())
+                .is_ok_and(|parsed| parsed["ok"] == true && parsed["count"] == 3);
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-json","text":official_json.text,"valid_expected_json":official_json_ok,"usage_measured":official_json.usage_measured}));
+            if !official_json_ok { quality_failures.push("official JSON did not match the requested schema and values".into()); }
+            let pt_context = cortex_eval_context(
+                &config,
+                "Segundo a evidência sintética, qual é o status do registro KITE-204 e qual é a contagem de tentativas? Responda em português brasileiro.",
+                vec![synthetic_evidence("Registro KITE-204", "Registro sintético KITE-204: status READY; retry_count 2.")],
+            );
+            let official_pt = evaluation_thinking_answer(&router, &config, &official, &pt_context, None).await;
+            assert_measured_answer(&official_pt);
+            eprintln!("EVAL {}", serde_json::json!({"case":"official-pt-br","text":official_pt.text,"usage_measured":official_pt.usage_measured}));
+            let pt = official_pt.text.to_lowercase();
+            if !(pt.contains("ready") && official_pt.text.contains('2') && (pt.contains("status") || pt.contains("situação"))) {
+                quality_failures.push("official PT-BR answer missed the supported status/count or language cue".into());
+            }
             let thai_context = cortex_eval_context(
                 &config,
                 "ตอบเป็นภาษาไทยเท่านั้น: ตามหลักฐานสังเคราะห์ Option ของ Rust หมายถึงค่าไม่อยู่เมื่อใด",
@@ -989,7 +1058,7 @@ mod tests {
             let official_thai_chars = official_thai.text.chars().filter(|c| ('\u{0e00}'..='\u{0e7f}').contains(c)).count();
             let official_inspection = official_thai.inspection.as_ref().map(|value| (value.reason.clone(), value.tokens.len()));
             eprintln!("EVAL {}", serde_json::json!({"case":"official-thai-raw","han_codepoints":official_han,"thai_codepoints":official_thai_chars,"inspection":official_inspection,"usage_measured":official_thai.usage_measured,"text":official_thai.text,"postprocessing":false}));
-            assert!(official_han == 0 && official_thai_chars > 0, "Official Thai response must use Thai script without Chinese");
+            if !(official_han == 0 && official_thai_chars > 0) { quality_failures.push("official Thai raw answer was not Thai-only script".into()); }
 
             // Load the previously empty Ollama T0 vision model only through the router.
             let image = {
@@ -1065,8 +1134,11 @@ mod tests {
             )
             .await;
             assert_measured_answer(&grounded);
-            assert!(grounded.text.to_lowercase().contains("red") && grounded.text.to_lowercase().contains("green") && grounded.text.to_lowercase().contains("blue"));
             eprintln!("EVAL {}", serde_json::json!({"case":"t0-prepass-to-t1-text","profile":text_profile.model_id(),"images_sent_to_t1":0,"text":grounded.text,"usage_measured":grounded.usage_measured}));
+            let grounded_colors = grounded.text.to_lowercase();
+            if !(grounded_colors.contains("red") && grounded_colors.contains("green") && grounded_colors.contains("blue")) {
+                quality_failures.push("T0 image-prepass/T1 text answer omitted one or more supported color bands".into());
+            }
 
             for cancellation_profile in [ModelProfile::Bonsai25Uncensored, ModelProfile::Bonsai25Official] {
             let cancel_output = evaluation_output(cancellation_profile, false);
@@ -1154,6 +1226,8 @@ mod tests {
             assert!(queued.error.is_none());
             eprintln!("EVAL {}", serde_json::json!({"case":"cancel-then-queued-t0","profile":cancellation_profile.id(),"partial_text":partial.text,"partial_error":"cancelled","queued_t0_text":queued.text,"queued_after_teardown":true}));
             }
+            eprintln!("QUALITY_FAILURES {}", serde_json::json!({"count":quality_failures.len(),"cases":&quality_failures}));
+            assert!(quality_failures.is_empty(), "semantic quality criteria failed after all profiles and lifecycle cases; see QUALITY_FAILURES and preceding raw EVAL records");
         }).catch_unwind().await;
 
         // Cleanup only this supervisor child. T0 started empty by the preflight;
