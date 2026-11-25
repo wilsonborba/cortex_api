@@ -66,17 +66,16 @@ impl PrismSupervisor {
             .ok_or(DriverError::InvalidInput)?;
         let expected_model_hash = profile.artifact_sha256().ok_or(DriverError::InvalidInput)?;
         let mut slot = self.child.lock().await;
-        if let Some(owned) = slot.as_mut() {
-            if owned.profile == profile
-                && !owned.stopping
-                && owned
-                    .child
-                    .try_wait()
-                    .map_err(|_| DriverError::Ollama)?
-                    .is_none()
-            {
-                return Ok(());
-            }
+        if let Some(owned) = slot.as_mut()
+            && owned.profile == profile
+            && !owned.stopping
+            && owned
+                .child
+                .try_wait()
+                .map_err(|_| DriverError::Ollama)?
+                .is_none()
+        {
+            return Ok(());
         }
         stop_owned(&mut slot).await?;
         let runtime = config.prism_server_path.clone();
@@ -299,7 +298,9 @@ mod tests {
                 driver::{CallInput, DriverEvent, ModelDriver, OutputModel},
                 identity::Caller,
                 model_profile::ModelProfile,
-                usage::{CallUsage, LedgerUnavailable, Pending, Share, Usage, UsageLedger, WaitingCall},
+                usage::{
+                    CallUsage, LedgerUnavailable, Pending, Share, Usage, UsageLedger, WaitingCall,
+                },
             },
             services::balancer::Scheduler,
         },
@@ -311,18 +312,36 @@ mod tests {
 
     struct EvaluationLedger;
     impl UsageLedger for EvaluationLedger {
-        fn share<'a>(&'a self, _: &'a str, _: DateTime<Utc>) -> Pending<'a, Result<Share, LedgerUnavailable>> {
-            Box::pin(async { Ok(Share { usage: Usage::default(), weight: 1.0, loyalty: None }) })
+        fn share<'a>(
+            &'a self,
+            _: &'a str,
+            _: DateTime<Utc>,
+        ) -> Pending<'a, Result<Share, LedgerUnavailable>> {
+            Box::pin(async {
+                Ok(Share {
+                    usage: Usage::default(),
+                    weight: 1.0,
+                    loyalty: None,
+                })
+            })
         }
         fn record<'a>(&'a self, _: CallUsage) -> Pending<'a, Result<(), LedgerUnavailable>> {
             Box::pin(async { Ok(()) })
         }
-        fn waiting<'a>(&'a self, _: Vec<WaitingCall>) -> Pending<'a, Result<(), LedgerUnavailable>> {
+        fn waiting<'a>(
+            &'a self,
+            _: Vec<WaitingCall>,
+        ) -> Pending<'a, Result<(), LedgerUnavailable>> {
             Box::pin(async { Ok(()) })
         }
     }
 
-    fn eval_input(prompt: &str, images: Vec<String>, prefix: Option<String>, allow_tools: bool) -> CallInput {
+    fn eval_input(
+        prompt: &str,
+        images: Vec<String>,
+        prefix: Option<String>,
+        allow_tools: bool,
+    ) -> CallInput {
         CallInput {
             role: "answer".into(),
             system: "Be accurate, concise, and follow the requested language and format.".into(),
@@ -338,13 +357,16 @@ mod tests {
     }
 
     fn cortex_eval_input(config: &Config, question: &str) -> CallInput {
-        let assembled = crate::domain::services::context::assemble(config,
+        let assembled = crate::domain::services::context::assemble(
+            config,
             crate::domain::models::context::ContextInput {
                 context_tokens: Some(8192),
                 output_tokens: Some(256),
                 question: question.into(),
                 ..Default::default()
-            }).expect("production Cortex context assembly");
+            },
+        )
+        .expect("production Cortex context assembly");
         CallInput {
             role: "answer".into(),
             system: assembled.system,
@@ -361,19 +383,45 @@ mod tests {
 
     fn evaluation_resources_ok(min_gpu_free_mib: u64) -> Result<(), String> {
         let mem = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
-        let available_kib = mem.lines().find_map(|line| line.strip_prefix("MemAvailable:")
-            .and_then(|value| value.split_whitespace().next())
-            .and_then(|value| value.parse::<u64>().ok())).ok_or("MemAvailable missing")?;
-        if available_kib < 4 * 1024 * 1024 { return Err(format!("MemAvailable below 4 GiB: {available_kib} KiB")); }
-        let load = std::fs::read_to_string("/proc/loadavg").map_err(|e| e.to_string())?
-            .split_whitespace().next().and_then(|value| value.parse::<f64>().ok()).ok_or("loadavg missing")?;
-        if load > 24.0 { return Err(format!("load average too high: {load}")); }
+        let available_kib = mem
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("MemAvailable:")
+                    .and_then(|value| value.split_whitespace().next())
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .ok_or("MemAvailable missing")?;
+        if available_kib < 4 * 1024 * 1024 {
+            return Err(format!("MemAvailable below 4 GiB: {available_kib} KiB"));
+        }
+        let load = std::fs::read_to_string("/proc/loadavg")
+            .map_err(|e| e.to_string())?
+            .split_whitespace()
+            .next()
+            .and_then(|value| value.parse::<f64>().ok())
+            .ok_or("loadavg missing")?;
+        if load > 24.0 {
+            return Err(format!("load average too high: {load}"));
+        }
         let gpu = std::process::Command::new("nvidia-smi")
             .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-            .output().map_err(|e| e.to_string())?;
-        if !gpu.status.success() { return Err(format!("nvidia-smi failed: {}", String::from_utf8_lossy(&gpu.stderr))); }
-        let free_mib = String::from_utf8_lossy(&gpu.stdout).trim().parse::<u64>().map_err(|e| e.to_string())?;
-        if free_mib < min_gpu_free_mib { return Err(format!("GPU free VRAM below {min_gpu_free_mib} MiB: {free_mib} MiB")); }
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !gpu.status.success() {
+            return Err(format!(
+                "nvidia-smi failed: {}",
+                String::from_utf8_lossy(&gpu.stderr)
+            ));
+        }
+        let free_mib = String::from_utf8_lossy(&gpu.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| e.to_string())?;
+        if free_mib < min_gpu_free_mib {
+            return Err(format!(
+                "GPU free VRAM below {min_gpu_free_mib} MiB: {free_mib} MiB"
+            ));
+        }
         eprintln!("GUARD mem_available_kib={available_kib} load1={load} gpu_free_mib={free_mib}");
         Ok(())
     }
@@ -384,11 +432,19 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(10))
-            .build().map_err(|e| e.to_string())?;
+            .build()
+            .map_err(|e| e.to_string())?;
         let response = client
-            .get(format!("{}/api/ps", config.ollama_url.trim_end_matches('/')))
-            .send().await.map_err(|e| e.to_string())?;
-        if !response.status().is_success() { return Err(format!("Ollama /api/ps status {}", response.status())); }
+            .get(format!(
+                "{}/api/ps",
+                config.ollama_url.trim_end_matches('/')
+            ))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("Ollama /api/ps status {}", response.status()));
+        }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -399,13 +455,23 @@ mod tests {
             bytes.extend_from_slice(&chunk);
         }
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        Ok(value.get("models").and_then(serde_json::Value::as_array).ok_or("Ollama models missing")?
-            .iter().filter_map(|item| item.get("name").and_then(serde_json::Value::as_str).map(str::to_owned)).collect())
+        Ok(value
+            .get("models")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("Ollama models missing")?
+            .iter()
+            .filter_map(|item| {
+                item.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect())
     }
 
     async fn unload_owned_t0(config: &Config) -> Result<bool, String> {
         let loaded = ollama_loaded(config).await?;
-        if loaded.len() != 1 || (loaded[0] != config.text_model && loaded[0] != config.vision_model) {
+        if loaded.len() != 1 || (loaded[0] != config.text_model && loaded[0] != config.vision_model)
+        {
             return Ok(false);
         }
         let client = reqwest::Client::builder()
@@ -413,14 +479,24 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(10))
-            .build().map_err(|e| e.to_string())?;
+            .build()
+            .map_err(|e| e.to_string())?;
         let response = client
-            .post(format!("{}/api/generate", config.ollama_url.trim_end_matches('/')))
+            .post(format!(
+                "{}/api/generate",
+                config.ollama_url.trim_end_matches('/')
+            ))
             .json(&serde_json::json!({"model":loaded[0],"keep_alive":0,"stream":false,"prompt":""}))
-            .send().await.map_err(|e| e.to_string())?;
-        if !response.status().is_success() { return Err(format!("Ollama unload status {}", response.status())); }
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("Ollama unload status {}", response.status()));
+        }
         for _ in 0..30 {
-            if ollama_loaded(config).await?.is_empty() { return Ok(true); }
+            if ollama_loaded(config).await?.is_empty() {
+                return Ok(true);
+            }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         Err("owned T0 model did not unload within 30 seconds".into())
@@ -428,14 +504,24 @@ mod tests {
 
     fn evaluation_output(profile: ModelProfile, has_images: bool) -> OutputModel {
         OutputModel::for_profile(
-            &Caller { app_id: "bonsai-eval".into(), user_id: Some("local-eval".into()), is_admin: false },
-            uuid::Uuid::now_v7(), profile, has_images,
+            &Caller {
+                app_id: "bonsai-eval".into(),
+                user_id: Some("local-eval".into()),
+                is_admin: false,
+            },
+            uuid::Uuid::now_v7(),
+            profile,
+            has_images,
         )
     }
 
     fn process_start_ticks(pid: u32) -> Option<String> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(str::to_owned)
+        stat.rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(19)
+            .map(str::to_owned)
     }
 
     async fn evaluation_call(
@@ -468,46 +554,98 @@ mod tests {
     }
 
     fn assert_measured_answer(outcome: &crate::domain::models::driver::CallOutcome) {
-        assert!(outcome.error.is_none(), "provider returned an answer error: {:?}", outcome.error);
-        assert!(outcome.usage_measured, "provider usage must include both prompt and completion tokens");
-        assert!(outcome.usage.input_tokens > 0 && outcome.usage.output_tokens > 0,
-            "measured input/output token counts must be nonzero");
-        let ttft = outcome.usage.time_to_first_token_ms.expect("answer TTFT is available");
-        assert!(ttft <= outcome.usage.total_ms, "TTFT cannot exceed total elapsed time");
-        assert!(outcome.tokens_per_second.is_some_and(|value| value.is_finite() && value > 0.0),
-            "decode throughput must be measurable for a nonempty answer");
-        let inspection = outcome.inspection.as_ref().expect("answer inspection is present");
-        assert!(inspection.matches(&outcome.text), "inspection/logprobs must cover the complete answer; reason={:?}", inspection.reason);
+        assert!(
+            outcome.error.is_none(),
+            "provider returned an answer error: {:?}",
+            outcome.error
+        );
+        assert!(
+            outcome.usage_measured,
+            "provider usage must include both prompt and completion tokens"
+        );
+        assert!(
+            outcome.usage.input_tokens > 0 && outcome.usage.output_tokens > 0,
+            "measured input/output token counts must be nonzero"
+        );
+        let ttft = outcome
+            .usage
+            .time_to_first_token_ms
+            .expect("answer TTFT is available");
+        assert!(
+            ttft <= outcome.usage.total_ms,
+            "TTFT cannot exceed total elapsed time"
+        );
+        assert!(
+            outcome
+                .tokens_per_second
+                .is_some_and(|value| value.is_finite() && value > 0.0),
+            "decode throughput must be measurable for a nonempty answer"
+        );
+        let inspection = outcome
+            .inspection
+            .as_ref()
+            .expect("answer inspection is present");
+        assert!(
+            inspection.matches(&outcome.text),
+            "inspection/logprobs must cover the complete answer; reason={:?}",
+            inspection.reason
+        );
     }
 
     #[tokio::test]
     #[ignore = "requires explicit global heavy/GPU locks; real local models and runtime"]
     async fn gpu_model_router_acceptance_uncensored_official_t0_and_cancel() {
         use futures_util::FutureExt;
-        evaluation_resources_ok(7600).expect("safe host resources before model use; MTP requires headroom");
-        let mut config = Config::default();
-        config.bonsai_enabled = true;
-        config.prism_server_path = std::env::var("CORTEX_TEST_PRISM_SERVER").expect("runner pins CORTEX_TEST_PRISM_SERVER").into();
-        config.bonsai_model_directory = std::env::var("CORTEX_TEST_BONSAI_DIR").expect("runner pins CORTEX_TEST_BONSAI_DIR").into();
-        config.ollama_url = std::env::var("CORTEX_TEST_OLLAMA_URL").expect("runner pins CORTEX_TEST_OLLAMA_URL");
+        evaluation_resources_ok(7600)
+            .expect("safe host resources before model use; MTP requires headroom");
         let available = std::net::TcpListener::bind("127.0.0.1:0").expect("free loopback port");
         let port = available.local_addr().unwrap().port();
         drop(available);
-        config.prism_url = format!("http://127.0.0.1:{port}");
+        let config = Config {
+            bonsai_enabled: true,
+            prism_server_path: std::env::var("CORTEX_TEST_PRISM_SERVER")
+                .expect("runner pins CORTEX_TEST_PRISM_SERVER")
+                .into(),
+            bonsai_model_directory: std::env::var("CORTEX_TEST_BONSAI_DIR")
+                .expect("runner pins CORTEX_TEST_BONSAI_DIR")
+                .into(),
+            ollama_url: std::env::var("CORTEX_TEST_OLLAMA_URL")
+                .expect("runner pins CORTEX_TEST_OLLAMA_URL"),
+            prism_url: format!("http://127.0.0.1:{port}"),
+            ..Config::default()
+        };
         assert!(config.prism_url_is_loopback());
-        assert!(ollama_loaded(&config).await.expect("Ollama preflight").is_empty(),
-            "pre-existing Ollama models: do not unload another user's work");
+        assert!(
+            ollama_loaded(&config)
+                .await
+                .expect("Ollama preflight")
+                .is_empty(),
+            "pre-existing Ollama models: do not unload another user's work"
+        );
         let apps = std::process::Command::new("nvidia-smi")
             .args(["--query-compute-apps=pid,name", "--format=csv,noheader"])
-            .output().expect("nvidia-smi compute-process preflight");
-        assert!(apps.status.success(), "nvidia-smi failed: {}", String::from_utf8_lossy(&apps.stderr));
-        assert!(String::from_utf8_lossy(&apps.stdout).trim().is_empty(),
-            "GPU compute process already active; do not disturb it");
+            .output()
+            .expect("nvidia-smi compute-process preflight");
+        assert!(
+            apps.status.success(),
+            "nvidia-smi failed: {}",
+            String::from_utf8_lossy(&apps.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&apps.stdout).trim().is_empty(),
+            "GPU compute process already active; do not disturb it"
+        );
 
         let queue = Scheduler::new(Arc::new(EvaluationLedger));
         let supervisor = Arc::new(PrismSupervisor::new());
-        let ollama = Arc::new(Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()));
-        let prism = Arc::new(Prism::managed(config.clone(), queue.clone(), supervisor.clone()));
+        let ollama = Arc::new(
+            Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()),
+        );
+        let prism = Arc::new(Prism::managed(
+            config.clone(),
+            queue.clone(),
+            supervisor.clone(),
+        ));
         let router = Arc::new(ModelRouter::new(ollama, prism, queue));
         let mut owned_t0 = false;
         let result = std::panic::AssertUnwindSafe(async {
@@ -616,34 +754,36 @@ mod tests {
             let vision = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
             let thinking = crate::domain::services::thinking::Thinking::new(&config, router.clone());
             let (events, receiver, event_task) = crate::domain::services::events::channel(&config, None);
-            let (vision_cancel_tx, cancel) = watch::channel(false);
-            let vision_call = thinking.describe_images_for_text_profile(
-                &vision,
-                "Describe the visible image briefly, including its colors.",
-                &[],
-                vec![image],
-                None,
-                &events,
-                cancel,
-            );
-            tokio::pin!(vision_call);
-            let vision_deadline = tokio::time::sleep(Duration::from_secs(240));
-            tokio::pin!(vision_deadline);
-            let mut vision_monitor = tokio::time::interval(Duration::from_secs(5));
-            let mut pressure_cancelled_vision = false;
-            let vision_result = loop {
-                tokio::select! {
-                    result = &mut vision_call => break result,
-                    _ = vision_monitor.tick() => {
-                        if evaluation_resources_ok(700).is_err() && !pressure_cancelled_vision {
-                            pressure_cancelled_vision = true;
-                            let _ = vision_cancel_tx.send(true);
+            let vision_result = {
+                let (vision_cancel_tx, cancel) = watch::channel(false);
+                let vision_call = thinking.describe_images_for_text_profile(
+                    &vision,
+                    "Describe the visible image briefly, including its colors.",
+                    &[],
+                    vec![image],
+                    None,
+                    &events,
+                    cancel,
+                );
+                tokio::pin!(vision_call);
+                let vision_deadline = tokio::time::sleep(Duration::from_secs(240));
+                tokio::pin!(vision_deadline);
+                let mut vision_monitor = tokio::time::interval(Duration::from_secs(5));
+                let mut pressure_cancelled_vision = false;
+                loop {
+                    tokio::select! {
+                        result = &mut vision_call => break result,
+                        _ = vision_monitor.tick() => {
+                            if evaluation_resources_ok(700).is_err() && !pressure_cancelled_vision {
+                                pressure_cancelled_vision = true;
+                                let _ = vision_cancel_tx.send(true);
+                            }
                         }
-                    }
-                    _ = &mut vision_deadline => {
-                        let _ = vision_cancel_tx.send(true);
-                        break tokio::time::timeout(Duration::from_secs(60), &mut vision_call)
-                            .await.expect("bounded T0 prepass cancellation");
+                        _ = &mut vision_deadline => {
+                            let _ = vision_cancel_tx.send(true);
+                            break tokio::time::timeout(Duration::from_secs(60), &mut vision_call)
+                                .await.expect("bounded T0 prepass cancellation");
+                        }
                     }
                 }
             };

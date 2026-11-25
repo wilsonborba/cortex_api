@@ -2000,7 +2000,9 @@ async fn continue_a_saved_answer_from_a_recorded_alternative() {
 async fn cancelled_stream_persists_partial_answer_text() {
     dotenvy::dotenv().ok();
     let Some((_, cache)) = RedisCache::from_test_environment() else {
-        eprintln!("Skipping cancelled_stream_persists_partial_answer_text: CORTEX_TEST_REDIS_URL is not set");
+        eprintln!(
+            "Skipping cancelled_stream_persists_partial_answer_text: CORTEX_TEST_REDIS_URL is not set"
+        );
         return;
     };
     let admin = database::connect(Target::Test).await.unwrap();
@@ -2030,9 +2032,19 @@ async fn cancelled_stream_persists_partial_answer_text() {
         loop {
             if let Some(end) = buf.find("\n\n") {
                 let block: String = buf.drain(..end + 2).collect();
-                let field = |name: &str| block.lines().find_map(|line| line.strip_prefix(name).map(str::to_owned));
-                if let (Some(id), Some(event), Some(data)) = (field("id: "), field("event: "), field("data: ")) {
-                    return Some((id.parse().unwrap(), event, serde_json::from_str(&data).unwrap()));
+                let field = |name: &str| {
+                    block
+                        .lines()
+                        .find_map(|line| line.strip_prefix(name).map(str::to_owned))
+                };
+                if let (Some(id), Some(event), Some(data)) =
+                    (field("id: "), field("event: "), field("data: "))
+                {
+                    return Some((
+                        id.parse().unwrap(),
+                        event,
+                        serde_json::from_str(&data).unwrap(),
+                    ));
                 }
             }
             let chunk = stream.next().await?.ok()?;
@@ -2086,16 +2098,21 @@ async fn cancelled_stream_persists_partial_answer_text() {
     assert_eq!(cancel.status(), StatusCode::OK);
     while read_partial_frame(&mut stream, &mut buffer).await.is_some() {}
 
-    let (status, text): (String, String) = sqlx::query_as(
-        "SELECT status, text FROM chat_outputs WHERE output_id=$1",
-    )
-    .bind(output_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (status, text): (String, String) =
+        sqlx::query_as("SELECT status, text FROM chat_outputs WHERE output_id=$1")
+            .bind(output_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(status, "cancelled");
-    assert!(!text.trim().is_empty(), "partial answer text remains attached to the cancelled output");
-    assert!(text.starts_with("w0 "), "persisted text is the streamed partial answer: {text}");
+    assert!(
+        !text.trim().is_empty(),
+        "partial answer text remains attached to the cancelled output"
+    );
+    assert!(
+        text.starts_with("w0 "),
+        "persisted text is the streamed partial answer: {text}"
+    );
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await

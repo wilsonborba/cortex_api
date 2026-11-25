@@ -198,6 +198,7 @@ impl Thinking {
 
     /// Describe images for a text-only profile using the existing T0 vision model.
     /// The returned call is recorded separately from T1 text calls.
+    #[allow(clippy::too_many_arguments)] // Reuses explicit model, context, budget, event, and cancel inputs.
     pub async fn describe_images_for_text_profile(
         &self,
         model: &OutputModel,
@@ -651,7 +652,9 @@ mod child_budget_tests {
             _cancel: watch::Receiver<bool>,
         ) -> crate::domain::models::usage::Pending<'a, Result<CallOutcome, DriverError>> {
             Box::pin(async move {
-                let _ = events.send(DriverEvent::ModelLoading { model: "synthetic-t0".into() });
+                let _ = events.send(DriverEvent::ModelLoading {
+                    model: "synthetic-t0".into(),
+                });
                 *self.profile.lock().unwrap() = Some(output.profile());
                 let role = input.role.clone();
                 let model = output.model_id().to_owned();

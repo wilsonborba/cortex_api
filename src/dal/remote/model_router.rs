@@ -43,7 +43,15 @@ impl ModelDriver for ModelRouter {
                 let _ = events.send(DriverEvent::Waiting);
                 let permit = tokio::select! {
                     biased;
-                    _ = async { loop { if *cancel.borrow() { return; } if cancel.changed().await.is_err() { std::future::pending::<()>().await; } } } => return Err(DriverError::Cancelled),
+                    _ = async {
+                        loop {
+                            if *cancel.borrow() {
+                                return;
+                            } else if cancel.changed().await.is_err() {
+                                std::future::pending::<()>().await;
+                            }
+                        }
+                    } => return Err(DriverError::Cancelled),
                     p = self.queue.acquire(output.actor.clone(), output.output_id) => p.map_err(DriverError::Queue)?,
                 };
                 self.ollama

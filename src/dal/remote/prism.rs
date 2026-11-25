@@ -50,6 +50,30 @@ struct GeneratedAnswer {
     tool_request: Option<crate::domain::models::tools::ToolRequest>,
     probabilities: bool,
     error: Option<DriverError>,
+    tokens_per_second: Option<f64>,
+}
+
+fn validated_decode_rate(timings: &Value, completion_tokens: Option<u64>) -> Option<f64> {
+    let predicted_tokens = timings.get("predicted_n")?.as_u64()?;
+    if !(1..=8192).contains(&predicted_tokens)
+        || completion_tokens.is_some_and(|tokens| tokens != predicted_tokens)
+    {
+        return None;
+    }
+    let predicted_ms = timings.get("predicted_ms")?.as_f64()?;
+    let reported_rate = timings.get("predicted_per_second")?.as_f64()?;
+    if !predicted_ms.is_finite()
+        || !(0.0..=3_600_000.0).contains(&predicted_ms)
+        || predicted_ms == 0.0
+        || !reported_rate.is_finite()
+        || !(0.0..=1_000_000.0).contains(&reported_rate)
+        || reported_rate == 0.0
+    {
+        return None;
+    }
+    let calculated_rate = predicted_tokens as f64 * 1000.0 / predicted_ms;
+    ((reported_rate - calculated_rate).abs() <= (calculated_rate * 0.1).max(0.25))
+        .then_some(reported_rate)
 }
 
 impl Prism {
@@ -263,6 +287,7 @@ impl Prism {
                 let mut first_ms = None;
                 let mut prompt_tokens = None;
                 let mut completion_tokens = None;
+                let mut tokens_per_second = None;
                 let mut inspection = crate::domain::models::inspection::InspectionCapture::default();
                 let mut calls = BTreeMap::<u64, (String, String, String)>::new();
                 let mut done = false;
@@ -317,6 +342,10 @@ impl Prism {
                                 .get("completion_tokens")
                                 .and_then(Value::as_u64)
                                 .or(completion_tokens);
+                        }
+                        if let Some(timings) = frame.get("timings") {
+                            tokens_per_second = validated_decode_rate(timings, completion_tokens)
+                                .or(tokens_per_second);
                         }
                         if let Some(choice) = frame
                             .get("choices")
@@ -402,6 +431,7 @@ impl Prism {
                     tool_request,
                     probabilities: request_probabilities,
                     error: stream_error.or(tool_error),
+                    tokens_per_second,
                 })
             }.await;
             let GeneratedAnswer {
@@ -413,6 +443,7 @@ impl Prism {
                 tool_request,
                 probabilities,
                 error,
+                tokens_per_second,
             } = match generated_result {
                 Ok(generated) => generated,
                 Err(error) => {
@@ -480,10 +511,8 @@ impl Prism {
                 usage,
                 usage_measured,
                 error,
-                load_ms: start.elapsed().as_millis() as u64,
-                tokens_per_second: completion_tokens
-                    .filter(|_| start.elapsed().as_micros() > 0)
-                    .map(|tokens| tokens as f64 * 1_000_000.0 / start.elapsed().as_micros() as f64),
+                load_ms: ready_ms,
+                tokens_per_second,
                 tool_request,
             })
         })
@@ -561,6 +590,7 @@ async fn readiness_json(
         .map(Some)
 }
 
+#[allow(clippy::too_many_arguments)] // Keep the pinned identity, limits, and cancellation inputs explicit.
 async fn wait_for_ready(
     client: &reqwest::Client,
     base: &str,
@@ -771,9 +801,11 @@ mod tests {
     async fn driver(base: String) -> (Prism, Arc<EmptyLedger>) {
         let ledger = Arc::new(EmptyLedger);
         let queue = Scheduler::new(ledger.clone());
-        let mut config = Config::default();
-        config.prism_url = base;
-        config.bonsai_enabled = true;
+        let config = Config {
+            prism_url: base,
+            bonsai_enabled: true,
+            ..Config::default()
+        };
         (Prism::new(config, queue), ledger)
     }
 
@@ -792,6 +824,7 @@ mod tests {
                     let path = headers.lines().next().unwrap().to_string();
                     if request_index == 0 {
                         assert!(path.contains("/props"));
+                        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
                         reply(&mut stream, "200 OK", "application/json", br#"{"model_path":"/weights/bonsai25-official-PTQ1_0-mtp.gguf","default_generation_settings":{"n_ctx":8192}}"#).await;
                     } else if request_index == 1 {
                         assert!(path.contains("/v1/models"));
@@ -824,13 +857,28 @@ mod tests {
                             json!({"content":[{"token":if attempt==0{"ok"}else{"x"},"logprob":-0.01,"top_logprobs":[{"token":if attempt==0{"ok"}else{"x"},"logprob":-0.01}]}]})
                         };
                         let content = if attempt == 0 { "ok" } else { "x" };
+                        let timings = if attempt == 1 {
+                            json!({"predicted_n":2,"predicted_ms":0.0,"predicted_per_second":20.0})
+                        } else {
+                            json!({"predicted_n":2,"predicted_ms":100.0,"predicted_per_second":20.0})
+                        };
                         let frames = [
-                            format!("data: {}\n\n", json!({"choices":[{"delta":{"content":content},"logprobs":logprobs,"finish_reason":null}]})),
-                            format!("data: {}\n\n", json!({"choices":[{"delta":{},"finish_reason":"stop"}]})),
-                            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":2}}\n\n".to_owned(),
+                            format!(
+                                "data: {}\n\n",
+                                json!({"choices":[{"delta":{"content":content},"logprobs":logprobs,"finish_reason":null}]})
+                            ),
+                            format!(
+                                "data: {}\n\n",
+                                json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+                            ),
+                            format!(
+                                "data: {}\n\n",
+                                json!({"choices":[],"usage":{"prompt_tokens":13,"completion_tokens":2},"timings":timings})
+                            ),
                         ];
                         let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
                         stream.write_all(head.as_bytes()).await.unwrap();
+                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                         for frame in frames {
                             stream.write_all(frame.as_bytes()).await.unwrap();
                             stream.flush().await.unwrap();
@@ -857,6 +905,15 @@ mod tests {
         assert_eq!(outcome.usage.input_tokens, 13);
         assert_eq!(outcome.usage.output_tokens, 2);
         assert!(outcome.usage_measured);
+        assert!(
+            outcome.load_ms < outcome.usage.total_ms,
+            "load time ends at readiness, before the intentionally delayed generation"
+        );
+        assert_eq!(
+            outcome.tokens_per_second,
+            Some(20.0),
+            "decode rate comes from the bounded final timing frame"
+        );
         let inspection = outcome.inspection.unwrap();
         assert!(inspection.matches("ok"));
         assert_eq!(inspection.tokens.len(), 1);
@@ -869,6 +926,10 @@ mod tests {
             malformed.inspection.unwrap().reason.as_deref(),
             Some("invalid_data")
         );
+        assert_eq!(
+            malformed.tokens_per_second, None,
+            "invalid provider timing is unavailable"
+        );
         let output = test_output();
         let (events, _rx) = mpsc::unbounded_channel();
         let (_cancel_tx, cancel) = watch::channel(false);
@@ -878,6 +939,7 @@ mod tests {
         assert_eq!(truncated.usage.input_tokens, 13);
         assert_eq!(truncated.usage.output_tokens, 2);
         assert!(truncated.usage_measured);
+        assert_eq!(truncated.tokens_per_second, Some(20.0));
         assert!(truncated.tool_request.is_none());
         let partial_inspection = truncated.inspection.unwrap();
         assert_eq!(partial_inspection.tokens.len(), 1);
@@ -948,9 +1010,11 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let ledger = Arc::new(EmptyLedger);
         let queue = Scheduler::new(ledger);
-        let mut config = Config::default();
-        config.prism_url = base;
-        config.bonsai_enabled = true;
+        let config = Config {
+            prism_url: base,
+            bonsai_enabled: true,
+            ..Config::default()
+        };
         let process = Arc::new(FakeProcessControl {
             stops: std::sync::atomic::AtomicUsize::new(0),
         });
@@ -1006,15 +1070,17 @@ mod tests {
             })
         };
         started_rx.await.unwrap();
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if matches!(event_rx.recv().await, Some(DriverEvent::Token { .. })) {
-                    break;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    if matches!(event_rx.recv().await, Some(DriverEvent::Token { .. })) {
+                        break;
+                    }
                 }
-            }
-        })
-        .await
-        .is_ok());
+            })
+            .await
+            .is_ok()
+        );
         let next_queue = queue.clone();
         let mut next = tokio::spawn(async move {
             next_queue
