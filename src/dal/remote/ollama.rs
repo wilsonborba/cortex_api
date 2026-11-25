@@ -197,6 +197,16 @@ impl Ollama {
         if let Some(supervisor) = &self.prism_supervisor {
             supervisor.stop().await?;
         }
+        self.unload_models().await
+    }
+    /// Unload local Ollama models while preserving a same-profile Prism server.
+    pub async fn release_models_for_prism_transition(
+        &self,
+        _permit: &Permit,
+    ) -> Result<(), DriverError> {
+        self.unload_models().await
+    }
+    async fn unload_models(&self) -> Result<(), DriverError> {
         let models = self.running_models().await?;
         for model in models.models {
             tokio::time::timeout(

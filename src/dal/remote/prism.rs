@@ -19,12 +19,36 @@ use tokio::sync::{mpsc, watch};
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
+pub trait PrismProcessControl: Send + Sync {
+    fn ensure<'a>(
+        &'a self,
+        config: &'a Config,
+        profile: crate::domain::models::model_profile::ModelProfile,
+        cancel: &'a mut watch::Receiver<bool>,
+    ) -> Pending<'a, Result<(), DriverError>>;
+    fn stop<'a>(&'a self) -> Pending<'a, Result<(), DriverError>>;
+    fn is_running<'a>(
+        &'a self,
+        profile: crate::domain::models::model_profile::ModelProfile,
+    ) -> Pending<'a, Result<bool, DriverError>>;
+}
+
 #[derive(Clone)]
 pub struct Prism {
     client: reqwest::Client,
     queue: Scheduler,
     config: Config,
-    supervisor: Option<std::sync::Arc<super::prism_supervisor::PrismSupervisor>>,
+    supervisor: Option<std::sync::Arc<dyn PrismProcessControl>>,
+}
+
+struct GeneratedAnswer {
+    text: String,
+    first_ms: Option<u64>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    inspection: crate::domain::models::inspection::InspectionCapture,
+    tool_request: Option<crate::domain::models::tools::ToolRequest>,
+    probabilities: bool,
 }
 
 impl Prism {
@@ -47,7 +71,7 @@ impl Prism {
     pub fn managed(
         config: Config,
         queue: Scheduler,
-        supervisor: std::sync::Arc<super::prism_supervisor::PrismSupervisor>,
+        supervisor: std::sync::Arc<dyn PrismProcessControl>,
     ) -> Self {
         let mut prism = Self::new(config, queue);
         prism.supervisor = Some(supervisor);
@@ -122,7 +146,7 @@ impl Prism {
             if input.allow_tools {
                 body["tools"] = crate::domain::models::tools::provider_definitions();
             }
-            let mut probabilities = input.role == "answer";
+            let probabilities = input.role == "answer";
             if probabilities {
                 body["logprobs"] = json!(true);
                 body["top_logprobs"] = json!(crate::domain::models::inspection::ALTERNATIVES);
@@ -146,72 +170,32 @@ impl Prism {
                         .ok_or(DriverError::InvalidInput)?
                         .into(),
                 });
-                tokio::select! {
-                    biased;
-                    _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                    result = supervisor.ensure(&self.config, profile) => result?,
-                }
+                supervisor
+                    .ensure(&self.config, profile, &mut cancel)
+                    .await?;
             }
             let expected_alias = profile.runtime_alias().ok_or(DriverError::InvalidInput)?;
             let expected_file = profile
                 .artifact_filename()
                 .ok_or(DriverError::InvalidInput)?;
-            let readiness = async {
-                let props_url = format!("{}/props", self.config.prism_url.trim_end_matches('/'));
-                let props = tokio::select! {
-                    biased;
-                    _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                    response = self.client.get(props_url).send() => response.map_err(|_| DriverError::Ollama)?,
-                };
-                if !props.status().is_success() {
-                    return Err(DriverError::Ollama);
-                }
-                let props = read_limited_json(props, 64 * 1024, &mut cancel).await?;
-                let models_url =
-                    format!("{}/v1/models", self.config.prism_url.trim_end_matches('/'));
-                let models = tokio::select! {
-                    biased;
-                    _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                    response = self.client.get(models_url).send() => response.map_err(|_| DriverError::Ollama)?,
-                };
-                if !models.status().is_success() {
-                    return Err(DriverError::Ollama);
-                }
-                let models = read_limited_json(models, 64 * 1024, &mut cancel).await?;
-                let alias_matches = models
-                    .pointer("/data")
-                    .and_then(Value::as_array)
-                    .is_some_and(|data| {
-                        data.iter().any(|model| {
-                            model.get("id").and_then(Value::as_str) == Some(expected_alias)
-                        })
-                    });
-                let path_matches = props
-                    .get("model_path")
-                    .and_then(Value::as_str)
-                    .is_some_and(|path| path.ends_with(expected_file));
-                let context_ready = props
-                    .pointer("/default_generation_settings/n_ctx")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|ctx| ctx >= u64::from(input.context_tokens));
-                if alias_matches && path_matches && context_ready {
-                    Ok(())
-                } else {
-                    Err(DriverError::Ollama)
-                }
-            };
-            let mut ready = tokio::time::timeout(std::time::Duration::from_secs(120), readiness)
-                .await
-                .unwrap_or(Err(DriverError::Ollama));
-            if ready.is_ok()
-                && let Some(supervisor) = &self.supervisor
-                && !supervisor.is_running(profile).await.unwrap_or(false)
-            {
-                ready = Err(DriverError::Ollama);
-            }
+            let ready = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                wait_for_ready(
+                    &self.client,
+                    &self.config.prism_url,
+                    self.supervisor.as_deref(),
+                    profile,
+                    expected_alias,
+                    expected_file,
+                    input.context_tokens,
+                    &mut cancel,
+                ),
+            )
+            .await
+            .unwrap_or(Err(DriverError::Ollama));
             if let Err(error) = ready {
                 if let Some(supervisor) = &self.supervisor {
-                    let _ = supervisor.stop().await;
+                    supervisor.stop().await?;
                 }
                 return Err(error);
             }
@@ -220,163 +204,196 @@ impl Prism {
                 model: expected_alias.into(),
                 load_ms: ready_ms,
             });
-            let mut response = tokio::select! {
-                biased;
-                _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                response = self.client.post(format!("{}/v1/chat/completions", self.config.prism_url.trim_end_matches('/'))).json(&body).send() => response.map_err(|_| DriverError::Ollama)?,
-            };
-            if !response.status().is_success() {
-                let status = response.status();
-                let error = read_limited_json(response, 16 * 1024, &mut cancel)
-                    .await
-                    .ok()
-                    .and_then(|v| {
-                        v.pointer("/error/message")
-                            .and_then(Value::as_str)
-                            .map(str::to_ascii_lowercase)
-                    })
-                    .unwrap_or_default();
-                let unsupported_logprobs = status.is_client_error()
-                    && error.contains("logprob")
-                    && [
-                        "unsupported",
-                        "not supported",
-                        "unknown",
-                        "invalid",
-                        "not implemented",
-                    ]
-                    .iter()
-                    .any(|w| error.contains(w));
-                if !probabilities || !unsupported_logprobs {
-                    return Err(DriverError::Ollama);
-                }
-                probabilities = false;
-                body.as_object_mut()
-                    .expect("request object")
-                    .remove("logprobs");
-                body.as_object_mut()
-                    .expect("request object")
-                    .remove("top_logprobs");
-                response = tokio::select! {
+            let mut body = body;
+            let generated_result: Result<GeneratedAnswer, DriverError> = async {
+                let mut request_probabilities = probabilities;
+                let mut response = tokio::select! {
                     biased;
                     _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
                     response = self.client.post(format!("{}/v1/chat/completions", self.config.prism_url.trim_end_matches('/'))).json(&body).send() => response.map_err(|_| DriverError::Ollama)?,
                 };
                 if !response.status().is_success() {
-                    return Err(DriverError::Ollama);
+                    let status = response.status();
+                    let error_value = match read_limited_json(response, 16 * 1024, &mut cancel).await {
+                        Ok(value) => Some(value),
+                        Err(DriverError::Cancelled) => return Err(DriverError::Cancelled),
+                        Err(_) => None,
+                    };
+                    let error = error_value
+                        .and_then(|v| {
+                            v.pointer("/error/message")
+                                .and_then(Value::as_str)
+                                .map(str::to_ascii_lowercase)
+                        })
+                        .unwrap_or_default();
+                    let unsupported_logprobs = status.is_client_error()
+                        && error.contains("logprob")
+                        && [
+                            "unsupported",
+                            "not supported",
+                            "unknown",
+                            "invalid",
+                            "not implemented",
+                        ]
+                        .iter()
+                        .any(|w| error.contains(w));
+                    if !request_probabilities || !unsupported_logprobs {
+                        return Err(DriverError::Ollama);
+                    }
+                    request_probabilities = false;
+                    body.as_object_mut()
+                        .expect("request object")
+                        .remove("logprobs");
+                    body.as_object_mut()
+                        .expect("request object")
+                        .remove("top_logprobs");
+                    response = tokio::select! {
+                        biased;
+                        _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
+                        response = self.client.post(format!("{}/v1/chat/completions", self.config.prism_url.trim_end_matches('/'))).json(&body).send() => response.map_err(|_| DriverError::Ollama)?,
+                    };
+                    if !response.status().is_success() {
+                        return Err(DriverError::Ollama);
+                    }
                 }
-            }
-            let mut stream = response.bytes_stream();
-            let mut buffer = Vec::new();
-            let mut text = String::new();
-            let mut first_ms = None;
-            let mut prompt_tokens = None;
-            let mut completion_tokens = None;
-            let mut inspection = crate::domain::models::inspection::InspectionCapture::default();
-            let mut calls = BTreeMap::<u64, (String, String, String)>::new();
-            let mut done = false;
-            let mut finish_seen = false;
-            while !done {
-                let chunk = tokio::select! {
-                    biased;
-                    _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                    next = stream.next() => next,
-                };
-                let Some(chunk) = chunk else { break };
-                buffer.extend_from_slice(&chunk.map_err(|_| DriverError::Ollama)?);
-                if buffer.len() > MAX_FRAME_BYTES {
-                    return Err(DriverError::Ollama);
-                }
-                while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                    let line: Vec<u8> = buffer.drain(..=end).collect();
-                    let line = line.strip_prefix(b"data: ").unwrap_or(&line);
-                    let line = line.trim_ascii();
-                    if line.is_empty() {
-                        continue;
+                let mut stream = response.bytes_stream();
+                let mut buffer = Vec::new();
+                let mut text = String::new();
+                let mut first_ms = None;
+                let mut prompt_tokens = None;
+                let mut completion_tokens = None;
+                let mut inspection = crate::domain::models::inspection::InspectionCapture::default();
+                let mut calls = BTreeMap::<u64, (String, String, String)>::new();
+                let mut done = false;
+                let mut finish_seen = false;
+                while !done {
+                    let chunk = tokio::select! {
+                        biased;
+                        _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
+                        next = stream.next() => next,
+                    };
+                    let Some(chunk) = chunk else { break };
+                    buffer.extend_from_slice(&chunk.map_err(|_| DriverError::Ollama)?);
+                    if buffer.len() > MAX_FRAME_BYTES {
+                        return Err(DriverError::Ollama);
                     }
-                    if line == b"[DONE]" {
-                        done = true;
-                        break;
-                    }
-                    let frame: Value =
-                        serde_json::from_slice(line).map_err(|_| DriverError::Ollama)?;
-                    if let Some(usage) = frame.get("usage") {
-                        prompt_tokens = usage
-                            .get("prompt_tokens")
-                            .and_then(Value::as_u64)
-                            .or(prompt_tokens);
-                        completion_tokens = usage
-                            .get("completion_tokens")
-                            .and_then(Value::as_u64)
-                            .or(completion_tokens);
-                    }
-                    if let Some(choice) = frame
-                        .get("choices")
-                        .and_then(Value::as_array)
-                        .and_then(|c| c.first())
-                    {
-                        let delta = choice.get("delta").unwrap_or(&Value::Null);
-                        if input.role == "answer" {
-                            inspection.push(
-                                choice.pointer("/logprobs/content"),
-                                input.max_tokens as usize,
-                            );
+                    while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+                        let line: Vec<u8> = buffer.drain(..=end).collect();
+                        let line = line.strip_prefix(b"data: ").unwrap_or(&line);
+                        let line = line.trim_ascii();
+                        if line.is_empty() {
+                            continue;
                         }
-                        if let Some(content) = delta
-                            .get("content")
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
+                        if line == b"[DONE]" {
+                            done = true;
+                            break;
+                        }
+                        let frame: Value =
+                            serde_json::from_slice(line).map_err(|_| DriverError::Ollama)?;
+                        if let Some(usage) = frame.get("usage") {
+                            prompt_tokens = usage
+                                .get("prompt_tokens")
+                                .and_then(Value::as_u64)
+                                .or(prompt_tokens);
+                            completion_tokens = usage
+                                .get("completion_tokens")
+                                .and_then(Value::as_u64)
+                                .or(completion_tokens);
+                        }
+                        if let Some(choice) = frame
+                            .get("choices")
+                            .and_then(Value::as_array)
+                            .and_then(|c| c.first())
                         {
-                            first_ms.get_or_insert(start.elapsed().as_millis() as u64);
-                            text.push_str(content);
-                            let _ = events.send(DriverEvent::Token {
-                                role: input.role.clone(),
-                                text: content.into(),
-                            });
-                        }
-                        if let Some(fragments) = delta.get("tool_calls").and_then(Value::as_array) {
-                            for fragment in fragments {
-                                let index =
-                                    fragment.get("index").and_then(Value::as_u64).unwrap_or(0);
-                                let entry = calls.entry(index).or_default();
+                            let delta = choice.get("delta").unwrap_or(&Value::Null);
+                            if input.role == "answer" {
+                                inspection.push(
+                                    choice.pointer("/logprobs/content"),
+                                    input.max_tokens as usize,
+                                );
+                            }
+                            if let Some(content) = delta
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                            {
                                 first_ms.get_or_insert(start.elapsed().as_millis() as u64);
-                                if let Some(id) = fragment.get("id").and_then(Value::as_str) {
-                                    entry.0.push_str(id);
-                                }
-                                if let Some(name) =
-                                    fragment.pointer("/function/name").and_then(Value::as_str)
-                                {
-                                    entry.1.push_str(name);
-                                }
-                                if let Some(args) = fragment
-                                    .pointer("/function/arguments")
-                                    .and_then(Value::as_str)
-                                {
-                                    entry.2.push_str(args);
+                                text.push_str(content);
+                                let _ = events.send(DriverEvent::Token {
+                                    role: input.role.clone(),
+                                    text: content.into(),
+                                });
+                            }
+                            if let Some(fragments) = delta.get("tool_calls").and_then(Value::as_array) {
+                                for fragment in fragments {
+                                    let index =
+                                        fragment.get("index").and_then(Value::as_u64).unwrap_or(0);
+                                    let entry = calls.entry(index).or_default();
+                                    first_ms.get_or_insert(start.elapsed().as_millis() as u64);
+                                    if let Some(id) = fragment.get("id").and_then(Value::as_str) {
+                                        entry.0.push_str(id);
+                                    }
+                                    if let Some(name) =
+                                        fragment.pointer("/function/name").and_then(Value::as_str)
+                                    {
+                                        entry.1.push_str(name);
+                                    }
+                                    if let Some(args) = fragment
+                                        .pointer("/function/arguments")
+                                        .and_then(Value::as_str)
+                                    {
+                                        entry.2.push_str(args);
+                                    }
                                 }
                             }
+                            finish_seen |= choice.get("finish_reason").is_some_and(|r| !r.is_null());
                         }
-                        finish_seen |= choice.get("finish_reason").is_some_and(|r| !r.is_null());
                     }
                 }
-            }
-            if !done || !finish_seen || !buffer.iter().all(u8::is_ascii_whitespace) {
-                return Err(DriverError::Ollama);
-            }
-            let tool_request = if calls.is_empty() {
-                None
-            } else {
-                if !input.allow_tools || calls.len() != 1 {
-                    return Err(DriverError::InvalidInput);
+                if !done || !finish_seen || !buffer.iter().all(u8::is_ascii_whitespace) {
+                    return Err(DriverError::Ollama);
                 }
-                let (_, (id, name, arguments)) = calls.into_iter().next().expect("one call");
-                let _provider_call_id = id;
-                let arguments: Value =
-                    serde_json::from_str(&arguments).map_err(|_| DriverError::InvalidInput)?;
-                Some(
-                    crate::domain::models::tools::ToolRequest::from_provider(&name, arguments)
-                        .map_err(|_| DriverError::InvalidInput)?,
-                )
+                let tool_request = if calls.is_empty() {
+                    None
+                } else {
+                    if !input.allow_tools || calls.len() != 1 {
+                        return Err(DriverError::InvalidInput);
+                    }
+                    let (_, (id, name, arguments)) = calls.into_iter().next().expect("one call");
+                    let _provider_call_id = id;
+                    let arguments: Value =
+                        serde_json::from_str(&arguments).map_err(|_| DriverError::InvalidInput)?;
+                    Some(
+                        crate::domain::models::tools::ToolRequest::from_provider(&name, arguments)
+                            .map_err(|_| DriverError::InvalidInput)?,
+                    )
+                };
+                Ok(GeneratedAnswer {
+                    text,
+                    first_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    inspection,
+                    tool_request,
+                    probabilities: request_probabilities,
+                })
+            }.await;
+            let GeneratedAnswer {
+                text,
+                first_ms,
+                prompt_tokens,
+                completion_tokens,
+                inspection,
+                tool_request,
+                probabilities,
+            } = match generated_result {
+                Ok(generated) => generated,
+                Err(error) => {
+                    if let Some(supervisor) = &self.supervisor {
+                        supervisor.stop().await?;
+                    }
+                    return Err(error);
+                }
             };
             let finished_at = Utc::now();
             let tool_text = tool_request
@@ -485,6 +502,104 @@ async fn read_limited_json(
     serde_json::from_slice(&body).map_err(|_| DriverError::Ollama)
 }
 
+async fn readiness_json(
+    client: &reqwest::Client,
+    url: String,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<Option<Value>, DriverError> {
+    let response = tokio::select! {
+        biased;
+        _ = cancelled(cancel) => return Err(DriverError::Cancelled),
+        response = client.get(url).send() => match response {
+            Ok(response) => response,
+            Err(error) if error.is_connect() || error.is_timeout() => return Ok(None),
+            Err(_) => return Err(DriverError::Ollama),
+        },
+    };
+    if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(DriverError::Ollama);
+    }
+    read_limited_json(response, 64 * 1024, cancel)
+        .await
+        .map(Some)
+}
+
+async fn wait_for_ready(
+    client: &reqwest::Client,
+    base: &str,
+    supervisor: Option<&dyn PrismProcessControl>,
+    profile: crate::domain::models::model_profile::ModelProfile,
+    expected_alias: &str,
+    expected_file: &str,
+    context_tokens: u32,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<(), DriverError> {
+    let base = base.trim_end_matches('/');
+    loop {
+        if let Some(supervisor) = supervisor
+            && !supervisor.is_running(profile).await?
+        {
+            return Err(DriverError::Ollama);
+        }
+        let Some(props) = readiness_json(client, format!("{base}/props"), cancel).await? else {
+            tokio::select! {
+                biased;
+                _ = cancelled(cancel) => return Err(DriverError::Cancelled),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => continue,
+            }
+        };
+        let model_path = props.get("model_path").and_then(Value::as_str);
+        if !model_path.is_some_and(|path| path.ends_with(expected_file)) {
+            return Err(DriverError::Ollama);
+        }
+        let context_ready = props
+            .pointer("/default_generation_settings/n_ctx")
+            .and_then(Value::as_u64)
+            .is_some_and(|ctx| ctx >= u64::from(context_tokens));
+        if !context_ready {
+            tokio::select! {
+                biased;
+                _ = cancelled(cancel) => return Err(DriverError::Cancelled),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => continue,
+            }
+        }
+        let Some(models) = readiness_json(client, format!("{base}/v1/models"), cancel).await?
+        else {
+            tokio::select! {
+                biased;
+                _ = cancelled(cancel) => return Err(DriverError::Cancelled),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => continue,
+            }
+        };
+        let data = models
+            .pointer("/data")
+            .and_then(Value::as_array)
+            .ok_or(DriverError::Ollama)?;
+        if data.is_empty() {
+            tokio::select! {
+                biased;
+                _ = cancelled(cancel) => return Err(DriverError::Cancelled),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => continue,
+            }
+        }
+        if !data
+            .iter()
+            .any(|model| model.get("id").and_then(Value::as_str) == Some(expected_alias))
+        {
+            return Err(DriverError::Ollama);
+        }
+        if let Some(supervisor) = supervisor
+            && !supervisor.is_running(profile).await?
+        {
+            return Err(DriverError::Ollama);
+        }
+        return Ok(());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +638,30 @@ mod tests {
             _: Vec<WaitingCall>,
         ) -> Pending<'a, Result<(), LedgerUnavailable>> {
             Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct FakeProcessControl {
+        stops: std::sync::atomic::AtomicUsize,
+    }
+    impl PrismProcessControl for FakeProcessControl {
+        fn ensure<'a>(
+            &'a self,
+            _: &'a Config,
+            _: ModelProfile,
+            _: &'a mut watch::Receiver<bool>,
+        ) -> Pending<'a, Result<(), DriverError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn stop<'a>(&'a self) -> Pending<'a, Result<(), DriverError>> {
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        }
+        fn is_running<'a>(&'a self, _: ModelProfile) -> Pending<'a, Result<bool, DriverError>> {
+            Box::pin(async { Ok(true) })
         }
     }
 
@@ -703,6 +842,156 @@ mod tests {
             prism.call(&output, input(), events, cancel).await,
             Err(DriverError::Ollama)
         ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn readiness_retries_delayed_bind_and_loading_503() {
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let base = format!("http://{address}");
+        let (prism, _ledger) = driver(base.clone()).await;
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            let listener = TcpListener::bind(address).await.unwrap();
+            let (mut first, _) = listener.accept().await.unwrap();
+            let (headers, _) = request(&mut first).await;
+            assert!(headers.lines().next().unwrap().contains("/props"));
+            reply(
+                &mut first,
+                "503 Service Unavailable",
+                "application/json",
+                b"{}",
+            )
+            .await;
+
+            let (mut props, _) = listener.accept().await.unwrap();
+            let (headers, _) = request(&mut props).await;
+            assert!(headers.lines().next().unwrap().contains("/props"));
+            reply(&mut props, "200 OK", "application/json", br#"{"model_path":"/weights/bonsai25-official-PTQ1_0-mtp.gguf","default_generation_settings":{"n_ctx":8192}}"#).await;
+
+            let (mut models, _) = listener.accept().await.unwrap();
+            let (headers, _) = request(&mut models).await;
+            assert!(headers.lines().next().unwrap().contains("/v1/models"));
+            reply(
+                &mut models,
+                "200 OK",
+                "application/json",
+                br#"{"data":[{"id":"bonsai25-official"}]}"#,
+            )
+            .await;
+        });
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            wait_for_ready(
+                &prism.client,
+                &base,
+                None,
+                ModelProfile::Bonsai25Official,
+                "bonsai25-official",
+                "bonsai25-official-PTQ1_0-mtp.gguf",
+                8192,
+                &mut cancel,
+            ),
+        )
+        .await
+        .expect("bounded readiness")
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_holds_scheduler_until_owned_runtime_stop_finishes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let ledger = Arc::new(EmptyLedger);
+        let queue = Scheduler::new(ledger);
+        let mut config = Config::default();
+        config.prism_url = base;
+        config.bonsai_enabled = true;
+        let process = Arc::new(FakeProcessControl {
+            stops: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let prism = Arc::new(Prism::managed(config, queue.clone(), process.clone()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut started_tx = Some(started_tx);
+        let server = tokio::spawn(async move {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (headers, _) = request(&mut stream).await;
+                let path = headers.lines().next().unwrap().to_string();
+                if index == 0 {
+                    assert!(path.contains("/props"));
+                    reply(&mut stream, "200 OK", "application/json", br#"{"model_path":"/weights/bonsai25-official-PTQ1_0-mtp.gguf","default_generation_settings":{"n_ctx":8192}}"#).await;
+                } else if index == 1 {
+                    assert!(path.contains("/v1/models"));
+                    reply(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        br#"{"data":[{"id":"bonsai25-official"}]}"#,
+                    )
+                    .await;
+                } else {
+                    assert!(path.contains("/v1/chat/completions"));
+                    if let Some(started_tx) = started_tx.take() {
+                        let _ = started_tx.send(());
+                    }
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
+                    stream.flush().await.unwrap();
+                    let mut buffer = [0; 16];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        stream.read(&mut buffer),
+                    )
+                    .await;
+                }
+            }
+        });
+        let output = test_output();
+        let permit = queue
+            .acquire(output.actor.clone(), output.output_id)
+            .await
+            .unwrap();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let (cancel_tx, cancel) = watch::channel(false);
+        let call = {
+            let prism = prism.clone();
+            tokio::spawn(async move {
+                prism
+                    .call_with_permit(&output, input(), events, cancel, permit)
+                    .await
+            })
+        };
+        started_rx.await.unwrap();
+        let next_queue = queue.clone();
+        let mut next = tokio::spawn(async move {
+            next_queue
+                .acquire("next-job".into(), uuid::Uuid::now_v7())
+                .await
+        });
+        cancel_tx.send(true).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut next)
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), call)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(DriverError::Cancelled)
+        ));
+        assert_eq!(process.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let next_permit = tokio::time::timeout(std::time::Duration::from_secs(1), &mut next)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(next_permit);
         server.await.unwrap();
     }
 

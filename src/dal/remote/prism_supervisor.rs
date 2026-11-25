@@ -5,16 +5,18 @@ use crate::{
     domain::models::{driver::DriverError, model_profile::ModelProfile},
 };
 use sha2::{Digest, Sha256};
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
+    io::AsyncReadExt,
     process::{Child, Command},
-    sync::Mutex,
+    sync::{Mutex, watch},
 };
 
 const SERVER_SHA256: &str = "89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c";
 
 struct OwnedServer {
     profile: ModelProfile,
+    pid: u32,
     child: Child,
 }
 
@@ -48,7 +50,12 @@ impl PrismSupervisor {
 
     /// Hash the pinned runtime and model before starting the fixed server command.
     /// Repeated requests for the same healthy profile keep the one process loaded.
-    pub async fn ensure(&self, config: &Config, profile: ModelProfile) -> Result<(), DriverError> {
+    pub async fn ensure(
+        &self,
+        config: &Config,
+        profile: ModelProfile,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> Result<(), DriverError> {
         if !config.prism_url_is_loopback() {
             return Err(DriverError::InvalidInput);
         }
@@ -72,28 +79,17 @@ impl PrismSupervisor {
         stop_owned(&mut slot).await?;
         let runtime = config.prism_server_path.clone();
         let model = config.bonsai_model_directory.join(filename);
-        let runtime_hash = tokio::time::timeout(
-            Duration::from_secs(90),
-            tokio::task::spawn_blocking({
-                let runtime = runtime.clone();
-                move || sha256(&runtime)
-            }),
-        )
-        .await
-        .map_err(|_| DriverError::Ollama)?
-        .map_err(|_| DriverError::Ollama)??;
-        let model_hash = tokio::time::timeout(
-            Duration::from_secs(180),
-            tokio::task::spawn_blocking({
-                let model = model.clone();
-                move || sha256(&model)
-            }),
-        )
-        .await
-        .map_err(|_| DriverError::Ollama)?
-        .map_err(|_| DriverError::Ollama)??;
+        let runtime_hash = tokio::time::timeout(Duration::from_secs(90), sha256(&runtime, cancel))
+            .await
+            .map_err(|_| DriverError::Ollama)??;
+        let model_hash = tokio::time::timeout(Duration::from_secs(180), sha256(&model, cancel))
+            .await
+            .map_err(|_| DriverError::Ollama)??;
         if runtime_hash != SERVER_SHA256 || model_hash != expected_model_hash {
             return Err(DriverError::Ollama);
+        }
+        if *cancel.borrow() {
+            return Err(DriverError::Cancelled);
         }
         let endpoint = url::Url::parse(&config.prism_url).map_err(|_| DriverError::InvalidInput)?;
         let port = endpoint
@@ -166,18 +162,50 @@ impl PrismSupervisor {
         #[cfg(unix)]
         command.process_group(0);
         let child = command.spawn().map_err(|_| DriverError::Ollama)?;
-        *slot = Some(OwnedServer { profile, child });
+        let pid = child.id().ok_or(DriverError::Ollama)?;
+        *slot = Some(OwnedServer {
+            profile,
+            pid,
+            child,
+        });
         Ok(())
     }
 }
 
-fn sha256(path: &PathBuf) -> Result<String, DriverError> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|_| DriverError::Ollama)?;
+impl super::prism::PrismProcessControl for PrismSupervisor {
+    fn ensure<'a>(
+        &'a self,
+        config: &'a Config,
+        profile: ModelProfile,
+        cancel: &'a mut watch::Receiver<bool>,
+    ) -> crate::domain::models::usage::Pending<'a, Result<(), DriverError>> {
+        Box::pin(async move { PrismSupervisor::ensure(self, config, profile, cancel).await })
+    }
+
+    fn stop<'a>(&'a self) -> crate::domain::models::usage::Pending<'a, Result<(), DriverError>> {
+        Box::pin(async move { PrismSupervisor::stop(self).await })
+    }
+
+    fn is_running<'a>(
+        &'a self,
+        profile: ModelProfile,
+    ) -> crate::domain::models::usage::Pending<'a, Result<bool, DriverError>> {
+        Box::pin(async move { PrismSupervisor::is_running(self, profile).await })
+    }
+}
+
+async fn sha256(path: &Path, cancel: &mut watch::Receiver<bool>) -> Result<String, DriverError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| DriverError::Ollama)?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    let mut buffer = vec![0u8; 64 * 1024];
     loop {
-        let count = file.read(&mut buffer).map_err(|_| DriverError::Ollama)?;
+        let count = tokio::select! {
+            biased;
+            _ = cancelled(cancel) => return Err(DriverError::Cancelled),
+            count = file.read(&mut buffer) => count.map_err(|_| DriverError::Ollama)?,
+        };
         if count == 0 {
             break;
         }
@@ -186,23 +214,38 @@ fn sha256(path: &PathBuf) -> Result<String, DriverError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+async fn cancelled(cancel: &mut watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 async fn stop_owned(slot: &mut Option<OwnedServer>) -> Result<(), DriverError> {
     let Some(mut owned) = slot.take() else {
         return Ok(());
     };
-    let pid = owned.child.id();
-    #[cfg(unix)]
-    if let Some(pid) = pid {
-        // SAFETY: the child was started in a new process group owned by this instance.
-        let _ = unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+    let result = stop_handle(&mut owned).await;
+    if result.is_err() {
+        *slot = Some(owned);
     }
+    result
+}
+
+async fn stop_handle(owned: &mut OwnedServer) -> Result<(), DriverError> {
+    let pid = owned.pid;
+    #[cfg(unix)]
+    // SAFETY: the child was started in a new process group owned by this instance.
+    let _ = unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
     let result = tokio::time::timeout(Duration::from_secs(5), owned.child.wait()).await;
     if !matches!(result, Ok(Ok(_))) {
         #[cfg(unix)]
-        if let Some(pid) = pid {
-            // SAFETY: same owned process group as above; only our process group is signalled.
-            let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-        }
+        // SAFETY: same owned process group as above; only our process group is signalled.
+        let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
         let _ = owned.child.start_kill();
         tokio::time::timeout(Duration::from_secs(5), owned.child.wait())
             .await
@@ -210,7 +253,7 @@ async fn stop_owned(slot: &mut Option<OwnedServer>) -> Result<(), DriverError> {
             .map_err(|_| DriverError::Ollama)?;
     }
     #[cfg(unix)]
-    if let Some(pid) = pid {
+    {
         let group_exited = tokio::time::timeout(Duration::from_secs(5), async {
             while process_group_exists(pid) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -221,16 +264,13 @@ async fn stop_owned(slot: &mut Option<OwnedServer>) -> Result<(), DriverError> {
         if !group_exited {
             // SAFETY: pid is the process-group ID assigned to this owned child.
             let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            let killed = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::time::timeout(Duration::from_secs(2), async {
                 while process_group_exists(pid) {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             })
             .await
-            .is_ok();
-            if !killed {
-                return Err(DriverError::Ollama);
-            }
+            .map_err(|_| DriverError::Ollama)?;
         }
     }
     Ok(())
@@ -260,9 +300,11 @@ mod tests {
         #[cfg(unix)]
         command.process_group(0);
         let child = command.spawn().expect("test child");
+        let pid = child.id().unwrap();
         let supervisor = PrismSupervisor {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
+                pid,
                 child,
             })),
         };
@@ -271,6 +313,48 @@ mod tests {
             .expect("bounded stop")
             .unwrap();
         assert!(supervisor.child.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn same_profile_reuses_child_and_switch_stops_before_invalid_artifact_fails() {
+        let mut command = Command::new("/usr/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.spawn().expect("test child");
+        let pid = child.id().unwrap();
+        let supervisor = PrismSupervisor {
+            child: Mutex::new(Some(OwnedServer {
+                profile: ModelProfile::Bonsai25Official,
+                pid,
+                child,
+            })),
+        };
+        let config = Config::default();
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Official, &mut cancel)
+            .await
+            .unwrap();
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Official, &mut cancel)
+            .await
+            .unwrap();
+        assert_eq!(supervisor.child.lock().await.as_ref().unwrap().pid, pid);
+
+        assert!(
+            supervisor
+                .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+                .await
+                .is_err()
+        );
+        assert!(supervisor.child.lock().await.is_none());
+        #[cfg(unix)]
+        assert!(!process_group_exists(pid));
     }
 
     #[test]

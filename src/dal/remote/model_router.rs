@@ -46,7 +46,9 @@ impl ModelDriver for ModelRouter {
                     _ = async { loop { if *cancel.borrow() { return; } if cancel.changed().await.is_err() { std::future::pending::<()>().await; } } } => return Err(DriverError::Cancelled),
                     p = self.queue.acquire(output.actor.clone(), output.output_id) => p.map_err(DriverError::Queue)?,
                 };
-                self.ollama.release_models_for_local_job(&permit).await?;
+                self.ollama
+                    .release_models_for_prism_transition(&permit)
+                    .await?;
                 self.prism
                     .call_with_permit(output, input, events, cancel, permit)
                     .await
