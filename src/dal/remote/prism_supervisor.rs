@@ -477,9 +477,8 @@ mod tests {
                         {
                             eprintln!("EVAL {}", serde_json::json!({"case":"synthetic-tool-request","name":request.name.as_str(),"arguments":request.arguments}));
                             assert_eq!(request.name, ToolName::ViewFile, "reject unexpected tool before fixture response");
-                            assert_eq!(
-                                request.arguments,
-                                serde_json::json!({"path":"/evaluation-only/kite-204.txt"}),
+                            assert!(
+                                is_evaluation_fixture_tool(&request),
                                 "reject unexpected tool arguments before fixture response"
                             );
                             requests.push(request.clone());
@@ -510,6 +509,63 @@ mod tests {
             result.expect("real Thinking::answer_with_tools provider call"),
             requests,
         )
+    }
+
+    fn is_evaluation_fixture_tool(request: &PendingTool) -> bool {
+        if request.name != ToolName::ViewFile {
+            return false;
+        }
+        let Some(object) = request.arguments.as_object() else {
+            return false;
+        };
+        if object
+            .keys()
+            .any(|key| !["path", "start_line", "end_line"].contains(&key.as_str()))
+            || object.get("path") != Some(&serde_json::json!("/evaluation-only/kite-204.txt"))
+        {
+            return false;
+        }
+        ["start_line", "end_line"].into_iter().all(|key| {
+            object
+                .get(key)
+                .is_none_or(|value| value.is_null() || value.as_u64().is_some_and(|line| line > 0))
+        })
+    }
+
+    #[test]
+    fn synthetic_tool_gate_accepts_normalized_view_file_args_only() {
+        use crate::domain::models::tools::ToolRequest;
+
+        let request = |name: &str, args: serde_json::Value| {
+            let parsed = ToolRequest::from_provider(name, args).expect("valid provider tool args");
+            PendingTool {
+                call_id: uuid::Uuid::new_v4(),
+                name: parsed.name,
+                arguments: parsed.arguments,
+            }
+        };
+
+        let path_only = request(
+            "view_file",
+            serde_json::json!({"path":"/evaluation-only/kite-204.txt"}),
+        );
+        assert_eq!(path_only.arguments["start_line"], serde_json::Value::Null);
+        assert_eq!(path_only.arguments["end_line"], serde_json::Value::Null);
+        assert!(is_evaluation_fixture_tool(&path_only));
+
+        let ranged = request(
+            "view_file",
+            serde_json::json!({"path":"/evaluation-only/kite-204.txt","start_line":1,"end_line":2}),
+        );
+        assert!(is_evaluation_fixture_tool(&ranged));
+
+        let wrong_path = request("view_file", serde_json::json!({"path":"/etc/passwd"}));
+        assert!(!is_evaluation_fixture_tool(&wrong_path));
+        let wrong_tool = request(
+            "grep_search",
+            serde_json::json!({"query":"x","paths":["/evaluation-only/kite-204.txt"]}),
+        );
+        assert!(!is_evaluation_fixture_tool(&wrong_tool));
     }
 
     fn middle_word_prefix(text: &str) -> Option<String> {
