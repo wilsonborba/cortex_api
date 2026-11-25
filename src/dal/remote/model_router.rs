@@ -55,7 +55,7 @@ impl ModelDriver for ModelRouter {
                     p = self.queue.acquire(output.actor.clone(), output.output_id) => p.map_err(DriverError::Queue)?,
                 };
                 self.ollama
-                    .release_models_for_prism_transition(&permit)
+                    .release_models_for_prism_transition(&permit, &mut cancel)
                     .await?;
                 self.prism
                     .call_with_permit(output, input, events, cancel, permit)

@@ -864,6 +864,8 @@ mod tests {
         );
         tokio::pin!(cancel_call);
         let mut saw_cancel_token = false;
+        let mut saw_model_loading = false;
+        let mut saw_model_ready = false;
         let mut saw_queued_wait = false;
         let mut t1_events_open = true;
         let mut t0_events_open = true;
@@ -882,6 +884,8 @@ mod tests {
                     event = event_rx.recv(), if t1_events_open => {
                         match event {
                             Some(DriverEvent::Token { .. }) => saw_cancel_token = true,
+                            Some(DriverEvent::ModelLoading { .. }) => saw_model_loading = true,
+                            Some(DriverEvent::ModelReady { .. }) => saw_model_ready = true,
                             None => t1_events_open = false,
                             _ => {}
                         }
@@ -905,7 +909,7 @@ mod tests {
             && cancel_result.is_none();
         eprintln!(
             "EVAL {}",
-            serde_json::json!({"case":"cancellation-t1-observation","profile":profile.id(),"t1_token_observed":saw_cancel_token,"observation_timed_out":t1_observation.is_err(),"resource_pressure":pressure_detected,"t1_finished_before_token":cancel_result.is_some(),"t1_result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err())),"t1_partial":cancel_result.as_ref().and_then(|result|result.as_ref().ok()).map(|outcome|outcome.text.as_str())})
+            serde_json::json!({"case":"cancellation-t1-observation","profile":profile.id(),"model_loading_event":saw_model_loading,"model_ready_event":saw_model_ready,"t1_token_observed":saw_cancel_token,"observation_timed_out":t1_observation.is_err(),"resource_pressure":pressure_detected,"t1_finished_before_token":cancel_result.is_some(),"t1_result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err())),"t1_partial":cancel_result.as_ref().and_then(|result|result.as_ref().ok()).map(|outcome|outcome.text.as_str())})
         );
         if !t1_ready {
             let _ = cancel_tx.send(true);
@@ -970,6 +974,8 @@ mod tests {
                     event = event_rx.recv(), if !saw_cancel_token && t1_events_open => {
                         match event {
                             Some(DriverEvent::Token { .. }) => saw_cancel_token = true,
+                            Some(DriverEvent::ModelLoading { .. }) => saw_model_loading = true,
+                            Some(DriverEvent::ModelReady { .. }) => saw_model_ready = true,
                             None => t1_events_open = false,
                             _ => {}
                         }
@@ -989,7 +995,7 @@ mod tests {
         let t1_still_active_when_t0_waited = cancel_result.is_none();
         eprintln!(
             "EVAL {}",
-            serde_json::json!({"case":"cancellation-queue-observation","profile":profile.id(),"t1_token_observed":saw_cancel_token,"t0_waiting_observed":saw_queued_wait,"t0_registered_in_scheduler":queued_registered,"t1_still_active_when_t0_waited":t1_still_active_when_t0_waited,"t0_observation_timed_out":queued_observation.is_err(),"resource_pressure":pressure_detected,"t1_finished_before_queue_observed":!t1_still_active_when_t0_waited,"t1_result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err())),"t0_finished_before_wait_observed":queued_result.is_some(),"t0_result":queued_result.as_ref().map(|result|format!("{:?}",result.as_ref().err()))})
+            serde_json::json!({"case":"cancellation-queue-observation","profile":profile.id(),"model_loading_event":saw_model_loading,"model_ready_event":saw_model_ready,"t1_token_observed":saw_cancel_token,"t0_waiting_observed":saw_queued_wait,"t0_registered_in_scheduler":queued_registered,"t1_still_active_when_t0_waited":t1_still_active_when_t0_waited,"t0_observation_timed_out":queued_observation.is_err(),"resource_pressure":pressure_detected,"t1_finished_before_queue_observed":!t1_still_active_when_t0_waited,"t1_result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err())),"t0_finished_before_wait_observed":queued_result.is_some(),"t0_result":queued_result.as_ref().map(|result|format!("{:?}",result.as_ref().err()))})
         );
         let _ = cancel_tx.send(true);
         if pressure_detected {

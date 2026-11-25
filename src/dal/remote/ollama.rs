@@ -197,20 +197,39 @@ impl Ollama {
         if let Some(supervisor) = &self.prism_supervisor {
             supervisor.stop().await?;
         }
-        self.unload_models().await
+        self.unload_models(None).await
     }
     /// Unload local Ollama models while preserving a same-profile Prism server.
     pub async fn release_models_for_prism_transition(
         &self,
         _permit: &Permit,
+        cancel: &mut watch::Receiver<bool>,
     ) -> Result<(), DriverError> {
-        self.unload_models().await
+        self.unload_models(Some(cancel)).await
     }
-    async fn unload_models(&self) -> Result<(), DriverError> {
-        let models = self.running_models().await?;
+    async fn unload_models(
+        &self,
+        cancel: Option<&mut watch::Receiver<bool>>,
+    ) -> Result<(), DriverError> {
+        const SETTLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        let deadline = tokio::time::Instant::now() + SETTLE_LIMIT;
+        let mut cancellation_requested = cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+        if cancellation_requested {
+            return Err(DriverError::Cancelled);
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let models = tokio::time::timeout(left, self.running_models())
+            .await
+            .map_err(|_| DriverError::Ollama)??;
+        cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
         for model in models.models {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
             tokio::time::timeout(
-                std::time::Duration::from_secs(30),
+                left,
                 self.post(
                     "/api/generate",
                     &json!({"model":model.name,"keep_alive":0,"stream":false}),
@@ -219,11 +238,29 @@ impl Ollama {
             .await
             .map_err(|_| DriverError::Ollama)??;
         }
-        let remaining = self.running_models().await?;
-        if !remaining.models.is_empty() {
-            return Err(DriverError::Ollama);
+        loop {
+            cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
+            let remaining = tokio::time::timeout(left, self.running_models())
+                .await
+                .map_err(|_| DriverError::Ollama)??;
+            cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+            if remaining.models.is_empty() {
+                return if cancellation_requested {
+                    Err(DriverError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
+            tokio::time::sleep(POLL_INTERVAL.min(left)).await;
         }
-        Ok(())
     }
     fn frame(
         &self,

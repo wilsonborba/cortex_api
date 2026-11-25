@@ -8,9 +8,13 @@ use axum::{
 };
 use cortex_api::{
     core::config::Config,
-    dal::remote::ollama::Ollama,
+    dal::remote::{
+        model_router::ModelRouter,
+        ollama::Ollama,
+        prism::{Prism, PrismProcessControl},
+    },
     domain::{
-        models::{driver::*, identity::Caller, usage::*},
+        models::{driver::*, identity::Caller, model_profile::ModelProfile, usage::*},
         services::balancer::Scheduler,
     },
 };
@@ -27,6 +31,7 @@ use tokio::sync::{mpsc, watch};
 #[derive(Clone, Default)]
 struct Double {
     loaded: Arc<Mutex<Option<String>>>,
+    base_url: Arc<Mutex<Option<String>>>,
     operations: Arc<Mutex<Vec<String>>>,
     bodies: Arc<Mutex<Vec<Value>>>,
     fail: Arc<AtomicBool>,
@@ -37,6 +42,10 @@ struct Double {
     stall: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
     maximum: Arc<AtomicUsize>,
+    unload_residual_ps: Arc<AtomicUsize>,
+    unload_stuck: Arc<AtomicBool>,
+    unload_started: Arc<AtomicBool>,
+    ps_calls: Arc<AtomicUsize>,
 }
 struct Busy(Arc<AtomicUsize>);
 impl Drop for Busy {
@@ -45,8 +54,23 @@ impl Drop for Busy {
     }
 }
 async fn ps(State(s): State<Double>) -> Json<Value> {
+    s.ps_calls.fetch_add(1, Ordering::SeqCst);
+    let mut loaded = s.loaded.lock().unwrap();
+    if s.unload_started.load(Ordering::SeqCst) {
+        if s.unload_stuck.load(Ordering::SeqCst) {
+            return Json(
+                json!({"models":loaded.as_ref().map(|name|vec![json!({"name":name,"context_length":8192})]).unwrap_or_default()}),
+            );
+        }
+        let stale = s.unload_residual_ps.load(Ordering::SeqCst);
+        if stale > 0 {
+            s.unload_residual_ps.fetch_sub(1, Ordering::SeqCst);
+        } else {
+            *loaded = None;
+        }
+    }
     Json(
-        json!({"models":s.loaded.lock().unwrap().as_ref().map(|name|vec![json!({"name":name,"context_length":8192})]).unwrap_or_default()}),
+        json!({"models":loaded.as_ref().map(|name|vec![json!({"name":name,"context_length":8192})]).unwrap_or_default()}),
     )
 }
 async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Response {
@@ -63,10 +87,16 @@ async fn generate(State(s): State<Double>, Json(body): Json<Value>) -> Response 
     let model = body["model"].as_str().unwrap();
     if body["keep_alive"] == 0 {
         s.operations.lock().unwrap().push(format!("unload:{model}"));
-        *s.loaded.lock().unwrap() = None;
+        s.unload_started.store(true, Ordering::SeqCst);
+        if !s.unload_stuck.load(Ordering::SeqCst)
+            && s.unload_residual_ps.load(Ordering::SeqCst) == 0
+        {
+            *s.loaded.lock().unwrap() = None;
+        }
     } else {
         assert_eq!(body["options"]["num_ctx"], 8192);
         s.operations.lock().unwrap().push(format!("load:{model}"));
+        s.unload_started.store(false, Ordering::SeqCst);
         *s.loaded.lock().unwrap() = Some(model.into());
     }
     Json(json!({"done":true})).into_response()
@@ -212,6 +242,7 @@ async fn setup() -> (
     let state = Double::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    *state.base_url.lock().unwrap() = Some(format!("http://{address}"));
     let server = state.clone();
     let task = tokio::spawn(async move {
         axum::serve(
@@ -239,6 +270,253 @@ async fn setup() -> (
         task,
     )
 }
+
+async fn mock_running_models(state: &Double) -> Value {
+    let base = state.base_url.lock().unwrap().clone().unwrap();
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("{base}/api/ps"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn prism_transition_waits_for_one_stale_unload_snapshot_to_clear() {
+    let (driver, scheduler, _, state, task) = setup().await;
+    let config = Config::default();
+    *state.loaded.lock().unwrap() = Some(config.text_model.clone());
+    state.unload_residual_ps.store(1, Ordering::SeqCst);
+    let permit = scheduler
+        .acquire("fixture-user".into(), uuid::Uuid::new_v4())
+        .await
+        .unwrap();
+    let (_cancel_tx, mut cancel) = watch::channel(false);
+
+    let result = driver
+        .release_models_for_prism_transition(&permit, &mut cancel)
+        .await;
+    assert_eq!(result, Ok(()));
+    assert_eq!(state.ps_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(mock_running_models(&state).await["models"], json!([]));
+    assert_eq!(
+        state.operations.lock().unwrap().as_slice(),
+        &[format!("unload:{}", config.text_model)]
+    );
+
+    drop(permit);
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn prism_transition_times_out_when_a_model_remains_loaded_after_unload() {
+    let (_, scheduler, _, state, task) = setup().await;
+    let config = Config {
+        bonsai_enabled: true,
+        ollama_url: state.base_url.lock().unwrap().clone().unwrap(),
+        prism_url: "http://127.0.0.1:19876".into(),
+        ..Config::default()
+    };
+    *state.loaded.lock().unwrap() = Some(config.text_model.clone());
+    state.unload_stuck.store(true, Ordering::SeqCst);
+    let process = CountingPrismProcess::default();
+    let router = ModelRouter::new(
+        Arc::new(Ollama::new(config.clone(), scheduler.clone())),
+        Arc::new(Prism::managed(
+            config.clone(),
+            scheduler.clone(),
+            Arc::new(process.clone()),
+        )),
+        scheduler.clone(),
+    );
+    let output = OutputModel::for_profile(
+        &Caller {
+            app_id: "cortex".into(),
+            user_id: Some("fixture-user".into()),
+            is_admin: false,
+        },
+        uuid::Uuid::new_v4(),
+        ModelProfile::Bonsai25Official,
+        false,
+    );
+    let (event_tx, _) = mpsc::unbounded_channel();
+    let (_cancel_tx, cancel) = watch::channel(false);
+    let result = router
+        .call(&output, input(false, "answer"), event_tx, cancel)
+        .await;
+    assert!(matches!(result, Err(DriverError::Ollama)));
+    assert!(state.ps_calls.load(Ordering::SeqCst) > 2);
+    assert_eq!(
+        mock_running_models(&state).await["models"][0]["name"],
+        config.text_model
+    );
+    assert_eq!(
+        process.0.load(Ordering::SeqCst),
+        0,
+        "Prism ensure was not called"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn cancelled_prism_transition_keeps_its_permit_until_models_are_unloaded() {
+    let (driver, scheduler, _, state, task) = setup().await;
+    let config = Config::default();
+    *state.loaded.lock().unwrap() = Some(config.text_model.clone());
+    state.unload_residual_ps.store(1, Ordering::SeqCst);
+    let permit = scheduler
+        .acquire("fixture-user".into(), uuid::Uuid::new_v4())
+        .await
+        .unwrap();
+    let (cancel_tx, mut cancel) = watch::channel(false);
+    let release_driver = driver.clone();
+    let release = tokio::spawn(async move {
+        release_driver
+            .release_models_for_prism_transition(&permit, &mut cancel)
+            .await
+    });
+    let queued_scheduler = scheduler.clone();
+    let queued = tokio::spawn(async move {
+        queued_scheduler
+            .acquire("fixture-user".into(), uuid::Uuid::new_v4())
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.ps_calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first stale post-unload snapshot arrives");
+    assert_eq!(scheduler.waiting_count(), 1);
+    assert!(
+        !queued.is_finished(),
+        "permit remains held during settle wait"
+    );
+    cancel_tx.send(true).unwrap();
+
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), release)
+            .await
+            .expect("unload settles before releasing the permit")
+            .unwrap(),
+        Err(DriverError::Cancelled)
+    );
+    let queued_permit = tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .expect("queued job proceeds after unload settles")
+        .unwrap()
+        .unwrap();
+    assert_eq!(mock_running_models(&state).await["models"], json!([]));
+
+    drop(queued_permit);
+    task.abort();
+}
+
+#[derive(Clone, Default)]
+struct CountingPrismProcess(Arc<AtomicUsize>);
+
+impl PrismProcessControl for CountingPrismProcess {
+    fn ensure<'a>(
+        &'a self,
+        _: &'a Config,
+        _: ModelProfile,
+        _: &'a mut watch::Receiver<bool>,
+    ) -> Pending<'a, Result<(), DriverError>> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a self) -> Pending<'a, Result<(), DriverError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn is_running<'a>(&'a self, _: ModelProfile) -> Pending<'a, Result<bool, DriverError>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
+#[tokio::test]
+async fn cancelled_router_transition_does_not_start_prism_before_unload_settles() {
+    let (_, scheduler, _, state, task) = setup().await;
+    let config = Config {
+        bonsai_enabled: true,
+        ollama_url: state.base_url.lock().unwrap().clone().unwrap(),
+        prism_url: "http://127.0.0.1:19876".into(),
+        ..Config::default()
+    };
+    *state.loaded.lock().unwrap() = Some(config.text_model.clone());
+    state.unload_residual_ps.store(1, Ordering::SeqCst);
+    let ollama = Arc::new(Ollama::new(config.clone(), scheduler.clone()));
+    let process = CountingPrismProcess::default();
+    let prism = Arc::new(Prism::managed(
+        config,
+        scheduler.clone(),
+        Arc::new(process.clone()),
+    ));
+    let router = Arc::new(ModelRouter::new(ollama, prism, scheduler.clone()));
+    let output = OutputModel::for_profile(
+        &Caller {
+            app_id: "cortex".into(),
+            user_id: Some("fixture-user".into()),
+            is_admin: false,
+        },
+        uuid::Uuid::new_v4(),
+        ModelProfile::Bonsai25Official,
+        false,
+    );
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let call_router = router.clone();
+    let call_task = tokio::spawn(async move {
+        let (event_tx, _) = mpsc::unbounded_channel();
+        call_router
+            .call(&output, input(false, "answer"), event_tx, cancel_rx)
+            .await
+    });
+    let queued_scheduler = scheduler.clone();
+    let queued = tokio::spawn(async move {
+        queued_scheduler
+            .acquire("fixture-user".into(), uuid::Uuid::new_v4())
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.ps_calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stale post-unload snapshot arrives");
+    assert_eq!(scheduler.waiting_count(), 1);
+    assert!(!queued.is_finished(), "router retains scheduler permit");
+    cancel_tx.send(true).unwrap();
+
+    let call_result = tokio::time::timeout(Duration::from_secs(2), call_task)
+        .await
+        .expect("router waits for unload settlement")
+        .unwrap();
+    assert!(matches!(call_result, Err(DriverError::Cancelled)));
+    assert_eq!(
+        process.0.load(Ordering::SeqCst),
+        0,
+        "Prism ensure was not called"
+    );
+    assert_eq!(mock_running_models(&state).await["models"], json!([]));
+    let queued_permit = tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .expect("queued work starts after unload settles")
+        .unwrap()
+        .unwrap();
+    drop(queued_permit);
+    task.abort();
+}
+
 fn output(images: bool) -> OutputModel {
     OutputModel::new(
         &Caller {
