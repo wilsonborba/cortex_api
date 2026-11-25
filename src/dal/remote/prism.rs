@@ -281,6 +281,13 @@ impl Prism {
                         return Err(DriverError::Ollama);
                     }
                 }
+                #[cfg(test)]
+                let prefix_diagnostic = input.prefix.is_some()
+                    && std::env::var_os("CORTEX_TEST_CAPTURE_PRISM_PREFIX_SSE").is_some();
+                #[cfg(test)]
+                let mut diagnostic_sse = Vec::new();
+                #[cfg(test)]
+                let mut diagnostic_sse_truncated = false;
                 let mut stream = response.bytes_stream();
                 let mut buffer = Vec::new();
                 let mut text = String::new();
@@ -310,6 +317,14 @@ impl Prism {
                             break;
                         }
                     };
+                    #[cfg(test)]
+                    if prefix_diagnostic {
+                        const DIAGNOSTIC_LIMIT: usize = 64 * 1024;
+                        let remaining = DIAGNOSTIC_LIMIT.saturating_sub(diagnostic_sse.len());
+                        let keep = remaining.min(chunk.len());
+                        diagnostic_sse.extend_from_slice(&chunk[..keep]);
+                        diagnostic_sse_truncated |= keep < chunk.len();
+                    }
                     buffer.extend_from_slice(&chunk);
                     if buffer.len() > MAX_FRAME_BYTES {
                         stream_error = Some(DriverError::Ollama);
@@ -401,6 +416,47 @@ impl Prism {
                     && (!done || !finish_seen || !buffer.iter().all(u8::is_ascii_whitespace))
                 {
                     stream_error = Some(DriverError::Ollama);
+                }
+                #[cfg(test)]
+                if prefix_diagnostic {
+                    let request_body_sha256 = {
+                        use sha2::Digest;
+                        let digest = sha2::Sha256::digest(body.to_string().as_bytes());
+                        digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+                    };
+                    let mut safe_request = body.clone();
+                    if let Some(safe_messages) = safe_request
+                        .get_mut("messages")
+                        .and_then(Value::as_array_mut)
+                    {
+                        for message in safe_messages {
+                            let role = message.get("role").and_then(Value::as_str);
+                            if role == Some("system") {
+                                if let Some(content) = message.get_mut("content") {
+                                    let byte_len = content
+                                        .as_str()
+                                        .map(str::len)
+                                        .unwrap_or_else(|| content.to_string().len());
+                                    *content = Value::String(format!("<redacted:{byte_len} bytes>"));
+                                }
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "PRISM_PREFIX_DIAGNOSTIC {}",
+                        json!({
+                            "request_redacted": safe_request,
+                            "request_body_sha256": request_body_sha256,
+                            "raw_sse_utf8": String::from_utf8_lossy(&diagnostic_sse),
+                            "raw_sse_truncated": diagnostic_sse_truncated,
+                            "saw_done": done,
+                            "saw_finish_reason": finish_seen,
+                            "visible_text_bytes": text.len(),
+                            "completion_tokens": completion_tokens,
+                            "first_visible_content_ms": first_ms,
+                            "stream_error": stream_error.as_ref().map(|error| format!("{error:?}")),
+                        })
+                    );
                 }
                 let (tool_request, tool_error) = if stream_error.is_some() || calls.is_empty() {
                     (None, None)

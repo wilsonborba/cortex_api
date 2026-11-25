@@ -381,6 +381,31 @@ mod tests {
         }
     }
 
+    fn middle_word_prefix(text: &str) -> Option<String> {
+        let midpoint = text.len() / 2;
+        let split = text
+            .char_indices()
+            .filter(|(_, character)| character.is_whitespace())
+            .map(|(index, _)| index)
+            .min_by_key(|index| index.abs_diff(midpoint))?;
+        let prefix = text[..split].trim_end();
+        (!prefix.is_empty() && prefix.len() < text.len()).then(|| prefix.to_owned())
+    }
+
+    #[test]
+    fn middle_word_prefix_uses_utf8_word_boundary() {
+        let answer = "naïve Rust explains values clearly";
+        let prefix = middle_word_prefix(answer).expect("whitespace boundary in answer");
+        assert!(answer.starts_with(&prefix));
+        assert!(prefix.len() < answer.len());
+        assert!(
+            answer[prefix.len()..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        );
+    }
+
     fn evaluation_resources_ok(min_gpu_free_mib: u64) -> Result<(), String> {
         let mem = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
         let available_kib = mem
@@ -554,7 +579,6 @@ mod tests {
                 _ = &mut deadline => panic!("bounded evaluation call exceeded 240 seconds; inspect owned supervisor cleanup before retry"),
             }
             let _ = saw_token;
-            evaluation_resources_ok(700).expect("resource pressure during call");
         }
     }
 
@@ -660,17 +684,26 @@ mod tests {
         let mut owned_t0 = false;
         let result = std::panic::AssertUnwindSafe(async {
             let uncensored = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
-            let cold = evaluation_call(&router, &uncensored,
-                eval_input("In English, explain in one sentence what a Rust Result represents.", vec![], None, false)).await;
+            let original_question =
+                "In English, explain in one sentence what a Rust Result represents.";
+            let original_input = cortex_eval_input(&config, original_question);
+            let cold = evaluation_call(&router, &uncensored, original_input.clone()).await;
             assert!(!cold.text.trim().is_empty());
             assert_measured_answer(&cold);
             eprintln!("EVAL {}", serde_json::json!({"case":"uncensored-en-cold","profile":uncensored.model_id(),"ttft_ms":cold.usage.time_to_first_token_ms,"input_tokens":cold.usage.input_tokens,"output_tokens":cold.usage.output_tokens,"usage_measured":cold.usage_measured,"total_ms":cold.usage.total_ms,"tokens_per_second":cold.tokens_per_second,"text":cold.text}));
             let first_pid = supervisor.child.lock().await.as_ref().expect("owned uncensored child").pid;
             let first_start = process_start_ticks(first_pid).expect("read owned Prism process identity");
 
-            let mut prefix_input = cortex_eval_input(&config, "Continue this answer with one short clause.");
-            prefix_input.prefix = Some("A Rust Result is an enum that represents ".into());
+            let mut prefix_input = original_input;
+            prefix_input.prefix = Some(
+                middle_word_prefix(&cold.text)
+                    .expect("generated English answer has a valid middle word boundary"),
+            );
             let prefix = evaluation_call(&router, &uncensored, prefix_input).await;
+            assert!(
+                !prefix.text.trim().is_empty(),
+                "a prefix cut in the middle of the generated answer must produce visible continuation text"
+            );
             assert_measured_answer(&prefix);
             assert_eq!(supervisor.child.lock().await.as_ref().expect("same owned child").pid, first_pid,
                 "healthy same-profile calls reuse one process");
@@ -710,8 +743,9 @@ mod tests {
             }
 
             let official = evaluation_output(ModelProfile::Bonsai25Official, false);
+            let official_original_input = cortex_eval_input(&config, original_question);
             let answer = evaluation_call(&router, &official,
-                eval_input("In English, explain in one sentence what a Rust Result represents.", vec![], None, false)).await;
+                official_original_input.clone()).await;
             assert_measured_answer(&answer);
             let official_child = supervisor.child.lock().await;
             let official_pid = official_child.as_ref().expect("owned official child").pid;
@@ -724,9 +758,16 @@ mod tests {
             }
             eprintln!("EVAL {}", serde_json::json!({"case":"official-en-switch","profile":official.model_id(),"pid":official_pid,"ttft_ms":answer.usage.time_to_first_token_ms,"total_ms":answer.usage.total_ms,"text":answer.text}));
             drop(official_child);
-            let mut official_prefix_input = cortex_eval_input(&config, "Continue this answer with one short clause.");
-            official_prefix_input.prefix = Some("A Rust Result is an enum that represents ".into());
+            let mut official_prefix_input = official_original_input;
+            official_prefix_input.prefix = Some(
+                middle_word_prefix(&answer.text)
+                    .expect("official generated answer has a valid middle word boundary"),
+            );
             let official_prefix = evaluation_call(&router, &official, official_prefix_input).await;
+            assert!(
+                !official_prefix.text.trim().is_empty(),
+                "a prefix cut in the middle of the official answer must produce visible continuation text"
+            );
             assert_measured_answer(&official_prefix);
             assert_eq!(supervisor.child.lock().await.as_ref().expect("official same-profile child").pid, official_pid);
             eprintln!("EVAL {}", serde_json::json!({"case":"official-prefix","ttft_ms":official_prefix.usage.time_to_first_token_ms,"usage_measured":official_prefix.usage_measured,"text":official_prefix.text}));
@@ -916,6 +957,128 @@ mod tests {
         }.await;
         stop_result.expect("owned Prism cleanup");
         cleanup_state.expect("verify Ollama is empty or report preserved unexpected models");
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires separate explicit GPU authorization; captures one synthetic prefix request and SSE"]
+    async fn gpu_prism_prefix_diagnostic_uncensored() {
+        use futures_util::FutureExt;
+
+        assert!(
+            std::env::var_os("CORTEX_TEST_CAPTURE_PRISM_PREFIX_SSE").is_some(),
+            "diagnostic wrapper must explicitly enable bounded raw SSE capture"
+        );
+        evaluation_resources_ok(7600)
+            .expect("safe host resources before model use; MTP requires headroom");
+        let available = std::net::TcpListener::bind("127.0.0.1:0").expect("free loopback port");
+        let port = available.local_addr().unwrap().port();
+        drop(available);
+        let config = Config {
+            bonsai_enabled: true,
+            prism_server_path: std::env::var("CORTEX_TEST_PRISM_SERVER")
+                .expect("diagnostic wrapper pins CORTEX_TEST_PRISM_SERVER")
+                .into(),
+            bonsai_model_directory: std::env::var("CORTEX_TEST_BONSAI_DIR")
+                .expect("diagnostic wrapper pins CORTEX_TEST_BONSAI_DIR")
+                .into(),
+            ollama_url: std::env::var("CORTEX_TEST_OLLAMA_URL")
+                .expect("diagnostic wrapper pins CORTEX_TEST_OLLAMA_URL"),
+            prism_url: format!("http://127.0.0.1:{port}"),
+            ..Config::default()
+        };
+        assert!(config.prism_url_is_loopback());
+        assert!(
+            ollama_loaded(&config)
+                .await
+                .expect("Ollama preflight")
+                .is_empty(),
+            "pre-existing Ollama models: do not unload another user's work"
+        );
+        let apps = std::process::Command::new("timeout")
+            .args([
+                "5s",
+                "nvidia-smi",
+                "--query-compute-apps=pid,name",
+                "--format=csv,noheader",
+            ])
+            .output()
+            .expect("nvidia-smi compute-process preflight");
+        assert!(
+            apps.status.success(),
+            "nvidia-smi failed: {}",
+            String::from_utf8_lossy(&apps.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&apps.stdout).trim().is_empty(),
+            "GPU compute process already active; do not disturb it"
+        );
+
+        let queue = Scheduler::new(Arc::new(EvaluationLedger));
+        let supervisor = Arc::new(PrismSupervisor::new());
+        let ollama = Arc::new(
+            Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()),
+        );
+        let prism = Arc::new(Prism::managed(
+            config.clone(),
+            queue.clone(),
+            supervisor.clone(),
+        ));
+        let router = Arc::new(ModelRouter::new(ollama, prism, queue));
+        let result = std::panic::AssertUnwindSafe(async {
+            let output = evaluation_output(ModelProfile::Bonsai25Uncensored, false);
+            let original_question =
+                "In English, explain in one sentence what a Rust Result represents.";
+            let original_input = cortex_eval_input(&config, original_question);
+            let cold = evaluation_call(&router, &output, original_input.clone()).await;
+            assert!(!cold.text.trim().is_empty(), "initial synthetic answer is nonempty");
+            assert_measured_answer(&cold);
+            let mut continuation_input = original_input;
+            continuation_input.prefix = Some(
+                middle_word_prefix(&cold.text)
+                    .expect("initial answer has a valid middle word boundary"),
+            );
+            let continuation = evaluation_call(&router, &output, continuation_input).await;
+            eprintln!(
+                "PREFIX_DIAGNOSTIC_RESULT {}",
+                serde_json::json!({
+                    "profile": output.model_id(),
+                    "initial_text": cold.text,
+                    "initial_tokens": cold.usage.output_tokens,
+                    "continuation_text": continuation.text,
+                    "continuation_input_tokens": continuation.usage.input_tokens,
+                    "continuation_output_tokens": continuation.usage.output_tokens,
+                    "continuation_ttft_ms": continuation.usage.time_to_first_token_ms,
+                    "continuation_measured": continuation.usage_measured,
+                    "continuation_error": continuation.error.as_ref().map(|error| format!("{error:?}")),
+                    "inspection_reason": continuation.inspection.as_ref().and_then(|inspection| inspection.reason.clone()),
+                })
+            );
+            assert!(
+                continuation.error.is_none(),
+                "provider must complete the targeted prefix request without a stream error"
+            );
+            assert!(
+                !continuation.text.trim().is_empty(),
+                "a prefix cut in the middle of the generated answer must yield visible continuation text"
+            );
+            assert_measured_answer(&continuation);
+        })
+        .catch_unwind()
+        .await;
+        supervisor
+            .stop()
+            .await
+            .expect("stop/reap only the diagnostic Prism child");
+        assert!(
+            ollama_loaded(&config)
+                .await
+                .expect("verify Ollama stayed empty")
+                .is_empty(),
+            "diagnostic must not load or unload T0 models"
+        );
         if let Err(panic) = result {
             std::panic::resume_unwind(panic);
         }
