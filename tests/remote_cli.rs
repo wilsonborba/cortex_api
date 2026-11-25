@@ -822,11 +822,12 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         assert!(tools.set_pending(cortex_api::domain::models::tools::PendingTool {
             call_id: call,
             name: cortex_api::domain::models::tools::ToolName::RunCommand,
-            arguments: command_arguments,
+            arguments: command_arguments.clone(),
         }));
         let (cancel, _) = watch::channel(false);
         let (stop_thinking, _) = watch::channel(false);
         let (live, _) = tokio::sync::broadcast::channel(8);
+        let test_tools = tools.clone();
         runtime.controls.open(
             output,
             cortex_api::domain::services::output_controls::Control::new(
@@ -904,6 +905,43 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         assert_eq!(retry_status, StatusCode::OK);
         assert_eq!(retry["data"]["action_id"], action_id);
 
+        let wrong_session_approval_path =
+            format!("/remote/sessions/{second_session}/approvals/{action_id}");
+        let (wrong_session_approval_status, _) = json_req(
+            &app,
+            "POST",
+            &wrong_session_approval_path,
+            Some("owner"),
+            Some(json!({"approved":false})),
+        )
+        .await;
+        assert_eq!(wrong_session_approval_status, StatusCode::NOT_FOUND);
+        let wrong_session_legacy_decisions: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM remote_cli_approvals
+             WHERE session_id = $1 AND approval_id = $2",
+        )
+        .bind(Uuid::parse_str(&second_session).unwrap())
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let wrong_session_commands: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM remote_cli_commands
+             WHERE session_id = $1 AND approval_id = $2",
+        )
+        .bind(Uuid::parse_str(&second_session).unwrap())
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (wrong_session_events, _) = remote_cli
+            .ctrl_events_since(&second_session, "owner", 0)
+            .await
+            .unwrap();
+        assert_eq!(wrong_session_legacy_decisions, 0);
+        assert_eq!(wrong_session_commands, 0);
+        assert!(wrong_session_events.is_empty());
+
         let (events, _) = remote_cli
             .ctrl_events_since(&first_session, "owner", 0)
             .await
@@ -937,6 +975,26 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         )
         .await;
         assert_eq!(answer_status, StatusCode::OK);
+        let phone_path = format!("/remote/sessions/{first_session}/approvals/{action_id}");
+        let (phone_loser_status, _) = json_req(
+            &app,
+            "POST",
+            &phone_path,
+            Some("owner"),
+            Some(json!({"approved":false})),
+        )
+        .await;
+        assert_eq!(phone_loser_status, StatusCode::CONFLICT);
+        let local_winner_command: (i64, bool) = sqlx::query_as(
+            "SELECT COUNT(*), bool_and(approved) FROM remote_cli_commands
+             WHERE session_id = $1 AND kind = 'approval_answer' AND approval_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(&action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(local_winner_command, (1, true));
         let claim_path = format!("{path}/{action_id}/claim");
         let claim = json!({"call_id":call,"action_digest":cli_digest});
         let (claim_status, _) = json_req(
@@ -957,6 +1015,276 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         )
         .await;
         assert_eq!(duplicate_claim, StatusCode::CONFLICT);
+
+        let denied_call = Uuid::now_v7();
+        test_tools.clear_pending(call);
+        assert!(test_tools.set_pending(cortex_api::domain::models::tools::PendingTool {
+            call_id: denied_call,
+            name: cortex_api::domain::models::tools::ToolName::RunCommand,
+            arguments: command_arguments.clone(),
+        }));
+        let (denied_create_status, denied_action) = json_req(
+            &app,
+            "POST",
+            &path,
+            Some("owner"),
+            Some(json!({"call_id":denied_call})),
+        )
+        .await;
+        assert_eq!(denied_create_status, StatusCode::CREATED);
+        let denied_action_id = denied_action["data"]["action_id"].as_str().unwrap();
+        let denied_phone_path =
+            format!("/remote/sessions/{first_session}/approvals/{denied_action_id}");
+        let (denied_phone_status, _) = json_req(
+            &app,
+            "POST",
+            &denied_phone_path,
+            Some("owner"),
+            Some(json!({"approved":false})),
+        )
+        .await;
+        assert_eq!(denied_phone_status, StatusCode::OK);
+        let denied_local_path = format!("{path}/{denied_action_id}/answer");
+        let (denied_local_status, _) = json_req(
+            &app,
+            "POST",
+            &denied_local_path,
+            Some("owner"),
+            Some(json!({"approved":true})),
+        )
+        .await;
+        assert_eq!(denied_local_status, StatusCode::CONFLICT);
+        let (denied_retry_status, _) = json_req(
+            &app,
+            "POST",
+            &denied_phone_path,
+            Some("owner"),
+            Some(json!({"approved":false})),
+        )
+        .await;
+        assert_eq!(denied_retry_status, StatusCode::CONFLICT);
+        let denied_command_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM remote_cli_commands
+             WHERE session_id = $1 AND kind = 'approval_answer' AND approval_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(denied_action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(denied_command_count, 1, "only the winning phone denial is queued");
+        let denied_decision: Option<bool> = sqlx::query_scalar(
+            "SELECT approved FROM remote_cli_output_actions
+             WHERE session_id = $1 AND action_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(Uuid::parse_str(denied_action_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(denied_decision, Some(false));
+        let denied_claim_path = format!("{path}/{denied_action_id}/claim");
+        let (denied_claim_status, _) = json_req(
+            &app,
+            "POST",
+            &denied_claim_path,
+            Some("owner"),
+            Some(json!({
+                "call_id":denied_call,
+                "action_digest":denied_action["data"]["action_digest"]
+            })),
+        )
+        .await;
+        assert_eq!(denied_claim_status, StatusCode::CONFLICT);
+
+        let parallel_call = Uuid::now_v7();
+        test_tools.clear_pending(denied_call);
+        assert!(test_tools.set_pending(cortex_api::domain::models::tools::PendingTool {
+            call_id: parallel_call,
+            name: cortex_api::domain::models::tools::ToolName::RunCommand,
+            arguments: command_arguments.clone(),
+        }));
+        let (parallel_create_status, parallel_action) = json_req(
+            &app,
+            "POST",
+            &path,
+            Some("owner"),
+            Some(json!({"call_id":parallel_call})),
+        )
+        .await;
+        assert_eq!(parallel_create_status, StatusCode::CREATED);
+        let parallel_action_id = parallel_action["data"]["action_id"].as_str().unwrap();
+        let parallel_phone_path =
+            format!("/remote/sessions/{first_session}/approvals/{parallel_action_id}");
+        let parallel_local_path = format!("{path}/{parallel_action_id}/answer");
+        let phone_answer = json_req(
+            &app,
+            "POST",
+            &parallel_phone_path,
+            Some("owner"),
+            Some(json!({"approved":false})),
+        );
+        let local_answer = json_req(
+            &app,
+            "POST",
+            &parallel_local_path,
+            Some("owner"),
+            Some(json!({"approved":true})),
+        );
+        let ((phone_status, _), (local_status, _)) = tokio::join!(phone_answer, local_answer);
+        assert_eq!(
+            [phone_status, local_status]
+                .iter()
+                .filter(|status| **status == StatusCode::OK)
+                .count(),
+            1,
+            "exactly one concurrent authority answer wins"
+        );
+        assert_eq!(
+            [phone_status, local_status]
+                .iter()
+                .filter(|status| **status == StatusCode::CONFLICT)
+                .count(),
+            1,
+            "the losing concurrent answer is rejected"
+        );
+        let parallel_decision: Option<bool> = sqlx::query_scalar(
+            "SELECT approved FROM remote_cli_output_actions
+             WHERE session_id = $1 AND action_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(Uuid::parse_str(parallel_action_id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parallel_decision, Some(local_status == StatusCode::OK));
+        let parallel_command_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM remote_cli_commands
+             WHERE session_id = $1 AND kind = 'approval_answer' AND approval_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(parallel_action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parallel_command_count, 1);
+        let parallel_command_decision: bool = sqlx::query_scalar(
+            "SELECT approved FROM remote_cli_commands
+             WHERE session_id = $1 AND kind = 'approval_answer' AND approval_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(parallel_action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(parallel_command_decision, parallel_decision.unwrap());
+
+        let expired_call = Uuid::now_v7();
+        test_tools.clear_pending(parallel_call);
+        assert!(test_tools.set_pending(cortex_api::domain::models::tools::PendingTool {
+            call_id: expired_call,
+            name: cortex_api::domain::models::tools::ToolName::RunCommand,
+            arguments: command_arguments.clone(),
+        }));
+        let (expired_create_status, expired_action) = json_req(
+            &app,
+            "POST",
+            &path,
+            Some("owner"),
+            Some(json!({"call_id":expired_call})),
+        )
+        .await;
+        assert_eq!(expired_create_status, StatusCode::CREATED);
+        let expired_action_id = expired_action["data"]["action_id"].as_str().unwrap();
+        sqlx::query(
+            "UPDATE remote_cli_output_actions SET expires_at = now() - interval '1 second'
+             WHERE session_id = $1 AND action_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(Uuid::parse_str(expired_action_id).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let expired_phone_path =
+            format!("/remote/sessions/{first_session}/approvals/{expired_action_id}");
+        let (expired_status, _) = json_req(
+            &app,
+            "POST",
+            &expired_phone_path,
+            Some("owner"),
+            Some(json!({"approved":true})),
+        )
+        .await;
+        assert_eq!(expired_status, StatusCode::CONFLICT);
+        let expired_local_path = format!("{path}/{expired_action_id}/answer");
+        let (expired_local_status, _) = json_req(
+            &app,
+            "POST",
+            &expired_local_path,
+            Some("owner"),
+            Some(json!({"approved":true})),
+        )
+        .await;
+        assert_eq!(expired_local_status, StatusCode::CONFLICT);
+        let expired_commands: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM remote_cli_commands
+             WHERE session_id = $1 AND kind = 'approval_answer' AND approval_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(expired_action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(expired_commands, 0, "expired decisions publish nothing");
+
+        let cancelled_call = Uuid::now_v7();
+        test_tools.clear_pending(expired_call);
+        assert!(test_tools.set_pending(cortex_api::domain::models::tools::PendingTool {
+            call_id: cancelled_call,
+            name: cortex_api::domain::models::tools::ToolName::RunCommand,
+            arguments: command_arguments,
+        }));
+        let (cancelled_create_status, cancelled_action) = json_req(
+            &app,
+            "POST",
+            &path,
+            Some("owner"),
+            Some(json!({"call_id":cancelled_call})),
+        )
+        .await;
+        assert_eq!(cancelled_create_status, StatusCode::CREATED);
+        let cancelled_action_id = cancelled_action["data"]["action_id"].as_str().unwrap();
+        sqlx::query(
+            "UPDATE remote_cli_output_actions SET cancelled_at = now()
+             WHERE session_id = $1 AND action_id = $2",
+        )
+        .bind(Uuid::parse_str(&first_session).unwrap())
+        .bind(Uuid::parse_str(cancelled_action_id).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cancelled_phone_path =
+            format!("/remote/sessions/{first_session}/approvals/{cancelled_action_id}");
+        let (cancelled_status, _) = json_req(
+            &app,
+            "POST",
+            &cancelled_phone_path,
+            Some("owner"),
+            Some(json!({"approved":true})),
+        )
+        .await;
+        assert_eq!(cancelled_status, StatusCode::CONFLICT);
+        let wrong_owner_path =
+            format!("/remote/sessions/{first_session}/approvals/{cancelled_action_id}");
+        let (wrong_owner_status, _) = json_req(
+            &app,
+            "POST",
+            &wrong_owner_path,
+            Some("other-owner"),
+            Some(json!({"approved":true})),
+        )
+        .await;
+        assert_eq!(wrong_owner_status, StatusCode::FORBIDDEN);
     }
     .await;
     pool.close().await;
