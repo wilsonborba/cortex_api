@@ -986,9 +986,10 @@ mod tests {
             }
         })
         .await;
+        let t1_still_active_when_t0_waited = cancel_result.is_none();
         eprintln!(
             "EVAL {}",
-            serde_json::json!({"case":"cancellation-queue-observation","profile":profile.id(),"t1_token_observed":saw_cancel_token,"t0_waiting_observed":saw_queued_wait,"t0_registered_in_scheduler":queued_registered,"t0_observation_timed_out":queued_observation.is_err(),"resource_pressure":pressure_detected,"t1_finished_before_queue_observed":cancel_result.is_some(),"t1_result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err())),"t0_finished_before_wait_observed":queued_result.is_some(),"t0_result":queued_result.as_ref().map(|result|format!("{:?}",result.as_ref().err()))})
+            serde_json::json!({"case":"cancellation-queue-observation","profile":profile.id(),"t1_token_observed":saw_cancel_token,"t0_waiting_observed":saw_queued_wait,"t0_registered_in_scheduler":queued_registered,"t1_still_active_when_t0_waited":t1_still_active_when_t0_waited,"t0_observation_timed_out":queued_observation.is_err(),"resource_pressure":pressure_detected,"t1_finished_before_queue_observed":!t1_still_active_when_t0_waited,"t1_result":cancel_result.as_ref().map(|result|format!("{:?}",result.as_ref().err())),"t0_finished_before_wait_observed":queued_result.is_some(),"t0_result":queued_result.as_ref().map(|result|format!("{:?}",result.as_ref().err()))})
         );
         let _ = cancel_tx.send(true);
         if pressure_detected {
@@ -1051,7 +1052,8 @@ mod tests {
                 && !pressure_detected
                 && saw_cancel_token
                 && saw_queued_wait
-                && queued_registered,
+                && queued_registered
+                && t1_still_active_when_t0_waited,
             "T1 token must precede an actually registered queued T0 before cancellation"
         );
         let partial = partial_result.expect("partial result survives cancellation");
