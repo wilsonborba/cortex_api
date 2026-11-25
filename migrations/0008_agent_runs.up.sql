@@ -61,3 +61,28 @@ CREATE TABLE remote_cli_child_actions (
 CREATE INDEX ix_remote_cli_child_actions_expiry
     ON remote_cli_child_actions(expires_at)
     WHERE approved IS NULL;
+
+CREATE TABLE remote_cli_output_actions (
+    session_id uuid NOT NULL REFERENCES remote_cli_sessions(session_id) ON DELETE CASCADE,
+    action_id uuid NOT NULL,
+    chat_session_id uuid NOT NULL,
+    output_id uuid NOT NULL REFERENCES chat_outputs(output_id) ON DELETE CASCADE,
+    call_id uuid NOT NULL,
+    tool_name text NOT NULL CHECK (tool_name IN ('replace_file_content', 'run_command')),
+    action_kind text NOT NULL CHECK (action_kind IN ('file_change', 'command')),
+    action_digest text NOT NULL CHECK (action_digest ~ '^[0-9a-f]{64}$'),
+    display_text text NOT NULL CHECK (display_text <> '' AND length(display_text) <= 64000),
+    expires_at timestamptz NOT NULL,
+    approved boolean,
+    answered_at timestamptz,
+    cancelled_at timestamptz,
+    claimed_at timestamptz,
+    created_at timestamptz NOT NULL,
+    PRIMARY KEY (session_id, action_id),
+    UNIQUE (session_id, output_id, call_id),
+    CHECK (claimed_at IS NULL OR approved IS TRUE)
+);
+
+CREATE INDEX ix_remote_cli_output_actions_expiry
+    ON remote_cli_output_actions(expires_at)
+    WHERE approved IS NULL AND cancelled_at IS NULL AND claimed_at IS NULL;

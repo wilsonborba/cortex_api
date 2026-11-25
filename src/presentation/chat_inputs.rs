@@ -196,7 +196,7 @@ async fn next(
 
 /// x-uuid must own the chat and the output (10.4.5). Returns true for a
 /// temporary chat.
-async fn owned_output(
+pub(crate) async fn owned_output(
     runtime: &ChatRuntime,
     context: &CallerContext,
     user: &str,
@@ -349,6 +349,12 @@ async fn control(
         .ok_or_else(|| failure(process_numbers::OUTPUT_NOT_RUNNING))?;
     let data = json!({"session_id": session, "output_id": output});
     if cancel {
+        runtime
+            .agent_runs
+            .store
+            .cancel_output_actions(&user, session, output, chrono::Utc::now())
+            .await
+            .map_err(|_| failure(process_numbers::REMOTE_CLI_UNAVAILABLE))?;
         let _ = control.cancel.send(true);
         Ok(Envelope::new("Output cancel sent", data))
     } else {

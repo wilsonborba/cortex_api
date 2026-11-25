@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -35,6 +36,20 @@ impl ToolName {
             Self::RunCommand => "run_command",
         }
     }
+}
+
+pub fn action_digest(call_id: Uuid, name: ToolName, arguments: &Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(call_id.to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(name.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(arguments.to_string().as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +172,7 @@ impl ToolRequest {
                     serde_json::from_value(arguments).map_err(|_| ToolError::InvalidRequest)?;
                 if !bounded_string(&args.cwd, 1024)
                     || args.argv.is_empty()
+                    || args.argv[0].trim().is_empty()
                     || args.argv.len() > 64
                     || args.argv.iter().any(|s| s.len() > 4096 || s.contains('\0'))
                 {
@@ -190,10 +206,11 @@ pub struct ToolExchange {
     pub output: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PendingTool {
     pub call_id: Uuid,
     pub name: ToolName,
+    pub arguments: Value,
 }
 
 #[derive(Clone)]
@@ -219,9 +236,19 @@ impl ToolControl {
         true
     }
 
+    pub fn pending(&self) -> Option<PendingTool> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub fn clear_pending(&self, call_id: Uuid) {
         let mut slot = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        if slot.is_some_and(|pending| pending.call_id == call_id) {
+        if slot
+            .as_ref()
+            .is_some_and(|pending| pending.call_id == call_id)
+        {
             *slot = None;
         }
     }
@@ -232,6 +259,7 @@ impl ToolControl {
         }
         let mut slot = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if !slot
+            .as_ref()
             .is_some_and(|pending| pending.call_id == result.call_id && pending.name == result.name)
         {
             return Err(ToolError::NoPendingCall);

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::domain::services::agent_runs::{
     AgentRunStore, ChildEventKind, ChildRun, ChildRunError, ChildRunEvent, ChildRunStatus,
-    PendingChildAction,
+    OutputAction, PendingChildAction,
 };
 
 #[derive(Clone)]
@@ -171,6 +171,50 @@ impl PostgresAgentRunStore {
             Some(found) if found != owner => Err(ChildRunError::Forbidden),
             Some(_) => Ok(()),
         }
+    }
+
+    fn output_action(row: &sqlx::postgres::PgRow) -> Result<OutputAction, ChildRunError> {
+        Ok(OutputAction {
+            action_id: row
+                .try_get("action_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            chat_session_id: row
+                .try_get("chat_session_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            output_id: row
+                .try_get("output_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            call_id: row
+                .try_get("call_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            tool_name: row
+                .try_get("tool_name")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            action_kind: row
+                .try_get("action_kind")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            action_digest: row
+                .try_get("action_digest")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            display: row
+                .try_get("display_text")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            expires_at: row
+                .try_get("expires_at")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            approved: row
+                .try_get("approved")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            cancelled_at: row
+                .try_get("cancelled_at")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            claimed_at: row
+                .try_get("claimed_at")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|_| ChildRunError::Unavailable)?,
+        })
     }
 }
 
@@ -533,6 +577,132 @@ impl AgentRunStore for PostgresAgentRunStore {
             .await?;
             tx.commit().await.map_err(|_| ChildRunError::Unavailable)?;
             Ok(ev)
+        })
+    }
+    fn create_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        action: OutputAction,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.owner_check(session_id, owner).await?;
+            if action.expires_at <= now {
+                return Err(ChildRunError::Conflict);
+            }
+            let row = sqlx::query("INSERT INTO remote_cli_output_actions (session_id, action_id, chat_session_id, output_id, call_id, tool_name, action_kind, action_digest, display_text, expires_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *")
+                .bind(session_id).bind(action.action_id).bind(action.chat_session_id)
+                .bind(action.output_id).bind(action.call_id).bind(&action.tool_name)
+                .bind(&action.action_kind).bind(&action.action_digest).bind(&action.display)
+                .bind(action.expires_at).bind(now).fetch_one(&self.pool).await
+                .map_err(|e| if e.as_database_error().is_some_and(|db| db.is_unique_violation()) {
+                    ChildRunError::Conflict
+                } else { ChildRunError::Unavailable })?;
+            Self::output_action(&row)
+        })
+    }
+    fn output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.owner_check(session_id, owner).await?;
+            let row = sqlx::query("SELECT * FROM remote_cli_output_actions WHERE session_id=$1 AND chat_session_id=$2 AND output_id=$3 AND action_id=$4")
+                .bind(session_id).bind(chat_session_id).bind(output_id).bind(action_id)
+                .fetch_optional(&self.pool).await.map_err(|_| ChildRunError::Unavailable)?
+                .ok_or(ChildRunError::NotFound)?;
+            Self::output_action(&row)
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn answer_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+        approved: bool,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| ChildRunError::Unavailable)?;
+            Self::owner_in_tx(&mut tx, session_id, owner).await?;
+            let row = sqlx::query("SELECT approved, cancelled_at, claimed_at, expires_at FROM remote_cli_output_actions WHERE session_id=$1 AND chat_session_id=$2 AND output_id=$3 AND action_id=$4 FOR UPDATE")
+                .bind(session_id).bind(chat_session_id).bind(output_id).bind(action_id)
+                .fetch_optional(&mut *tx).await.map_err(|_| ChildRunError::Unavailable)?
+                .ok_or(ChildRunError::NotFound)?;
+            let existing: Option<bool> = row
+                .try_get("approved")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            let cancelled: Option<DateTime<Utc>> = row
+                .try_get("cancelled_at")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            let claimed: Option<DateTime<Utc>> = row
+                .try_get("claimed_at")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            let expires: DateTime<Utc> = row
+                .try_get("expires_at")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            if existing.is_some() || cancelled.is_some() || claimed.is_some() || expires <= now {
+                return Err(ChildRunError::Conflict);
+            }
+            let row = sqlx::query("UPDATE remote_cli_output_actions SET approved=$5,answered_at=$6 WHERE session_id=$1 AND chat_session_id=$2 AND output_id=$3 AND action_id=$4 AND approved IS NULL AND cancelled_at IS NULL AND claimed_at IS NULL AND expires_at>$6 RETURNING *")
+                .bind(session_id).bind(chat_session_id).bind(output_id).bind(action_id).bind(approved).bind(now)
+                .fetch_optional(&mut *tx).await.map_err(|_| ChildRunError::Unavailable)?
+                .ok_or(ChildRunError::Conflict)?;
+            tx.commit().await.map_err(|_| ChildRunError::Unavailable)?;
+            Self::output_action(&row)
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn claim_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+        call_id: Uuid,
+        digest: &'a str,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| ChildRunError::Unavailable)?;
+            Self::owner_in_tx(&mut tx, session_id, owner).await?;
+            let row = sqlx::query("UPDATE remote_cli_output_actions SET claimed_at=$7 WHERE session_id=$1 AND chat_session_id=$2 AND output_id=$3 AND action_id=$4 AND call_id=$5 AND action_digest=$6 AND approved IS TRUE AND cancelled_at IS NULL AND claimed_at IS NULL AND expires_at>$7 RETURNING *")
+                .bind(session_id).bind(chat_session_id).bind(output_id).bind(action_id)
+                .bind(call_id).bind(digest).bind(now).fetch_optional(&mut *tx).await
+                .map_err(|_| ChildRunError::Unavailable)?.ok_or(ChildRunError::Conflict)?;
+            tx.commit().await.map_err(|_| ChildRunError::Unavailable)?;
+            Self::output_action(&row)
+        })
+    }
+    fn cancel_output_actions<'a>(
+        &'a self,
+        owner: &'a str,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            sqlx::query("UPDATE remote_cli_output_actions a SET cancelled_at=$4 FROM remote_cli_sessions s WHERE a.session_id=s.session_id AND s.owner_user=$1 AND a.chat_session_id=$2 AND a.output_id=$3 AND a.claimed_at IS NULL AND a.cancelled_at IS NULL")
+                .bind(owner).bind(chat_session_id).bind(output_id).bind(now).execute(&self.pool).await
+                .map_err(|_| ChildRunError::Unavailable)?;
+            Ok(())
         })
     }
     fn events_after<'a>(

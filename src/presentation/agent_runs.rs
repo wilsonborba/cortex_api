@@ -10,16 +10,22 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::stream;
-use serde::Deserialize;
-use std::{collections::VecDeque, convert::Infallible, time::Duration};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
 use uuid::Uuid;
 
 use crate::{
     domain::services::agent_runs::{
-        AgentRunService, ChildEventKind, ChildRunError, PendingChildAction,
+        AgentRunService, ChildEventKind, ChildRunError, OutputAction, PendingChildAction,
+    },
+    domain::services::{
+        chat_runtime::ChatRuntime,
+        remote_cli::{RemoteCliError, RemoteCliService, RemoteEventKind},
     },
     presentation::{
         UserId,
+        identity::CallerContext,
         response::{self, Envelope},
     },
 };
@@ -145,6 +151,385 @@ pub fn router(service: AgentRunService) -> Router {
             post(answer_action),
         )
         .with_state(service)
+}
+
+#[derive(Clone)]
+struct OutputActionState {
+    service: AgentRunService,
+    runtime: Arc<ChatRuntime>,
+    remote_cli: RemoteCliService,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateOutputAction {
+    call_id: Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerOutputAction {
+    approved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimOutputAction {
+    call_id: Uuid,
+    action_digest: String,
+}
+
+#[derive(Serialize)]
+struct OutputActionView {
+    action_id: Uuid,
+    call_id: Uuid,
+    name: String,
+    action_kind: String,
+    action_digest: String,
+    display: String,
+    expires_at: DateTime<Utc>,
+    status: &'static str,
+}
+
+impl OutputActionView {
+    fn from_action(action: OutputAction, now: DateTime<Utc>) -> Self {
+        let status = action.status(now);
+        Self {
+            action_id: action.action_id,
+            call_id: action.call_id,
+            name: action.tool_name,
+            action_kind: action.action_kind,
+            action_digest: action.action_digest,
+            display: action.display,
+            expires_at: action.expires_at,
+            status,
+        }
+    }
+}
+
+pub fn output_router(
+    service: AgentRunService,
+    runtime: Arc<ChatRuntime>,
+    remote_cli: RemoteCliService,
+) -> Router {
+    let state = OutputActionState {
+        service,
+        runtime,
+        remote_cli,
+    };
+    Router::new()
+        .route(
+            "/remote/sessions/{remote_session_id}/outputs/{chat_session_id}/{output_id}/actions",
+            post(create_output_action),
+        )
+        .route(
+            "/remote/sessions/{remote_session_id}/outputs/{chat_session_id}/{output_id}/actions/{action_id}",
+            get(get_output_action),
+        )
+        .route(
+            "/remote/sessions/{remote_session_id}/outputs/{chat_session_id}/{output_id}/actions/{action_id}/answer",
+            post(answer_output_action),
+        )
+        .route(
+            "/remote/sessions/{remote_session_id}/outputs/{chat_session_id}/{output_id}/actions/{action_id}/claim",
+            post(claim_output_action),
+        )
+        .with_state(state)
+}
+
+fn status(process: crate::core::process_numbers::ProcessNumber) -> StatusCode {
+    match process.number {
+        n if n == crate::core::process_numbers::OUTPUT_NOT_RUNNING.number => StatusCode::NOT_FOUND,
+        n if n == crate::core::process_numbers::AGENT_RUN_CONFLICT.number => StatusCode::CONFLICT,
+        n if n == crate::core::process_numbers::TEMPORARY_UNAVAILABLE.number => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
+async fn live_pending(
+    state: &OutputActionState,
+    owner: &str,
+    context: &CallerContext,
+    chat_session_id: Uuid,
+    output_id: Uuid,
+) -> Result<crate::domain::models::tools::PendingTool, Response> {
+    let failure = |process: crate::core::process_numbers::ProcessNumber| {
+        response::error(status(process), process)
+    };
+    crate::presentation::chat_inputs::owned_output(
+        &state.runtime,
+        context,
+        owner,
+        chat_session_id,
+        output_id,
+    )
+    .await
+    .map_err(failure)?;
+    let control = state
+        .runtime
+        .controls
+        .get(output_id)
+        .ok_or_else(|| failure(crate::core::process_numbers::OUTPUT_NOT_RUNNING))?;
+    if *control.cancel.borrow() {
+        return Err(failure(crate::core::process_numbers::OUTPUT_NOT_RUNNING));
+    }
+    control
+        .tools
+        .pending()
+        .ok_or_else(|| failure(crate::core::process_numbers::OUTPUT_NOT_RUNNING))
+}
+
+fn action_display(
+    name: crate::domain::models::tools::ToolName,
+    args: &Value,
+) -> Option<(String, String)> {
+    match name {
+        crate::domain::models::tools::ToolName::RunCommand => {
+            let cwd = args.get("cwd")?;
+            let argv = args.get("argv")?;
+            Some(("command".into(), format!("cwd: {}\ncommand: {}", cwd, argv)))
+        }
+        crate::domain::models::tools::ToolName::ReplaceFileContent => {
+            let path = args.get("path")?;
+            let find = args.get("find")?;
+            let replace = args.get("replace")?;
+            Some((
+                "file_change".into(),
+                format!("path: {path}\ndiff: replace {find} with {replace}"),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn map_remote_error(error: RemoteCliError) -> Response {
+    use crate::core::process_numbers as p;
+    let (status, process) = match error {
+        RemoteCliError::NotFound => (StatusCode::NOT_FOUND, p::REMOTE_SESSION_NOT_FOUND),
+        RemoteCliError::Forbidden => (StatusCode::FORBIDDEN, p::REMOTE_SESSION_FORBIDDEN),
+        RemoteCliError::AlreadyAnswered => (StatusCode::CONFLICT, p::REMOTE_APPROVAL_ANSWERED),
+        RemoteCliError::BadRequest(_) => (StatusCode::BAD_REQUEST, p::INVALID_DATA),
+        RemoteCliError::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, p::REMOTE_CLI_UNAVAILABLE),
+    };
+    response::error(status, process)
+}
+
+async fn create_output_action(
+    State(state): State<OutputActionState>,
+    UserId(owner): UserId,
+    context: CallerContext,
+    Path((remote_session, chat_session, output)): Path<(Uuid, Uuid, Uuid)>,
+    Json(body): Json<CreateOutputAction>,
+) -> Response {
+    let pending = match live_pending(&state, &owner, &context, chat_session, output).await {
+        Ok(pending) => pending,
+        Err(error) => return error,
+    };
+    if pending.call_id != body.call_id {
+        return map_error(ChildRunError::Conflict);
+    }
+    let Some((action_kind, display)) = action_display(pending.name, &pending.arguments) else {
+        return map_error(ChildRunError::Conflict);
+    };
+    if display.len() > 64_000 {
+        return map_error(ChildRunError::Invalid);
+    }
+    let now = Utc::now();
+    let action = OutputAction {
+        action_id: Uuid::now_v7(),
+        chat_session_id: chat_session,
+        output_id: output,
+        call_id: pending.call_id,
+        tool_name: pending.name.as_str().into(),
+        action_kind,
+        action_digest: crate::domain::models::tools::action_digest(
+            pending.call_id,
+            pending.name,
+            &pending.arguments,
+        ),
+        display,
+        expires_at: now + chrono::Duration::milliseconds(state.service.action_ttl_ms as i64),
+        approved: None,
+        cancelled_at: None,
+        claimed_at: None,
+        created_at: now,
+    };
+    let created = match state
+        .service
+        .store
+        .create_output_action(&owner, remote_session, action, now)
+        .await
+    {
+        Ok(action) => action,
+        Err(error) => return map_error(error),
+    };
+    let event = json!({
+        "approval_id": created.action_id.to_string(),
+        "action_text": created.display.clone(),
+    });
+    let remote_session_text = remote_session.to_string();
+    if let Err(error) = state
+        .remote_cli
+        .post_cli_event(
+            &remote_session_text,
+            &owner,
+            RemoteEventKind::ApprovalRequest,
+            event,
+            None,
+            now.timestamp_millis().max(0) as u64,
+        )
+        .await
+    {
+        let _ = state
+            .service
+            .store
+            .cancel_output_actions(&owner, chat_session, output, Utc::now())
+            .await;
+        return map_remote_error(error);
+    }
+    (
+        StatusCode::CREATED,
+        Envelope::new(
+            "Output action approval requested",
+            OutputActionView::from_action(created, now),
+        ),
+    )
+        .into_response()
+}
+
+async fn get_output_action(
+    State(state): State<OutputActionState>,
+    UserId(owner): UserId,
+    context: CallerContext,
+    Path((remote_session, chat_session, output, action_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+) -> Response {
+    let failure = |process: crate::core::process_numbers::ProcessNumber| {
+        response::error(status(process), process)
+    };
+    if let Err(process) = crate::presentation::chat_inputs::owned_output(
+        &state.runtime,
+        &context,
+        &owner,
+        chat_session,
+        output,
+    )
+    .await
+    {
+        return failure(process);
+    }
+    match state
+        .service
+        .store
+        .output_action(&owner, remote_session, chat_session, output, action_id)
+        .await
+    {
+        Ok(action) => Envelope::new(
+            "Output action loaded",
+            OutputActionView::from_action(action, Utc::now()),
+        )
+        .into_response(),
+        Err(error) => map_error(error),
+    }
+}
+
+async fn answer_output_action(
+    State(state): State<OutputActionState>,
+    UserId(owner): UserId,
+    context: CallerContext,
+    Path((remote_session, chat_session, output, action_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    Json(body): Json<AnswerOutputAction>,
+) -> Response {
+    let pending = match live_pending(&state, &owner, &context, chat_session, output).await {
+        Ok(pending) => pending,
+        Err(error) => return error,
+    };
+    let now = Utc::now();
+    let stored = match state
+        .service
+        .store
+        .output_action(&owner, remote_session, chat_session, output, action_id)
+        .await
+    {
+        Ok(action) => action,
+        Err(error) => return map_error(error),
+    };
+    if pending.call_id != stored.call_id
+        || crate::domain::models::tools::action_digest(
+            pending.call_id,
+            pending.name,
+            &pending.arguments,
+        ) != stored.action_digest
+    {
+        return map_error(ChildRunError::Conflict);
+    }
+    match state
+        .service
+        .store
+        .answer_output_action(
+            &owner,
+            remote_session,
+            chat_session,
+            output,
+            action_id,
+            body.approved,
+            now,
+        )
+        .await
+    {
+        Ok(action) => Envelope::new(
+            "Output action answered",
+            OutputActionView::from_action(action, now),
+        )
+        .into_response(),
+        Err(error) => map_error(error),
+    }
+}
+
+async fn claim_output_action(
+    State(state): State<OutputActionState>,
+    UserId(owner): UserId,
+    context: CallerContext,
+    Path((remote_session, chat_session, output, action_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    Json(body): Json<ClaimOutputAction>,
+) -> Response {
+    let pending = match live_pending(&state, &owner, &context, chat_session, output).await {
+        Ok(pending) => pending,
+        Err(error) => return error,
+    };
+    if !is_lower_hex_digest(&body.action_digest)
+        || pending.call_id != body.call_id
+        || crate::domain::models::tools::action_digest(
+            pending.call_id,
+            pending.name,
+            &pending.arguments,
+        ) != body.action_digest
+    {
+        return map_error(ChildRunError::Conflict);
+    }
+    match state
+        .service
+        .store
+        .claim_output_action(
+            &owner,
+            remote_session,
+            chat_session,
+            output,
+            action_id,
+            body.call_id,
+            &body.action_digest,
+            Utc::now(),
+        )
+        .await
+    {
+        Ok(action) => Envelope::new(
+            "Output action claimed",
+            OutputActionView::from_action(action, Utc::now()),
+        )
+        .into_response(),
+        Err(error) => map_error(error),
+    }
 }
 
 async fn create_child(

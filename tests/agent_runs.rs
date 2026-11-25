@@ -12,7 +12,7 @@ use cortex_api::dal::local::{
 };
 use cortex_api::domain::services::agent_runs::{
     AgentRunService, AgentRunStore, ChildEventKind, ChildRunStatus, InMemoryAgentRunStore,
-    PendingChildAction,
+    OutputAction, PendingChildAction,
 };
 use cortex_api::presentation::agent_runs::router;
 
@@ -189,6 +189,144 @@ async fn api_never_reports_cancelled_until_cli_reports_process_stopped() {
         .await
         .unwrap();
     assert_eq!(state.status.as_str(), "running");
+}
+
+#[tokio::test]
+async fn output_action_uses_first_decision_and_one_shot_effect_claim() {
+    let (_service, store): (AgentRunService, std::sync::Arc<InMemoryAgentRunStore>) =
+        AgentRunService::in_memory_with_store(120_000);
+    let remote = Uuid::now_v7();
+    let chat = Uuid::now_v7();
+    let output = Uuid::now_v7();
+    let call = Uuid::now_v7();
+    let action_id = Uuid::now_v7();
+    store.register_session(remote, "owner").await;
+    let now = chrono::Utc::now();
+    let action = OutputAction {
+        action_id,
+        chat_session_id: chat,
+        output_id: output,
+        call_id: call,
+        tool_name: "run_command".into(),
+        action_kind: "command".into(),
+        action_digest: "a".repeat(64),
+        display: "cwd: ".into(),
+        expires_at: now + chrono::Duration::seconds(30),
+        approved: None,
+        cancelled_at: None,
+        claimed_at: None,
+        created_at: now,
+    };
+    store
+        .create_output_action("owner", remote, action, now)
+        .await
+        .unwrap();
+    let approved = store
+        .answer_output_action("owner", remote, chat, output, action_id, true, now)
+        .await
+        .unwrap();
+    assert_eq!(approved.status(now), "approved");
+    assert!(
+        store
+            .answer_output_action("owner", remote, chat, output, action_id, false, now)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .claim_output_action(
+                "owner",
+                remote,
+                chat,
+                output,
+                action_id,
+                Uuid::now_v7(),
+                &"a".repeat(64),
+                now,
+            )
+            .await
+            .is_err()
+    );
+    let claimed = store
+        .claim_output_action(
+            "owner",
+            remote,
+            chat,
+            output,
+            action_id,
+            call,
+            &"a".repeat(64),
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.status(now), "claimed");
+    assert!(
+        store
+            .claim_output_action(
+                "owner",
+                remote,
+                chat,
+                output,
+                action_id,
+                call,
+                &"a".repeat(64),
+                now,
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cancelling_output_invalidates_unclaimed_output_action() {
+    let (_service, store): (AgentRunService, std::sync::Arc<InMemoryAgentRunStore>) =
+        AgentRunService::in_memory_with_store(120_000);
+    let remote = Uuid::now_v7();
+    let chat = Uuid::now_v7();
+    let output = Uuid::now_v7();
+    let call = Uuid::now_v7();
+    let action_id = Uuid::now_v7();
+    store.register_session(remote, "owner").await;
+    let now = chrono::Utc::now();
+    store
+        .create_output_action(
+            "owner",
+            remote,
+            OutputAction {
+                action_id,
+                chat_session_id: chat,
+                output_id: output,
+                call_id: call,
+                tool_name: "replace_file_content".into(),
+                action_kind: "file_change".into(),
+                action_digest: "b".repeat(64),
+                display: "path: file\ndiff: old with new".into(),
+                expires_at: now + chrono::Duration::seconds(30),
+                approved: None,
+                cancelled_at: None,
+                claimed_at: None,
+                created_at: now,
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    store
+        .cancel_output_actions("owner", chat, output, now)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .answer_output_action("owner", remote, chat, output, action_id, true, now)
+            .await
+            .is_err()
+    );
+    let action = store
+        .output_action("owner", remote, chat, output, action_id)
+        .await
+        .unwrap();
+    assert_eq!(action.status(now), "cancelled");
 }
 
 #[tokio::test]

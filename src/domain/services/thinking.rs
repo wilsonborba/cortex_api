@@ -352,6 +352,7 @@ impl Thinking {
                 if !tool_control.set_pending(PendingTool {
                     call_id: request.call_id,
                     name: request.name,
+                    arguments: request.arguments.clone(),
                 }) {
                     return Err(DriverError::InvalidInput);
                 }

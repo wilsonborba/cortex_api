@@ -589,6 +589,7 @@ async fn chat_runtime_end_to_end_uses_catalog_router_and_saves_only_labeled_read
         },
         journal: EventJournal::new(cache, &config).unwrap(),
         controls: Default::default(),
+        agent_runs: cortex_api::domain::services::agent_runs::AgentRunService::in_memory(120_000),
         personas,
         shield,
         chats: chats.clone(),

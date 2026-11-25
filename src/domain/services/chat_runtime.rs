@@ -50,6 +50,7 @@ pub struct ChatRuntime {
     pub journal: EventJournal,
     pub personas: crate::domain::services::personas::Personas,
     pub controls: crate::domain::services::output_controls::OutputControls,
+    pub agent_runs: crate::domain::services::agent_runs::AgentRunService,
 }
 /// The final state of one output, for an input sent without `stream`.
 pub struct Finished {

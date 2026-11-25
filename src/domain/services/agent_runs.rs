@@ -105,6 +105,41 @@ pub struct PendingChildAction {
     pub expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OutputAction {
+    pub action_id: Uuid,
+    pub chat_session_id: Uuid,
+    pub output_id: Uuid,
+    pub call_id: Uuid,
+    pub tool_name: String,
+    pub action_kind: String,
+    pub action_digest: String,
+    pub display: String,
+    pub expires_at: DateTime<Utc>,
+    pub approved: Option<bool>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl OutputAction {
+    pub fn status(&self, now: DateTime<Utc>) -> &'static str {
+        if self.claimed_at.is_some() {
+            "claimed"
+        } else if self.cancelled_at.is_some() {
+            "cancelled"
+        } else if self.expires_at <= now {
+            "expired"
+        } else {
+            match self.approved {
+                Some(true) => "approved",
+                Some(false) => "denied",
+                None => "pending",
+            }
+        }
+    }
+}
+
 type EventPageFuture<'a> = Pin<
     Box<dyn Future<Output = Result<(ChildRun, Vec<ChildRunEvent>), ChildRunError>> + Send + 'a>,
 >;
@@ -166,6 +201,51 @@ pub trait AgentRunStore: Send + Sync {
         event_id: Uuid,
         now: DateTime<Utc>,
     ) -> Pin<Box<dyn Future<Output = Result<ChildRunEvent, ChildRunError>> + Send + 'a>>;
+    fn create_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        action: OutputAction,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>>;
+    fn output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>>;
+    #[allow(clippy::too_many_arguments)]
+    fn answer_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+        approved: bool,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>>;
+    #[allow(clippy::too_many_arguments)]
+    fn claim_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+        call_id: Uuid,
+        digest: &'a str,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>>;
+    fn cancel_output_actions<'a>(
+        &'a self,
+        owner: &'a str,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>>;
     fn events_after<'a>(
         &'a self,
         owner: &'a str,
@@ -188,6 +268,7 @@ struct MemoryChild {
 pub struct InMemoryAgentRunStore {
     owners: RwLock<HashMap<Uuid, String>>,
     children: RwLock<HashMap<(Uuid, Uuid), MemoryChild>>,
+    output_actions: RwLock<HashMap<(Uuid, Uuid), OutputAction>>,
 }
 impl InMemoryAgentRunStore {
     pub async fn register_session(&self, session_id: Uuid, owner: &str) {
@@ -593,6 +674,139 @@ impl AgentRunStore for InMemoryAgentRunStore {
             child.next_seq += 1;
             child.events.push(event.clone());
             Ok(event)
+        })
+    }
+    fn create_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        action: OutputAction,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            if action.expires_at <= now {
+                return Err(ChildRunError::Conflict);
+            }
+            let mut actions = self.output_actions.write().await;
+            if actions.iter().any(|((sid, _), old)| {
+                *sid == session_id
+                    && old.output_id == action.output_id
+                    && old.call_id == action.call_id
+            }) || actions.contains_key(&(session_id, action.action_id))
+            {
+                return Err(ChildRunError::Conflict);
+            }
+            actions.insert((session_id, action.action_id), action.clone());
+            Ok(action)
+        })
+    }
+    fn output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            self.output_actions
+                .read()
+                .await
+                .get(&(session_id, action_id))
+                .filter(|action| {
+                    action.chat_session_id == chat_session_id && action.output_id == output_id
+                })
+                .cloned()
+                .ok_or(ChildRunError::NotFound)
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn answer_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+        approved: bool,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            let mut actions = self.output_actions.write().await;
+            let action = actions
+                .get_mut(&(session_id, action_id))
+                .filter(|action| {
+                    action.chat_session_id == chat_session_id && action.output_id == output_id
+                })
+                .ok_or(ChildRunError::NotFound)?;
+            if action.approved.is_some()
+                || action.cancelled_at.is_some()
+                || action.claimed_at.is_some()
+                || action.expires_at <= now
+            {
+                return Err(ChildRunError::Conflict);
+            }
+            action.approved = Some(approved);
+            Ok(action.clone())
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn claim_output_action<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        action_id: Uuid,
+        call_id: Uuid,
+        digest: &'a str,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<OutputAction, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            let mut actions = self.output_actions.write().await;
+            let action = actions
+                .get_mut(&(session_id, action_id))
+                .filter(|action| {
+                    action.chat_session_id == chat_session_id && action.output_id == output_id
+                })
+                .ok_or(ChildRunError::NotFound)?;
+            if action.approved != Some(true)
+                || action.cancelled_at.is_some()
+                || action.claimed_at.is_some()
+                || action.expires_at <= now
+                || action.call_id != call_id
+                || action.action_digest != digest
+            {
+                return Err(ChildRunError::Conflict);
+            }
+            action.claimed_at = Some(now);
+            Ok(action.clone())
+        })
+    }
+    fn cancel_output_actions<'a>(
+        &'a self,
+        owner: &'a str,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            let owners = self.owners.read().await;
+            let mut actions = self.output_actions.write().await;
+            for ((session_id, _), action) in actions.iter_mut() {
+                if action.chat_session_id == chat_session_id
+                    && action.output_id == output_id
+                    && action.claimed_at.is_none()
+                    && owners.get(session_id).is_some_and(|stored| stored == owner)
+                {
+                    action.cancelled_at = Some(now);
+                }
+            }
+            Ok(())
         })
     }
     fn events_after<'a>(

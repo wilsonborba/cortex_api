@@ -47,6 +47,19 @@ fn provider_requests_are_allowlisted_strict_and_bounded() {
     assert!(ToolRequest::from_provider("grep_search", json!({"query":"x","paths":[]})).is_err());
 }
 
+#[test]
+fn action_digest_covers_call_name_and_canonical_arguments() {
+    let digest = cortex_api::domain::models::tools::action_digest(
+        Uuid::parse_str("30000000-0000-4000-8000-000000000003").unwrap(),
+        ToolName::RunCommand,
+        &json!({"cwd":".","argv":["echo","ok"]}),
+    );
+    assert_eq!(
+        digest,
+        "52f61567c4934e6c0ea1da29e80bb22fe2f08756ad1fc28b81ddace856de9c33"
+    );
+}
+
 #[tokio::test]
 async fn tool_result_requires_matching_pending_call_and_first_result_wins() {
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -55,6 +68,7 @@ async fn tool_result_requires_matching_pending_call_and_first_result_wins() {
     assert!(control.set_pending(PendingTool {
         call_id,
         name: ToolName::RunCommand,
+        arguments: json!({"cwd":".","argv":["echo","ok"]}),
     }));
     assert!(
         control

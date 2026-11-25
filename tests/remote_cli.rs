@@ -174,6 +174,7 @@ fn build_real_app_router(
         },
         journal: EventJournal::new(cache.clone(), &config).unwrap(),
         controls: Default::default(),
+        agent_runs: cortex_api::domain::services::agent_runs::AgentRunService::in_memory(120_000),
         personas: personas.clone(),
         shield,
         chats: chats.clone(),
