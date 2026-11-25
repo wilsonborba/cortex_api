@@ -356,6 +356,7 @@ async fn create_output_action(
         claimed_at: None,
         created_at: now,
     };
+    let requested_action_id = action.action_id;
     let created = match state
         .service
         .store
@@ -365,32 +366,39 @@ async fn create_output_action(
         Ok(action) => action,
         Err(error) => return map_error(error),
     };
-    let event = json!({
-        "approval_id": created.action_id.to_string(),
-        "action_text": created.display.clone(),
-    });
-    let remote_session_text = remote_session.to_string();
-    if let Err(error) = state
-        .remote_cli
-        .post_cli_event(
-            &remote_session_text,
-            &owner,
-            RemoteEventKind::ApprovalRequest,
-            event,
-            None,
-            now.timestamp_millis().max(0) as u64,
-        )
-        .await
-    {
-        let _ = state
-            .service
-            .store
-            .cancel_output_actions(&owner, chat_session, output, Utc::now())
-            .await;
-        return map_remote_error(error);
+    let is_new = created.action_id == requested_action_id;
+    if is_new {
+        let event = json!({
+            "approval_id": created.action_id.to_string(),
+            "action_text": created.display.clone(),
+        });
+        let remote_session_text = remote_session.to_string();
+        if let Err(error) = state
+            .remote_cli
+            .post_cli_event(
+                &remote_session_text,
+                &owner,
+                RemoteEventKind::ApprovalRequest,
+                event,
+                None,
+                now.timestamp_millis().max(0) as u64,
+            )
+            .await
+        {
+            let _ = state
+                .service
+                .store
+                .cancel_output_actions(&owner, chat_session, output, Utc::now())
+                .await;
+            return map_remote_error(error);
+        }
     }
     (
-        StatusCode::CREATED,
+        if is_new {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
         Envelope::new(
             "Output action approval requested",
             OutputActionView::from_action(created, now),

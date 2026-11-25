@@ -591,14 +591,15 @@ impl AgentRunStore for PostgresAgentRunStore {
             if action.expires_at <= now {
                 return Err(ChildRunError::Conflict);
             }
-            let row = sqlx::query("INSERT INTO remote_cli_output_actions (session_id, action_id, chat_session_id, output_id, call_id, tool_name, action_kind, action_digest, display_text, expires_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *")
+            let row = sqlx::query("INSERT INTO remote_cli_output_actions AS existing (session_id, action_id, chat_session_id, output_id, call_id, tool_name, action_kind, action_digest, display_text, expires_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (output_id, call_id) DO UPDATE SET action_id=existing.action_id WHERE existing.session_id=EXCLUDED.session_id AND existing.chat_session_id=EXCLUDED.chat_session_id AND existing.tool_name=EXCLUDED.tool_name AND existing.action_kind=EXCLUDED.action_kind AND existing.action_digest=EXCLUDED.action_digest AND existing.display_text=EXCLUDED.display_text RETURNING *")
                 .bind(session_id).bind(action.action_id).bind(action.chat_session_id)
                 .bind(action.output_id).bind(action.call_id).bind(&action.tool_name)
                 .bind(&action.action_kind).bind(&action.action_digest).bind(&action.display)
-                .bind(action.expires_at).bind(now).fetch_one(&self.pool).await
+                .bind(action.expires_at).bind(now).fetch_optional(&self.pool).await
                 .map_err(|e| if e.as_database_error().is_some_and(|db| db.is_unique_violation()) {
                     ChildRunError::Conflict
                 } else { ChildRunError::Unavailable })?;
+            let row = row.ok_or(ChildRunError::Conflict)?;
             Self::output_action(&row)
         })
     }

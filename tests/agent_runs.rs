@@ -192,6 +192,225 @@ async fn api_never_reports_cancelled_until_cli_reports_process_stopped() {
 }
 
 #[tokio::test]
+async fn output_action_has_one_executor_across_sessions_and_retries_idempotently() {
+    let (_service, store): (AgentRunService, std::sync::Arc<InMemoryAgentRunStore>) =
+        AgentRunService::in_memory_with_store(120_000);
+    let first_session = Uuid::now_v7();
+    let second_session = Uuid::now_v7();
+    let other_owner_session = Uuid::now_v7();
+    let chat = Uuid::now_v7();
+    let output = Uuid::now_v7();
+    let call = Uuid::now_v7();
+    store.register_session(first_session, "owner-a").await;
+    store.register_session(second_session, "owner-a").await;
+    store.register_session(other_owner_session, "owner-b").await;
+    let now = chrono::Utc::now();
+    let make_action = || OutputAction {
+        action_id: Uuid::now_v7(),
+        chat_session_id: chat,
+        output_id: output,
+        call_id: call,
+        tool_name: "run_command".into(),
+        action_kind: "command".into(),
+        action_digest: "a".repeat(64),
+        display: "cwd: workspace\ncommand: fixture".into(),
+        expires_at: now + chrono::Duration::seconds(30),
+        approved: None,
+        cancelled_at: None,
+        claimed_at: None,
+        created_at: now,
+    };
+
+    let (first_result, second_result) = tokio::join!(
+        store.create_output_action("owner-a", first_session, make_action(), now),
+        store.create_output_action("owner-a", second_session, make_action(), now),
+    );
+    assert_ne!(first_result.is_ok(), second_result.is_ok());
+    let (executor_session, first, duplicate_session) = match (first_result, second_result) {
+        (Ok(action), Err(_)) => (first_session, action, second_session),
+        (Err(_), Ok(action)) => (second_session, action, first_session),
+        _ => panic!("exactly one concurrent session must register the output/call"),
+    };
+    let retry = store
+        .create_output_action("owner-a", executor_session, make_action(), now)
+        .await
+        .unwrap();
+    assert_eq!(retry.action_id, first.action_id);
+    assert!(
+        store
+            .create_output_action("owner-a", duplicate_session, make_action(), now)
+            .await
+            .is_err(),
+        "the same pending output/call must not be registered by a second executor session"
+    );
+    assert!(
+        store
+            .create_output_action("owner-b", other_owner_session, make_action(), now)
+            .await
+            .is_err()
+    );
+    let mut changed_binding = make_action();
+    changed_binding.action_digest = "b".repeat(64);
+    assert!(
+        store
+            .create_output_action("owner-a", executor_session, changed_binding, now)
+            .await
+            .is_err(),
+        "a retry with a changed digest must not reuse the existing action"
+    );
+
+    store
+        .answer_output_action(
+            "owner-a",
+            executor_session,
+            chat,
+            output,
+            first.action_id,
+            true,
+            now,
+        )
+        .await
+        .unwrap();
+    let claimed = store
+        .claim_output_action(
+            "owner-a",
+            executor_session,
+            chat,
+            output,
+            first.action_id,
+            call,
+            &first.action_digest,
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.status(now), "claimed");
+    assert!(
+        store
+            .claim_output_action(
+                "owner-a",
+                duplicate_session,
+                chat,
+                output,
+                retry.action_id,
+                call,
+                &retry.action_digest,
+                now,
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn denied_and_expired_output_actions_cannot_be_claimed() {
+    let (_service, store): (AgentRunService, std::sync::Arc<InMemoryAgentRunStore>) =
+        AgentRunService::in_memory_with_store(120_000);
+    let remote = Uuid::now_v7();
+    let chat = Uuid::now_v7();
+    let now = chrono::Utc::now();
+    store.register_session(remote, "owner").await;
+    let denied_id = Uuid::now_v7();
+    let denied_output = Uuid::now_v7();
+    let denied_call = Uuid::now_v7();
+    let denied = OutputAction {
+        action_id: denied_id,
+        chat_session_id: chat,
+        output_id: denied_output,
+        call_id: denied_call,
+        tool_name: "run_command".into(),
+        action_kind: "command".into(),
+        action_digest: "c".repeat(64),
+        display: "cwd: workspace\ncommand: fixture".into(),
+        expires_at: now + chrono::Duration::seconds(30),
+        approved: None,
+        cancelled_at: None,
+        claimed_at: None,
+        created_at: now,
+    };
+    store
+        .create_output_action("owner", remote, denied, now)
+        .await
+        .unwrap();
+    store
+        .answer_output_action("owner", remote, chat, denied_output, denied_id, false, now)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_output_action(
+                "owner",
+                remote,
+                chat,
+                denied_output,
+                denied_id,
+                denied_call,
+                &"c".repeat(64),
+                now,
+            )
+            .await
+            .is_err()
+    );
+
+    let expired_id = Uuid::now_v7();
+    let expired_output = Uuid::now_v7();
+    let expired_call = Uuid::now_v7();
+    store
+        .create_output_action(
+            "owner",
+            remote,
+            OutputAction {
+                action_id: expired_id,
+                chat_session_id: chat,
+                output_id: expired_output,
+                call_id: expired_call,
+                tool_name: "run_command".into(),
+                action_kind: "command".into(),
+                action_digest: "d".repeat(64),
+                display: "cwd: workspace\ncommand: fixture".into(),
+                expires_at: now + chrono::Duration::seconds(1),
+                approved: None,
+                cancelled_at: None,
+                claimed_at: None,
+                created_at: now,
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    let after_expiry = now + chrono::Duration::seconds(2);
+    assert!(
+        store
+            .answer_output_action(
+                "owner",
+                remote,
+                chat,
+                expired_output,
+                expired_id,
+                true,
+                after_expiry
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .claim_output_action(
+                "owner",
+                remote,
+                chat,
+                expired_output,
+                expired_id,
+                expired_call,
+                &"d".repeat(64),
+                after_expiry,
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn output_action_uses_first_decision_and_one_shot_effect_claim() {
     let (_service, store): (AgentRunService, std::sync::Arc<InMemoryAgentRunStore>) =
         AgentRunService::in_memory_with_store(120_000);

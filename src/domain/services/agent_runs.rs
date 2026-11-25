@@ -689,12 +689,21 @@ impl AgentRunStore for InMemoryAgentRunStore {
                 return Err(ChildRunError::Conflict);
             }
             let mut actions = self.output_actions.write().await;
-            if actions.iter().any(|((sid, _), old)| {
-                *sid == session_id
-                    && old.output_id == action.output_id
-                    && old.call_id == action.call_id
-            }) || actions.contains_key(&(session_id, action.action_id))
-            {
+            if let Some(((stored_session, _), existing)) = actions.iter().find(|(_, existing)| {
+                existing.output_id == action.output_id && existing.call_id == action.call_id
+            }) {
+                if *stored_session == session_id
+                    && existing.chat_session_id == action.chat_session_id
+                    && existing.tool_name == action.tool_name
+                    && existing.action_kind == action.action_kind
+                    && existing.action_digest == action.action_digest
+                    && existing.display == action.display
+                {
+                    return Ok(existing.clone());
+                }
+                return Err(ChildRunError::Conflict);
+            }
+            if actions.contains_key(&(session_id, action.action_id)) {
                 return Err(ChildRunError::Conflict);
             }
             actions.insert((session_id, action.action_id), action.clone());
