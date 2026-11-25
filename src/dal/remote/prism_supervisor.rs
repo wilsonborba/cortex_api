@@ -1477,13 +1477,67 @@ mod tests {
 
         let (config, queue, supervisor, router) = evaluation_model_router_setup().await;
         let mut owned_t0 = false;
-        let result = std::panic::AssertUnwindSafe(evaluation_cancellation_case(
-            &router,
-            &queue,
-            &supervisor,
-            ModelProfile::Bonsai25Official,
-            &mut owned_t0,
-        ))
+        let result = std::panic::AssertUnwindSafe(async {
+            // The failed A5 Official iteration began after an Uncensored→T0
+            // transition, so reproduce the T0-resident precondition without
+            // repeating either profile's quality suite.
+            owned_t0 = true;
+            let setup_output = evaluation_output(ModelProfile::CortexT0, false);
+            let (setup_events, _setup_rx) = mpsc::unbounded_channel();
+            let (setup_cancel_tx, setup_cancel) = watch::channel(false);
+            let setup_call = router.call(
+                &setup_output,
+                eval_input("Reply with READY.", vec![], None, false),
+                setup_events,
+                setup_cancel,
+            );
+            tokio::pin!(setup_call);
+            let deadline = tokio::time::sleep(Duration::from_secs(300));
+            tokio::pin!(deadline);
+            let mut monitor = tokio::time::interval(Duration::from_secs(5));
+            let mut setup_pressure = false;
+            let setup_result = loop {
+                tokio::select! {
+                    result = &mut setup_call => break result,
+                    _ = monitor.tick() => {
+                        if evaluation_resources_ok(700).is_err() {
+                            setup_pressure = true;
+                            let _ = setup_cancel_tx.send(true);
+                            break tokio::time::timeout(Duration::from_secs(60), &mut setup_call)
+                                .await.expect("bounded T0 setup cancellation");
+                        }
+                    }
+                    _ = &mut deadline => {
+                        let _ = setup_cancel_tx.send(true);
+                        break tokio::time::timeout(Duration::from_secs(60), &mut setup_call)
+                            .await.expect("bounded T0 setup timeout cancellation");
+                    }
+                }
+            };
+            let loaded = ollama_loaded(&config).await;
+            eprintln!(
+                "EVAL {}",
+                serde_json::json!({"case":"official-cancel-t0-setup","text":setup_result.as_ref().ok().map(|answer|answer.text.as_str()),"error":setup_result.as_ref().err().map(|error|format!("{error:?}")),"loaded_models":loaded.as_ref().ok(),"setup_pressure":setup_pressure})
+            );
+            assert!(!setup_pressure, "T0 setup crossed a resource guard");
+            let setup_answer = setup_result.expect("T0 setup provider call");
+            assert!(setup_answer.error.is_none(), "T0 setup error: {:?}", setup_answer.error);
+            assert!(!setup_answer.text.trim().is_empty());
+            assert_eq!(
+                loaded.expect("T0 setup model identity"),
+                vec![config.text_model.clone()],
+                "T0 must be the sole resident before the Official transition"
+            );
+
+            evaluation_cancellation_case(
+                &router,
+                &queue,
+                &supervisor,
+                ModelProfile::Bonsai25Official,
+                &mut owned_t0,
+            )
+            .await;
+        })
         .catch_unwind()
         .await;
 
