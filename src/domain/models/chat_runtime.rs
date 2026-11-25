@@ -67,6 +67,7 @@ pub struct Turn {
     pub answer: String,
     pub inspection: Option<Arc<crate::domain::models::inspection::AnswerInspection>>,
     pub personas: crate::domain::services::personas::PersonaContext,
+    pub token_budget: Option<Arc<crate::domain::models::thinking::TokenBudget>>,
 }
 impl Turn {
     pub fn new(caller: Caller, request: TurnRequest) -> Self {
@@ -87,6 +88,7 @@ impl Turn {
             answer: String::new(),
             inspection: None,
             personas: Default::default(),
+            token_budget: None,
         }
     }
     pub fn accepted(&self) -> &AcceptedTurn {

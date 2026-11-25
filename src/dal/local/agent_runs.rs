@@ -18,6 +18,85 @@ impl PostgresAgentRunStore {
         Self { pool }
     }
 
+    fn child_from_row(row: &sqlx::postgres::PgRow) -> Result<ChildRun, ChildRunError> {
+        let status: String = row
+            .try_get("status")
+            .map_err(|_| ChildRunError::Unavailable)?;
+        Ok(ChildRun {
+            session_id: row
+                .try_get("session_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            child_id: row
+                .try_get("child_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            parent_run_id: row
+                .try_get("parent_run_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            parent_chat_session_id: row
+                .try_get("parent_chat_session_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            parent_output_id: row
+                .try_get("parent_output_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            parent_call_id: row
+                .try_get("parent_call_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            child_chat_session_id: row
+                .try_get("child_chat_session_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            child_output_id: row
+                .try_get("child_output_id")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            role: row
+                .try_get("role")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            task: row
+                .try_get("task")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            budget_tokens: u32::try_from(
+                row.try_get::<i32, _>("budget_tokens")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+            )
+            .map_err(|_| ChildRunError::Unavailable)?,
+            depth: u8::try_from(
+                row.try_get::<i16, _>("depth")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+            )
+            .map_err(|_| ChildRunError::Unavailable)?,
+            status: match status.as_str() {
+                "queued" => ChildRunStatus::Queued,
+                "running" => ChildRunStatus::Running,
+                "completed" => ChildRunStatus::Completed,
+                "failed" => ChildRunStatus::Failed,
+                "cancelled" => ChildRunStatus::Cancelled,
+                _ => return Err(ChildRunError::Unavailable),
+            },
+            cancel_requested: row
+                .try_get::<Option<DateTime<Utc>>, _>("cancel_requested_at")
+                .map_err(|_| ChildRunError::Unavailable)?
+                .is_some(),
+            budget_used_tokens: u64::try_from(
+                row.try_get::<i64, _>("budget_used_tokens")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+            )
+            .map_err(|_| ChildRunError::Unavailable)?,
+            budget_reserved_tokens: u64::try_from(
+                row.try_get::<i64, _>("budget_reserved_tokens")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+            )
+            .map_err(|_| ChildRunError::Unavailable)?,
+            budget_settled: row
+                .try_get("budget_settled")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|_| ChildRunError::Unavailable)?,
+            updated_at: row
+                .try_get("updated_at")
+                .map_err(|_| ChildRunError::Unavailable)?,
+        })
+    }
+
     async fn owner_check(&self, session: Uuid, owner: &str) -> Result<(), ChildRunError> {
         let found: Option<String> =
             sqlx::query_scalar("SELECT owner_user FROM remote_cli_sessions WHERE session_id = $1")
@@ -219,6 +298,336 @@ impl PostgresAgentRunStore {
 }
 
 impl AgentRunStore for PostgresAgentRunStore {
+    fn child_for_output<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ChildRun>, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.owner_check(session_id, owner).await?;
+            let row = sqlx::query("SELECT session_id,child_id,parent_run_id,parent_chat_session_id,parent_output_id,parent_call_id,child_chat_session_id,child_output_id,role,task,budget_tokens,depth,status,cancel_requested_at,budget_used_tokens,budget_reserved_tokens,budget_settled,created_at,updated_at FROM remote_cli_children WHERE session_id=$1 AND child_chat_session_id=$2 AND child_output_id=$3")
+                .bind(session_id).bind(chat_session_id).bind(output_id).fetch_optional(&self.pool).await.map_err(|_|ChildRunError::Unavailable)?;
+            row.as_ref().map(Self::child_from_row).transpose()
+        })
+    }
+
+    fn create_bound_child<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        request: crate::domain::services::agent_runs::BoundChildRequest,
+        max_active: usize,
+        max_depth: u8,
+        max_budget_tokens: u32,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<ChildRun, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            if request.role.trim().is_empty()
+                || request.role.len() > 80
+                || request.task.trim().is_empty()
+                || request.task.len() > 32_000
+                || request.budget_tokens == 0
+                || request.budget_tokens > max_budget_tokens.max(1)
+            {
+                return Err(ChildRunError::Invalid);
+            }
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| ChildRunError::Unavailable)?;
+            Self::owner_in_tx(&mut tx, session_id, owner).await?;
+            if let Some(row) = sqlx::query("SELECT session_id,child_id,parent_run_id,parent_chat_session_id,parent_output_id,parent_call_id,child_chat_session_id,child_output_id,role,task,budget_tokens,depth,status,cancel_requested_at,budget_used_tokens,budget_reserved_tokens,budget_settled,created_at,updated_at FROM remote_cli_children WHERE parent_output_id=$1 AND parent_call_id=$2 FOR UPDATE")
+                .bind(request.parent_output_id).bind(request.parent_call_id).fetch_optional(&mut *tx).await.map_err(|_| ChildRunError::Unavailable)?
+            {
+                let same = row.try_get::<Uuid,_>("session_id").map_err(|_|ChildRunError::Unavailable)? == session_id
+                    && row.try_get::<Option<Uuid>,_>("parent_chat_session_id").map_err(|_|ChildRunError::Unavailable)? == Some(request.parent_chat_session_id)
+                    && row.try_get::<String,_>("role").map_err(|_|ChildRunError::Unavailable)? == request.role
+                    && row.try_get::<String,_>("task").map_err(|_|ChildRunError::Unavailable)? == request.task;
+                if !same { return Err(ChildRunError::Conflict); }
+                let child = Self::child_from_row(&row)?;
+                tx.commit().await.map_err(|_| ChildRunError::Unavailable)?;
+                return Ok(child);
+            }
+            let active: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_cli_children WHERE session_id=$1 AND status IN ('queued','running')")
+                .bind(session_id).fetch_one(&mut *tx).await.map_err(|_|ChildRunError::Unavailable)?;
+            if active >= i64::try_from(max_active.max(1)).unwrap_or(i64::MAX) {
+                return Err(ChildRunError::Conflict);
+            }
+            let parent = sqlx::query("SELECT child_id,budget_tokens,depth,status,cancel_requested_at,budget_used_tokens,budget_reserved_tokens FROM remote_cli_children WHERE session_id=$1 AND child_chat_session_id=$2 AND child_output_id=$3 FOR UPDATE")
+                .bind(session_id).bind(request.parent_chat_session_id).bind(request.parent_output_id)
+                .fetch_optional(&mut *tx).await.map_err(|_|ChildRunError::Unavailable)?;
+            let (parent_run_id, parent_id, depth, budget_tokens, parent_usage) =
+                if let Some(parent) = parent {
+                    let status: String = parent
+                        .try_get("status")
+                        .map_err(|_| ChildRunError::Unavailable)?;
+                    if matches!(status.as_str(), "completed" | "failed" | "cancelled")
+                        || parent
+                            .try_get::<Option<DateTime<Utc>>, _>("cancel_requested_at")
+                            .map_err(|_| ChildRunError::Unavailable)?
+                            .is_some()
+                    {
+                        return Err(ChildRunError::Conflict);
+                    }
+                    let parent_budget = u64::try_from(
+                        parent
+                            .try_get::<i32, _>("budget_tokens")
+                            .map_err(|_| ChildRunError::Unavailable)?,
+                    )
+                    .map_err(|_| ChildRunError::Unavailable)?;
+                    let used: u64 = u64::try_from(
+                        parent
+                            .try_get::<i64, _>("budget_used_tokens")
+                            .map_err(|_| ChildRunError::Unavailable)?,
+                    )
+                    .map_err(|_| ChildRunError::Unavailable)?;
+                    let reserved: u64 = u64::try_from(
+                        parent
+                            .try_get::<i64, _>("budget_reserved_tokens")
+                            .map_err(|_| ChildRunError::Unavailable)?,
+                    )
+                    .map_err(|_| ChildRunError::Unavailable)?;
+                    let parent_usage = used.max(request.parent_budget_used_tokens);
+                    let remaining = parent_budget
+                        .saturating_sub(parent_usage)
+                        .saturating_sub(reserved);
+                    let budget = request
+                        .budget_tokens
+                        .min(u32::try_from(remaining).unwrap_or(u32::MAX));
+                    let depth = u8::try_from(
+                        parent
+                            .try_get::<i16, _>("depth")
+                            .map_err(|_| ChildRunError::Unavailable)?,
+                    )
+                    .map_err(|_| ChildRunError::Unavailable)?
+                    .saturating_add(1);
+                    if budget == 0 || depth > max_depth.max(1) {
+                        return Err(ChildRunError::Conflict);
+                    }
+                    let parent_id = parent
+                        .try_get::<Uuid, _>("child_id")
+                        .map_err(|_| ChildRunError::Unavailable)?;
+                    (
+                        parent_id.to_string(),
+                        Some(parent_id),
+                        depth,
+                        budget,
+                        parent_usage,
+                    )
+                } else {
+                    (session_id.to_string(), None, 1, request.budget_tokens, 0)
+                };
+            let child_id = Uuid::now_v7();
+            let depth_db = depth;
+            let budget_db = i32::try_from(budget_tokens).map_err(|_| ChildRunError::Invalid)?;
+            let result = sqlx::query("INSERT INTO remote_cli_children(session_id,child_id,parent_run_id,parent_chat_session_id,parent_output_id,parent_call_id,role,task,budget_tokens,depth,status,next_event_seq,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',1,$11,$11) ON CONFLICT DO NOTHING RETURNING child_id")
+                .bind(session_id).bind(child_id).bind(&parent_run_id).bind(request.parent_chat_session_id).bind(request.parent_output_id).bind(request.parent_call_id).bind(&request.role).bind(&request.task).bind(budget_db).bind(i16::from(depth_db)).bind(now)
+                .fetch_optional(&mut *tx).await.map_err(|e| if e.as_database_error().is_some_and(|db| db.is_unique_violation()) { ChildRunError::Conflict } else { ChildRunError::Unavailable })?;
+            if result.is_none() {
+                return Err(ChildRunError::Conflict);
+            }
+            if let Some(parent_id) = parent_id {
+                let updated = sqlx::query("UPDATE remote_cli_children SET budget_used_tokens=GREATEST(budget_used_tokens,$3),budget_reserved_tokens=budget_reserved_tokens+$4,updated_at=$5 WHERE session_id=$1 AND child_id=$2 AND GREATEST(budget_used_tokens,$3)+budget_reserved_tokens+$4<=budget_tokens")
+                    .bind(session_id).bind(parent_id).bind(i64::try_from(parent_usage).map_err(|_| ChildRunError::Invalid)?).bind(i64::from(budget_db)).bind(now).execute(&mut *tx).await.map_err(|_|ChildRunError::Unavailable)?;
+                if updated.rows_affected() != 1 {
+                    return Err(ChildRunError::NotFound);
+                }
+            }
+            Self::insert_event(
+                &mut tx,
+                session_id,
+                child_id,
+                Uuid::now_v7(),
+                ChildEventKind::Queued,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                now,
+            )
+            .await?;
+            tx.commit().await.map_err(|_| ChildRunError::Unavailable)?;
+            Ok(ChildRun {
+                session_id,
+                child_id,
+                parent_run_id,
+                parent_chat_session_id: Some(request.parent_chat_session_id),
+                parent_output_id: Some(request.parent_output_id),
+                parent_call_id: Some(request.parent_call_id),
+                child_chat_session_id: None,
+                child_output_id: None,
+                role: request.role,
+                task: request.task,
+                budget_tokens,
+                depth: depth_db,
+                status: ChildRunStatus::Queued,
+                cancel_requested: false,
+                budget_used_tokens: 0,
+                budget_reserved_tokens: 0,
+                budget_settled: false,
+                created_at: now,
+                updated_at: now,
+            })
+        })
+    }
+
+    fn bind_child_output<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        child_chat_session_id: Uuid,
+        child_output_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<ChildRun, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| ChildRunError::Unavailable)?;
+            Self::owner_in_tx(&mut tx, session_id, owner).await?;
+            let row = sqlx::query("UPDATE remote_cli_children SET child_chat_session_id=$3,child_output_id=$4,updated_at=$5 WHERE session_id=$1 AND child_id=$2 AND child_chat_session_id IS NULL AND child_output_id IS NULL AND EXISTS(SELECT 1 FROM chats WHERE session_id=$3 AND user_id=$6 AND app_id='cortex') AND EXISTS(SELECT 1 FROM chat_outputs WHERE output_id=$4 AND session_id=$3) RETURNING session_id,child_id,parent_run_id,parent_chat_session_id,parent_output_id,parent_call_id,child_chat_session_id,child_output_id,role,task,budget_tokens,depth,status,cancel_requested_at,budget_used_tokens,budget_reserved_tokens,budget_settled,created_at,updated_at")
+                .bind(session_id).bind(child_id).bind(child_chat_session_id).bind(child_output_id).bind(now).bind(owner).fetch_optional(&mut *tx).await.map_err(|_|ChildRunError::Unavailable)?;
+            let row = match row {
+                Some(row) => row,
+                None => {
+                    let existing = sqlx::query("SELECT session_id,child_id,parent_run_id,parent_chat_session_id,parent_output_id,parent_call_id,child_chat_session_id,child_output_id,role,task,budget_tokens,depth,status,cancel_requested_at,budget_used_tokens,budget_reserved_tokens,budget_settled,created_at,updated_at FROM remote_cli_children WHERE session_id=$1 AND child_id=$2")
+                        .bind(session_id).bind(child_id).fetch_optional(&mut *tx).await.map_err(|_|ChildRunError::Unavailable)?.ok_or(ChildRunError::NotFound)?;
+                    if existing
+                        .try_get::<Option<Uuid>, _>("child_chat_session_id")
+                        .map_err(|_| ChildRunError::Unavailable)?
+                        != Some(child_chat_session_id)
+                        || existing
+                            .try_get::<Option<Uuid>, _>("child_output_id")
+                            .map_err(|_| ChildRunError::Unavailable)?
+                            != Some(child_output_id)
+                    {
+                        return Err(ChildRunError::Conflict);
+                    }
+                    existing
+                }
+            };
+            let child = Self::child_from_row(&row)?;
+            tx.commit().await.map_err(|_| ChildRunError::Unavailable)?;
+            Ok(child)
+        })
+    }
+
+    fn report_child_usage<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        used_tokens: u64,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            let used = i64::try_from(used_tokens).map_err(|_| ChildRunError::Invalid)?;
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| ChildRunError::Unavailable)?;
+            Self::owner_in_tx(&mut tx, session_id, owner).await?;
+            let result = sqlx::query("UPDATE remote_cli_children SET budget_used_tokens=$3,updated_at=$4 WHERE session_id=$1 AND child_id=$2 AND budget_settled=false AND budget_used_tokens<=$3 AND $3<=budget_tokens-budget_reserved_tokens")
+                .bind(session_id).bind(child_id).bind(used).bind(now).execute(&mut *tx).await.map_err(|_|ChildRunError::Unavailable)?;
+            if result.rows_affected() != 1 {
+                return Err(ChildRunError::Conflict);
+            }
+            tx.commit().await.map_err(|_| ChildRunError::Unavailable)
+        })
+    }
+
+    fn settle_child_budget<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        used_tokens: u64,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            let used = i64::try_from(used_tokens).map_err(|_| ChildRunError::Invalid)?;
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|_| ChildRunError::Unavailable)?;
+            Self::owner_in_tx(&mut tx, session_id, owner).await?;
+            let row = sqlx::query("SELECT parent_chat_session_id,parent_output_id,budget_tokens,budget_used_tokens,budget_reserved_tokens,budget_settled FROM remote_cli_children WHERE session_id=$1 AND child_id=$2 FOR UPDATE")
+                .bind(session_id).bind(child_id).fetch_optional(&mut *tx).await.map_err(|_| ChildRunError::Unavailable)?.ok_or(ChildRunError::NotFound)?;
+            let settled: bool = row
+                .try_get("budget_settled")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            let previous: i64 = row
+                .try_get("budget_used_tokens")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            let budget: i32 = row
+                .try_get("budget_tokens")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            let reserved: i64 = row
+                .try_get("budget_reserved_tokens")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            if settled {
+                if previous != used {
+                    return Err(ChildRunError::Conflict);
+                }
+                tx.commit().await.map_err(|_| ChildRunError::Unavailable)?;
+                return Ok(());
+            }
+            if used < previous || used > i64::from(budget) {
+                return Err(ChildRunError::Conflict);
+            }
+            let parent_chat: Option<Uuid> = row
+                .try_get("parent_chat_session_id")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            let parent_output: Option<Uuid> = row
+                .try_get("parent_output_id")
+                .map_err(|_| ChildRunError::Unavailable)?;
+            sqlx::query("UPDATE remote_cli_children SET budget_used_tokens=$3,budget_reserved_tokens=0,budget_settled=true,updated_at=$4 WHERE session_id=$1 AND child_id=$2")
+                .bind(session_id).bind(child_id).bind(used).bind(now).execute(&mut *tx).await.map_err(|_| ChildRunError::Unavailable)?;
+            if let (Some(chat), Some(output)) = (parent_chat, parent_output) {
+                let parent = sqlx::query("SELECT child_id,budget_tokens,budget_used_tokens,budget_reserved_tokens FROM remote_cli_children WHERE session_id=$1 AND child_chat_session_id=$2 AND child_output_id=$3 FOR UPDATE")
+                    .bind(session_id).bind(chat).bind(output).fetch_optional(&mut *tx).await.map_err(|_| ChildRunError::Unavailable)?;
+                if let Some(parent) = parent {
+                    let parent_id: Uuid = parent
+                        .try_get("child_id")
+                        .map_err(|_| ChildRunError::Unavailable)?;
+                    let parent_used: i64 = parent
+                        .try_get("budget_used_tokens")
+                        .map_err(|_| ChildRunError::Unavailable)?;
+                    let parent_reserved: i64 = parent
+                        .try_get("budget_reserved_tokens")
+                        .map_err(|_| ChildRunError::Unavailable)?;
+                    if parent_reserved < i64::from(budget)
+                        || parent_used
+                            .saturating_add(used)
+                            .saturating_add(parent_reserved - i64::from(budget))
+                            > i64::from(
+                                parent
+                                    .try_get::<i32, _>("budget_tokens")
+                                    .map_err(|_| ChildRunError::Unavailable)?,
+                            )
+                    {
+                        return Err(ChildRunError::Conflict);
+                    }
+                    sqlx::query("UPDATE remote_cli_children SET budget_used_tokens=budget_used_tokens+$3,budget_reserved_tokens=budget_reserved_tokens-$4,updated_at=$5 WHERE session_id=$1 AND child_id=$2")
+                        .bind(session_id).bind(parent_id).bind(used).bind(i64::from(budget)).bind(now).execute(&mut *tx).await.map_err(|_| ChildRunError::Unavailable)?;
+                }
+            }
+            let _ = reserved;
+            tx.commit().await.map_err(|_| ChildRunError::Unavailable)
+        })
+    }
+
     fn create_child<'a>(
         &'a self,
         owner: &'a str,
@@ -312,12 +721,20 @@ impl AgentRunStore for PostgresAgentRunStore {
                 session_id,
                 child_id,
                 parent_run_id: parent_run_id.into(),
+                parent_chat_session_id: None,
+                parent_output_id: None,
+                parent_call_id: None,
+                child_chat_session_id: None,
+                child_output_id: None,
                 role: role.into(),
                 task: task.into(),
                 budget_tokens,
                 depth,
                 status: ChildRunStatus::Queued,
                 cancel_requested: false,
+                budget_used_tokens: 0,
+                budget_reserved_tokens: 0,
+                budget_settled: false,
                 created_at: now,
                 updated_at: now,
             })
@@ -718,7 +1135,7 @@ impl AgentRunStore for PostgresAgentRunStore {
     > {
         Box::pin(async move {
             self.owner_check(session_id, owner).await?;
-            let row=sqlx::query("SELECT parent_run_id,role,task,budget_tokens,depth,status,cancel_requested_at,created_at,updated_at FROM remote_cli_children WHERE session_id=$1 AND child_id=$2").bind(session_id).bind(child_id).fetch_optional(&self.pool).await.map_err(|_|ChildRunError::Unavailable)?.ok_or(ChildRunError::NotFound)?;
+            let row=sqlx::query("SELECT parent_run_id,parent_chat_session_id,parent_output_id,parent_call_id,child_chat_session_id,child_output_id,budget_used_tokens,budget_reserved_tokens,budget_settled,role,task,budget_tokens,depth,status,cancel_requested_at,created_at,updated_at FROM remote_cli_children WHERE session_id=$1 AND child_id=$2").bind(session_id).bind(child_id).fetch_optional(&self.pool).await.map_err(|_|ChildRunError::Unavailable)?.ok_or(ChildRunError::NotFound)?;
             let raw: String = row
                 .try_get("status")
                 .map_err(|_| ChildRunError::Unavailable)?;
@@ -735,6 +1152,21 @@ impl AgentRunStore for PostgresAgentRunStore {
                 child_id,
                 parent_run_id: row
                     .try_get("parent_run_id")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+                parent_chat_session_id: row
+                    .try_get("parent_chat_session_id")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+                parent_output_id: row
+                    .try_get("parent_output_id")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+                parent_call_id: row
+                    .try_get("parent_call_id")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+                child_chat_session_id: row
+                    .try_get("child_chat_session_id")
+                    .map_err(|_| ChildRunError::Unavailable)?,
+                child_output_id: row
+                    .try_get("child_output_id")
                     .map_err(|_| ChildRunError::Unavailable)?,
                 role: row
                     .try_get("role")
@@ -757,6 +1189,19 @@ impl AgentRunStore for PostgresAgentRunStore {
                     .try_get::<Option<DateTime<Utc>>, _>("cancel_requested_at")
                     .map_err(|_| ChildRunError::Unavailable)?
                     .is_some(),
+                budget_used_tokens: u64::try_from(
+                    row.try_get::<i64, _>("budget_used_tokens")
+                        .map_err(|_| ChildRunError::Unavailable)?,
+                )
+                .map_err(|_| ChildRunError::Unavailable)?,
+                budget_reserved_tokens: u64::try_from(
+                    row.try_get::<i64, _>("budget_reserved_tokens")
+                        .map_err(|_| ChildRunError::Unavailable)?,
+                )
+                .map_err(|_| ChildRunError::Unavailable)?,
+                budget_settled: row
+                    .try_get("budget_settled")
+                    .map_err(|_| ChildRunError::Unavailable)?,
                 created_at: row
                     .try_get("created_at")
                     .map_err(|_| ChildRunError::Unavailable)?,

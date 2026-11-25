@@ -1,8 +1,12 @@
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use uuid::Uuid;
+
+type ActiveChildTasks = Arc<std::sync::Mutex<HashMap<(Uuid, Uuid), watch::Sender<bool>>>>;
+type ActiveChildBudgets =
+    Arc<std::sync::Mutex<HashMap<(Uuid, Uuid), Arc<crate::domain::models::thinking::TokenBudget>>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,14 +73,33 @@ pub struct ChildRun {
     pub session_id: Uuid,
     pub child_id: Uuid,
     pub parent_run_id: String,
+    pub parent_chat_session_id: Option<Uuid>,
+    pub parent_output_id: Option<Uuid>,
+    pub parent_call_id: Option<Uuid>,
+    pub child_chat_session_id: Option<Uuid>,
+    pub child_output_id: Option<Uuid>,
     pub role: String,
     pub task: String,
     pub budget_tokens: u32,
     pub depth: u8,
     pub status: ChildRunStatus,
     pub cancel_requested: bool,
+    pub budget_used_tokens: u64,
+    pub budget_reserved_tokens: u64,
+    pub budget_settled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundChildRequest {
+    pub parent_chat_session_id: Uuid,
+    pub parent_output_id: Uuid,
+    pub parent_call_id: Uuid,
+    pub parent_budget_used_tokens: u64,
+    pub role: String,
+    pub task: String,
+    pub budget_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -145,6 +168,49 @@ type EventPageFuture<'a> = Pin<
 >;
 
 pub trait AgentRunStore: Send + Sync {
+    fn child_for_output<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ChildRun>, ChildRunError>> + Send + 'a>>;
+    #[allow(clippy::too_many_arguments)]
+    fn create_bound_child<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        request: BoundChildRequest,
+        max_active: usize,
+        max_depth: u8,
+        max_budget_tokens: u32,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<ChildRun, ChildRunError>> + Send + 'a>>;
+    fn bind_child_output<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        child_chat_session_id: Uuid,
+        child_output_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<ChildRun, ChildRunError>> + Send + 'a>>;
+    fn report_child_usage<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        used_tokens: u64,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>>;
+    fn settle_child_budget<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        used_tokens: u64,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>>;
     #[allow(clippy::too_many_arguments)]
     fn create_child<'a>(
         &'a self,
@@ -359,6 +425,309 @@ impl InMemoryAgentRunStore {
 }
 
 impl AgentRunStore for InMemoryAgentRunStore {
+    fn child_for_output<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        chat_session_id: Uuid,
+        output_id: Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<ChildRun>, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            Ok(self
+                .children
+                .read()
+                .await
+                .values()
+                .filter_map(|child| child.run.as_ref())
+                .find(|run| {
+                    run.session_id == session_id
+                        && run.child_chat_session_id == Some(chat_session_id)
+                        && run.child_output_id == Some(output_id)
+                })
+                .cloned())
+        })
+    }
+
+    fn create_bound_child<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        request: BoundChildRequest,
+        max_active: usize,
+        max_depth: u8,
+        max_budget_tokens: u32,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<ChildRun, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            if request.role.trim().is_empty()
+                || request.role.len() > 80
+                || request.task.trim().is_empty()
+                || request.task.len() > 32_000
+                || request.budget_tokens == 0
+                || request.budget_tokens > max_budget_tokens.max(1)
+            {
+                return Err(ChildRunError::Invalid);
+            }
+            let mut children = self.children.write().await;
+            if let Some(existing) = children
+                .values()
+                .filter_map(|child| child.run.as_ref())
+                .find(|run| {
+                    run.parent_output_id == Some(request.parent_output_id)
+                        && run.parent_call_id == Some(request.parent_call_id)
+                })
+            {
+                if existing.session_id == session_id
+                    && existing.parent_chat_session_id == Some(request.parent_chat_session_id)
+                    && existing.role == request.role
+                    && existing.task == request.task
+                {
+                    return Ok(existing.clone());
+                }
+                return Err(ChildRunError::Conflict);
+            }
+            let active = children
+                .values()
+                .filter_map(|child| child.run.as_ref())
+                .filter(|run| run.session_id == session_id && !run.status.terminal())
+                .count();
+            if active >= max_active.max(1) {
+                return Err(ChildRunError::Conflict);
+            }
+            let parent_id = children
+                .values()
+                .filter_map(|child| child.run.as_ref())
+                .find(|run| {
+                    run.session_id == session_id
+                        && run.child_chat_session_id == Some(request.parent_chat_session_id)
+                        && run.child_output_id == Some(request.parent_output_id)
+                })
+                .map(|run| run.child_id);
+            let (parent_run_id, depth, budget_tokens, parent_usage) =
+                if let Some(parent_id) = parent_id {
+                    let parent = children
+                        .get(&(session_id, parent_id))
+                        .and_then(|child| child.run.as_ref())
+                        .ok_or(ChildRunError::NotFound)?;
+                    if parent.status.terminal() || parent.cancel_requested {
+                        return Err(ChildRunError::Conflict);
+                    }
+                    let parent_usage = parent
+                        .budget_used_tokens
+                        .max(request.parent_budget_used_tokens);
+                    let allocated = u64::from(parent.budget_tokens)
+                        .saturating_sub(parent_usage)
+                        .saturating_sub(parent.budget_reserved_tokens);
+                    let budget = request
+                        .budget_tokens
+                        .min(u32::try_from(allocated).unwrap_or(u32::MAX));
+                    let depth = parent.depth.saturating_add(1);
+                    if budget == 0 || depth > max_depth.max(1) {
+                        return Err(ChildRunError::Conflict);
+                    }
+                    (parent_id.to_string(), depth, budget, parent_usage)
+                } else {
+                    (session_id.to_string(), 1, request.budget_tokens, 0)
+                };
+            let child_id = Uuid::now_v7();
+            let run = ChildRun {
+                session_id,
+                child_id,
+                parent_run_id: parent_run_id.clone(),
+                parent_chat_session_id: Some(request.parent_chat_session_id),
+                parent_output_id: Some(request.parent_output_id),
+                parent_call_id: Some(request.parent_call_id),
+                child_chat_session_id: None,
+                child_output_id: None,
+                role: request.role,
+                task: request.task,
+                budget_tokens,
+                depth,
+                status: ChildRunStatus::Queued,
+                cancel_requested: false,
+                budget_used_tokens: 0,
+                budget_reserved_tokens: 0,
+                budget_settled: false,
+                created_at: now,
+                updated_at: now,
+            };
+            if let Some(parent_id) = parent_id {
+                let parent = children
+                    .get_mut(&(session_id, parent_id))
+                    .and_then(|child| child.run.as_mut())
+                    .ok_or(ChildRunError::NotFound)?;
+                parent.budget_reserved_tokens = parent
+                    .budget_reserved_tokens
+                    .saturating_add(u64::from(budget_tokens));
+                parent.budget_used_tokens = parent.budget_used_tokens.max(parent_usage);
+                parent.updated_at = now;
+            }
+            let mut child = MemoryChild {
+                run: Some(run.clone()),
+                next_seq: 2,
+                ..Default::default()
+            };
+            child.events.push(ChildRunEvent {
+                seq: 1,
+                event_id: Uuid::now_v7(),
+                kind: ChildEventKind::Queued,
+                message: None,
+                result: None,
+                error_code: None,
+                action_id: None,
+                action_kind: None,
+                payload_digest: None,
+                display: None,
+                approved: None,
+                created_at: now,
+            });
+            children.insert((session_id, child_id), child);
+            Ok(run)
+        })
+    }
+
+    fn bind_child_output<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        child_chat_session_id: Uuid,
+        child_output_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<ChildRun, ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            let mut children = self.children.write().await;
+            let child = children
+                .get_mut(&(session_id, child_id))
+                .ok_or(ChildRunError::NotFound)?;
+            let run = child.run.as_mut().ok_or(ChildRunError::NotFound)?;
+            match (run.child_chat_session_id, run.child_output_id) {
+                (None, None) => {
+                    run.child_chat_session_id = Some(child_chat_session_id);
+                    run.child_output_id = Some(child_output_id);
+                    run.updated_at = now;
+                    Ok(run.clone())
+                }
+                (Some(chat), Some(output))
+                    if chat == child_chat_session_id && output == child_output_id =>
+                {
+                    Ok(run.clone())
+                }
+                _ => Err(ChildRunError::Conflict),
+            }
+        })
+    }
+
+    fn report_child_usage<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        used_tokens: u64,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            let mut children = self.children.write().await;
+            let child = children
+                .get_mut(&(session_id, child_id))
+                .ok_or(ChildRunError::NotFound)?;
+            let run = child.run.as_mut().ok_or(ChildRunError::NotFound)?;
+            if run.budget_settled
+                || used_tokens < run.budget_used_tokens
+                || used_tokens.saturating_add(run.budget_reserved_tokens)
+                    > u64::from(run.budget_tokens)
+            {
+                return Err(ChildRunError::Conflict);
+            }
+            run.budget_used_tokens = used_tokens;
+            run.updated_at = now;
+            Ok(())
+        })
+    }
+
+    fn settle_child_budget<'a>(
+        &'a self,
+        owner: &'a str,
+        session_id: Uuid,
+        child_id: Uuid,
+        used_tokens: u64,
+        now: DateTime<Utc>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ChildRunError>> + Send + 'a>> {
+        Box::pin(async move {
+            check_owner(&*self.owners.read().await, owner, session_id)?;
+            let mut children = self.children.write().await;
+            let child = children
+                .get(&(session_id, child_id))
+                .ok_or(ChildRunError::NotFound)?;
+            let run = child.run.as_ref().ok_or(ChildRunError::NotFound)?;
+            if run.budget_settled {
+                return if run.budget_used_tokens == used_tokens {
+                    Ok(())
+                } else {
+                    Err(ChildRunError::Conflict)
+                };
+            }
+            if used_tokens < run.budget_used_tokens || used_tokens > u64::from(run.budget_tokens) {
+                return Err(ChildRunError::Conflict);
+            }
+            let (parent_chat, parent_output, allocation) = (
+                run.parent_chat_session_id,
+                run.parent_output_id,
+                u64::from(run.budget_tokens),
+            );
+            let parent_id = parent_chat.zip(parent_output).and_then(|(chat, output)| {
+                children
+                    .values()
+                    .filter_map(|candidate| candidate.run.as_ref())
+                    .find(|candidate| {
+                        candidate.session_id == session_id
+                            && candidate.child_chat_session_id == Some(chat)
+                            && candidate.child_output_id == Some(output)
+                    })
+                    .map(|candidate| candidate.child_id)
+            });
+            if let Some(parent_id) = parent_id {
+                let parent = children
+                    .get(&(session_id, parent_id))
+                    .and_then(|candidate| candidate.run.as_ref())
+                    .ok_or(ChildRunError::NotFound)?;
+                if parent.budget_reserved_tokens < allocation
+                    || parent
+                        .budget_used_tokens
+                        .saturating_add(used_tokens)
+                        .saturating_add(parent.budget_reserved_tokens - allocation)
+                        > u64::from(parent.budget_tokens)
+                {
+                    return Err(ChildRunError::Conflict);
+                }
+            }
+            {
+                let run = children
+                    .get_mut(&(session_id, child_id))
+                    .and_then(|c| c.run.as_mut())
+                    .ok_or(ChildRunError::NotFound)?;
+                run.budget_used_tokens = used_tokens;
+                run.budget_reserved_tokens = 0;
+                run.budget_settled = true;
+                run.updated_at = now;
+            }
+            if let Some(parent_id) = parent_id {
+                let parent = children
+                    .get_mut(&(session_id, parent_id))
+                    .and_then(|candidate| candidate.run.as_mut())
+                    .ok_or(ChildRunError::NotFound)?;
+                parent.budget_reserved_tokens -= allocation;
+                parent.budget_used_tokens = parent.budget_used_tokens.saturating_add(used_tokens);
+                parent.updated_at = now;
+            }
+            Ok(())
+        })
+    }
+
     fn create_child<'a>(
         &'a self,
         owner: &'a str,
@@ -424,12 +793,20 @@ impl AgentRunStore for InMemoryAgentRunStore {
                 session_id,
                 child_id,
                 parent_run_id: parent_run_id.into(),
+                parent_chat_session_id: None,
+                parent_output_id: None,
+                parent_call_id: None,
+                child_chat_session_id: None,
+                child_output_id: None,
                 role: role.into(),
                 task: task.into(),
                 budget_tokens,
                 depth,
                 status: ChildRunStatus::Queued,
                 cancel_requested: false,
+                budget_used_tokens: 0,
+                budget_reserved_tokens: 0,
+                budget_settled: false,
                 created_at: now,
                 updated_at: now,
             };
@@ -856,6 +1233,8 @@ pub struct AgentRunService {
     pub max_active_children: usize,
     pub max_depth: u8,
     pub max_budget_tokens: u32,
+    active_child_tasks: ActiveChildTasks,
+    active_child_budgets: ActiveChildBudgets,
 }
 impl AgentRunService {
     pub fn new(
@@ -871,6 +1250,79 @@ impl AgentRunService {
             max_active_children: max_active_children.clamp(1, 16),
             max_depth: max_depth.clamp(1, 4),
             max_budget_tokens: max_budget_tokens.clamp(256, 65_536),
+            active_child_tasks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            active_child_budgets: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn register_child_task(
+        &self,
+        session_id: Uuid,
+        child_id: Uuid,
+        cancel: tokio::sync::watch::Sender<bool>,
+    ) -> bool {
+        let mut tasks = self
+            .active_child_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if tasks.contains_key(&(session_id, child_id)) {
+            return false;
+        }
+        tasks.insert((session_id, child_id), cancel);
+        true
+    }
+
+    pub fn unregister_child_task(&self, session_id: Uuid, child_id: Uuid) {
+        self.active_child_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(session_id, child_id));
+        self.active_child_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&(session_id, child_id));
+    }
+
+    pub fn register_child_budget(
+        &self,
+        session_id: Uuid,
+        child_id: Uuid,
+        budget: Arc<crate::domain::models::thinking::TokenBudget>,
+    ) {
+        self.active_child_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((session_id, child_id), budget);
+    }
+
+    pub fn child_budget_usage(&self, session_id: Uuid, child_id: Uuid) -> Option<u64> {
+        self.active_child_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(session_id, child_id))
+            .map(|budget| budget.used())
+    }
+
+    pub fn active_child_budget(
+        &self,
+        session_id: Uuid,
+        child_id: Uuid,
+    ) -> Option<Arc<crate::domain::models::thinking::TokenBudget>> {
+        self.active_child_budgets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(session_id, child_id))
+            .cloned()
+    }
+
+    pub fn cancel_child_task(&self, session_id: Uuid, child_id: Uuid) {
+        if let Some(cancel) = self
+            .active_child_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(session_id, child_id))
+        {
+            let _ = cancel.send(true);
         }
     }
     pub fn in_memory(action_ttl_ms: u64) -> Self {
@@ -907,6 +1359,108 @@ mod tests {
             display: "cwd: workspace; command: cargo test".into(),
             expires_at: now + Duration::seconds(30),
         }
+    }
+
+    #[tokio::test]
+    async fn bound_child_creation_is_idempotent_and_reserves_nested_budget_once() {
+        let (service, store) = AgentRunService::in_memory_with_store(30_000);
+        let _ = service;
+        let session = Uuid::now_v7();
+        store.register_session(session, "owner").await;
+        let now = Utc::now();
+        let parent_chat = Uuid::now_v7();
+        let parent_output = Uuid::now_v7();
+        let call_id = Uuid::now_v7();
+        let request = BoundChildRequest {
+            parent_chat_session_id: parent_chat,
+            parent_output_id: parent_output,
+            parent_call_id: call_id,
+            parent_budget_used_tokens: 0,
+            role: "researcher".into(),
+            task: "Find a concise answer".into(),
+            budget_tokens: 2048,
+        };
+        let root = store
+            .create_bound_child("owner", session, request.clone(), 4, 3, 8192, now)
+            .await
+            .unwrap();
+        let retry = store
+            .create_bound_child("owner", session, request, 4, 3, 8192, now)
+            .await
+            .unwrap();
+        assert_eq!(root.child_id, retry.child_id);
+        let child_chat = Uuid::now_v7();
+        let child_output = Uuid::now_v7();
+        store
+            .bind_child_output(
+                "owner",
+                session,
+                root.child_id,
+                child_chat,
+                child_output,
+                now,
+            )
+            .await
+            .unwrap();
+        store
+            .report_child_usage("owner", session, root.child_id, 512, now)
+            .await
+            .unwrap();
+        let nested = store
+            .create_bound_child(
+                "owner",
+                session,
+                BoundChildRequest {
+                    parent_chat_session_id: child_chat,
+                    parent_output_id: child_output,
+                    parent_call_id: Uuid::now_v7(),
+                    parent_budget_used_tokens: 512,
+                    role: "checker".into(),
+                    task: "Check the answer".into(),
+                    budget_tokens: 2048,
+                },
+                4,
+                3,
+                8192,
+                now,
+            )
+            .await
+            .unwrap();
+        assert_eq!(nested.parent_run_id, root.child_id.to_string());
+        assert_eq!(nested.budget_tokens, 1536);
+        assert_eq!(nested.depth, 2);
+        let (root_state, _) = store
+            .events_after("owner", session, root.child_id, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(root_state.budget_used_tokens, 512);
+        assert_eq!(root_state.budget_reserved_tokens, 1536);
+        assert!(
+            store
+                .report_child_usage("owner", session, root.child_id, 1000, now)
+                .await
+                .is_err()
+        );
+        store
+            .settle_child_budget("owner", session, nested.child_id, 128, now)
+            .await
+            .unwrap();
+        store
+            .settle_child_budget("owner", session, nested.child_id, 128, now)
+            .await
+            .unwrap();
+        let (settled_parent, _) = store
+            .events_after("owner", session, root.child_id, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(settled_parent.budget_used_tokens, 640);
+        assert_eq!(settled_parent.budget_reserved_tokens, 0);
+        assert!(
+            store
+                .settle_child_budget("owner", session, nested.child_id, 129, now)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

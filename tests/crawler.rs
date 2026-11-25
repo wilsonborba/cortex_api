@@ -173,6 +173,7 @@ impl ModelDriver for Driver {
                     started_at: start,
                     finished_at: end,
                 },
+                usage_measured: true,
                 error: if self.slow {
                     Some(DriverError::Cancelled)
                 } else {

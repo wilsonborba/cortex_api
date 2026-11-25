@@ -101,6 +101,7 @@ impl ModelDriver for StubDriver {
                     started_at: now,
                     finished_at: now,
                 },
+                usage_measured: true,
                 error: None,
                 load_ms: 0,
                 tokens_per_second: None,
@@ -561,13 +562,33 @@ async fn output_action_route_enforces_one_executor_and_idempotent_registration()
         let (live, _) = tokio::sync::broadcast::channel(8);
         runtime.controls.open(
             output,
-            cortex_api::domain::services::output_controls::Control {
-                cancel: Arc::new(cancel),
-                stop_thinking: Arc::new(stop_thinking),
+            cortex_api::domain::services::output_controls::Control::new(
+                Arc::new(cancel),
+                Arc::new(stop_thinking),
                 live,
                 tools,
-            },
+            ),
         );
+
+        let child_path = format!("/remote/sessions/{first_session}/outputs/{chat}/{output}/children");
+        let (wrong_call_status, _) = json_req(
+            &app,
+            "POST",
+            &child_path,
+            Some("owner"),
+            Some(json!({"call_id":Uuid::now_v7()})),
+        )
+        .await;
+        assert_eq!(wrong_call_status, StatusCode::CONFLICT);
+        let (client_authority_status, _) = json_req(
+            &app,
+            "POST",
+            &child_path,
+            Some("owner"),
+            Some(json!({"call_id":call,"task":"client supplied task"})),
+        )
+        .await;
+        assert_eq!(client_authority_status, StatusCode::BAD_REQUEST);
 
         let path = format!("/remote/sessions/{first_session}/outputs/{chat}/{output}/actions");
         let (status, first) = json_req(

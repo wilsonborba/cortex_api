@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::{collections::VecDeque, convert::Infallible, sync::Arc, time::Duration};
 use uuid::Uuid;
 
+use crate::domain::services::chat_runtime::Finished;
 use crate::{
     domain::services::agent_runs::{
         AgentRunService, ChildEventKind, ChildRunError, OutputAction, PendingChildAction,
@@ -135,6 +136,10 @@ pub fn router(service: AgentRunService) -> Router {
     Router::new()
         .route("/remote/sessions/{session_id}/children", post(create_child))
         .route(
+            "/remote/sessions/{session_id}/children/{child_id}",
+            get(child_detail),
+        )
+        .route(
             "/remote/sessions/{session_id}/children/{child_id}/events",
             get(events).post(append_event),
         )
@@ -164,6 +169,31 @@ struct OutputActionState {
 #[serde(deny_unknown_fields)]
 struct CreateOutputAction {
     call_id: Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisterChildCall {
+    call_id: Uuid,
+}
+
+#[derive(Serialize)]
+struct BoundChildView {
+    child_id: Uuid,
+    parent_call_id: Uuid,
+    status: crate::domain::services::agent_runs::ChildRunStatus,
+    depth: u8,
+    budget_tokens: u32,
+    child_chat_session_id: Option<Uuid>,
+    child_output_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingSubagentArgs {
+    role: String,
+    task: String,
+    context: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -219,6 +249,10 @@ pub fn output_router(
     };
     Router::new()
         .route(
+            "/remote/sessions/{remote_session_id}/outputs/{chat_session_id}/{output_id}/children",
+            post(create_bound_child),
+        )
+        .route(
             "/remote/sessions/{remote_session_id}/outputs/{chat_session_id}/{output_id}/actions",
             post(create_output_action),
         )
@@ -248,10 +282,398 @@ fn status(process: crate::core::process_numbers::ProcessNumber) -> StatusCode {
     }
 }
 
+async fn create_bound_child(
+    State(state): State<OutputActionState>,
+    UserId(owner): UserId,
+    context: CallerContext,
+    Path((remote_session, parent_chat, parent_output)): Path<(Uuid, Uuid, Uuid)>,
+    Json(body): Json<RegisterChildCall>,
+) -> Response {
+    let pending = match live_pending(
+        &state,
+        &owner,
+        &context,
+        remote_session,
+        parent_chat,
+        parent_output,
+    )
+    .await
+    {
+        Ok(pending) => pending,
+        Err(error) => return error,
+    };
+    if pending.call_id != body.call_id
+        || pending.name != crate::domain::models::tools::ToolName::InvokeSubagent
+    {
+        return map_error(ChildRunError::Conflict);
+    }
+    let args: PendingSubagentArgs = match serde_json::from_value(pending.arguments.clone()) {
+        Ok(args) => args,
+        Err(_) => return map_error(ChildRunError::Invalid),
+    };
+    let task = match args
+        .context
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(context) => format!(
+            "Role: {}\n\nTask:\n{}\n\nExplicit context:\n{}",
+            args.role, args.task, context
+        ),
+        None => format!("Role: {}\n\nTask:\n{}", args.role, args.task),
+    };
+    if task.len() > 32_000 {
+        return map_error(ChildRunError::Invalid);
+    }
+    let parent_budget = match state
+        .service
+        .store
+        .child_for_output(&owner, remote_session, parent_chat, parent_output)
+        .await
+    {
+        Ok(Some(parent)) => match state
+            .service
+            .active_child_budget(remote_session, parent.child_id)
+        {
+            Some(budget) => Some(budget),
+            None => return map_error(ChildRunError::Conflict),
+        },
+        Ok(None) => None,
+        Err(error) => return map_error(error),
+    };
+    let parent_used = parent_budget.as_ref().map_or(0, |budget| budget.used());
+    let request = crate::domain::services::agent_runs::BoundChildRequest {
+        parent_chat_session_id: parent_chat,
+        parent_output_id: parent_output,
+        parent_call_id: pending.call_id,
+        parent_budget_used_tokens: parent_used,
+        role: args.role,
+        task: task.clone(),
+        budget_tokens: state.service.max_budget_tokens,
+    };
+    let child = match state
+        .service
+        .store
+        .create_bound_child(
+            &owner,
+            remote_session,
+            request,
+            state.service.max_active_children,
+            state.service.max_depth,
+            state.service.max_budget_tokens,
+            now(),
+        )
+        .await
+    {
+        Ok(child) => child,
+        Err(error) => return map_error(error),
+    };
+    if !child.budget_settled
+        && let Some(parent_budget) = &parent_budget
+        && !parent_budget.reserve(child.child_id, u64::from(child.budget_tokens))
+    {
+        return map_error(ChildRunError::Conflict);
+    }
+    if !child.status.terminal() && child.child_output_id.is_none() {
+        let parent_control = match state.runtime.controls.get(parent_output) {
+            Some(control) => control,
+            None => return map_error(ChildRunError::Conflict),
+        };
+        let caller = match context.for_app("cortex", true) {
+            Ok(caller) => caller,
+            Err(error) => return error.into_response(),
+        };
+        start_bound_child(
+            state.clone(),
+            owner,
+            remote_session,
+            child.clone(),
+            task,
+            caller,
+            parent_control,
+            parent_budget,
+        );
+    }
+    (
+        if child.status == crate::domain::services::agent_runs::ChildRunStatus::Queued
+            && child.child_output_id.is_none()
+        {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Envelope::new(
+            "Bound child run registered",
+            BoundChildView {
+                child_id: child.child_id,
+                parent_call_id: child.parent_call_id.unwrap_or(body.call_id),
+                status: child.status,
+                depth: child.depth,
+                budget_tokens: child.budget_tokens,
+                child_chat_session_id: child.child_chat_session_id,
+                child_output_id: child.child_output_id,
+            },
+        ),
+    )
+        .into_response()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_bound_child(
+    state: OutputActionState,
+    owner: String,
+    remote_session: Uuid,
+    child: crate::domain::services::agent_runs::ChildRun,
+    task: String,
+    caller: crate::domain::models::identity::Caller,
+    parent_control: crate::domain::services::output_controls::Control,
+    parent_budget: Option<Arc<crate::domain::models::thinking::TokenBudget>>,
+) {
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    if !state
+        .service
+        .register_child_task(remote_session, child.child_id, cancel_tx)
+    {
+        return;
+    }
+    let mut parent_cancel = parent_control.cancel.subscribe();
+    tokio::spawn(async move {
+        let runtime = state.runtime.clone();
+        let token_budget = Arc::new(crate::domain::models::thinking::TokenBudget::new(
+            u64::from(child.budget_tokens),
+        ));
+        state
+            .service
+            .register_child_budget(remote_session, child.child_id, token_budget.clone());
+        let body = crate::domain::models::chat_session::NewChat {
+            app_id: "cortex".into(),
+            text: task,
+            file_ids: vec![],
+            stream: true,
+            needs_web: false,
+            web_mode: crate::domain::models::run_record::WebMode::Fast,
+            use_memory: false,
+            memory_topic: None,
+            thinking: false,
+            persona_id: None,
+            temporary: false,
+        };
+        let mut turn = crate::domain::models::chat_runtime::Turn::new(
+            caller,
+            crate::domain::models::chat_runtime::TurnRequest::New(body),
+        );
+        turn.tools_enabled = true;
+        turn.token_budget = Some(token_budget.clone());
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut finished = runtime.start(turn, Some(events_tx));
+        let mut child_chat = None;
+        let mut child_output = None;
+        let mut cancel_rx = cancel_rx;
+        let mut cancel_open = true;
+        let mut parent_cancel_open = true;
+        let mut events_open = true;
+        let finished = loop {
+            tokio::select! {
+                changed = cancel_rx.changed(), if cancel_open => {
+                    if changed.is_err() { cancel_open = false; }
+                    if *cancel_rx.borrow()
+                        && let Some(output) = child_output
+                        && let Some(control) = runtime.controls.get(output)
+                    {
+                        control.request_cancel();
+                    }
+                }
+                changed = parent_cancel.changed(), if parent_cancel_open => {
+                    if changed.is_err() { parent_cancel_open = false; }
+                    if *parent_cancel.borrow() {
+                        let _ = state.service.store.request_cancel(
+                            &owner, remote_session, child.child_id, Uuid::now_v7(), now(),
+                        ).await;
+                        state.service.cancel_child_task(remote_session, child.child_id);
+                        if let Some(output) = child_output
+                            && let Some(control) = runtime.controls.get(output)
+                        {
+                            control.request_cancel();
+                        }
+                    }
+                }
+                event = events_rx.recv(), if events_open => match event {
+                    Some(event) => {
+                        if let crate::domain::models::events::NativeEvent::Stage(stage) = &event.event {
+                            if let (Some(chat), Some(output)) = (stage.session_id, stage.output_id)
+                                && child_output.is_none()
+                            {
+                                    match state.service.store.bind_child_output(&owner, remote_session, child.child_id, chat, output, now()).await {
+                                        Ok(_) => { child_chat = Some(chat); child_output = Some(output); }
+                                        Err(_) => {
+                                            if let Some(control) = runtime.controls.get(output) { control.request_cancel(); }
+                                        }
+                                    }
+                                    if *cancel_rx.borrow()
+                                        && let Some(control) = runtime.controls.get(output)
+                                    {
+                                        control.request_cancel();
+                                    }
+                            }
+                            if stage.status != "started" {
+                                let message = format!("Stage {:?}: {}", stage.stage, stage.status);
+                                let _ = state.service.store.append_event(
+                                    &owner, remote_session, child.child_id, Uuid::now_v7(),
+                                    ChildEventKind::Progress, Some(&message), None, None, now(),
+                                ).await;
+                            }
+                        }
+                    }
+                    None => events_open = false,
+                },
+                done = &mut finished => {
+                    break done.ok();
+                }
+            }
+        };
+        let cancelled = *cancel_rx.borrow();
+        let provider_completed = finished
+            .as_ref()
+            .is_some_and(|run| run.error.is_none() && run.output.is_some());
+        let budget_settled = if provider_completed && !cancelled {
+            state
+                .service
+                .store
+                .settle_child_budget(
+                    &owner,
+                    remote_session,
+                    child.child_id,
+                    token_budget.settlement_usage(),
+                    now(),
+                )
+                .await
+                .is_ok()
+                && parent_budget.as_ref().is_none_or(|budget| {
+                    budget.settle_reservation(child.child_id, token_budget.settlement_usage())
+                })
+        } else {
+            false
+        };
+        let parent_cancelled = *parent_control.cancel.borrow();
+        let (kind, tool_result, event_result, error_code) = if cancelled || parent_cancelled {
+            (
+                ChildEventKind::Cancelled,
+                "The child task was cancelled after its provider stopped.".to_owned(),
+                None,
+                None,
+            )
+        } else if budget_settled
+            && let Some(Finished {
+                error: None,
+                output: Some(output),
+                ..
+            }) = &finished
+        {
+            let safe = bounded_child_text(&output.text);
+            (
+                ChildEventKind::Completed,
+                output.text.clone(),
+                Some(safe),
+                None,
+            )
+        } else {
+            (
+                ChildEventKind::Failed,
+                "The child task did not complete.".to_owned(),
+                None,
+                Some("CHILD_FAILED".to_owned()),
+            )
+        };
+        if let Some(event_result) = event_result {
+            let _ = state
+                .service
+                .store
+                .append_event(
+                    &owner,
+                    remote_session,
+                    child.child_id,
+                    Uuid::now_v7(),
+                    kind,
+                    None,
+                    Some(&event_result),
+                    None,
+                    now(),
+                )
+                .await;
+        } else if kind == ChildEventKind::Failed {
+            let _ = state
+                .service
+                .store
+                .append_event(
+                    &owner,
+                    remote_session,
+                    child.child_id,
+                    Uuid::now_v7(),
+                    kind,
+                    None,
+                    None,
+                    error_code.as_deref(),
+                    now(),
+                )
+                .await;
+        } else {
+            let _ = state
+                .service
+                .store
+                .append_event(
+                    &owner,
+                    remote_session,
+                    child.child_id,
+                    Uuid::now_v7(),
+                    kind,
+                    None,
+                    None,
+                    None,
+                    now(),
+                )
+                .await;
+        }
+        if !parent_cancelled
+            && !*parent_control.cancel.borrow()
+            && let Some(pending) = parent_control.tools.pending()
+            && Some(pending.call_id) == child.parent_call_id
+            && pending.name == crate::domain::models::tools::ToolName::InvokeSubagent
+        {
+            let parent_result = crate::domain::models::tools::ToolResult {
+                call_id: pending.call_id,
+                name: pending.name,
+                output: bounded_child_text(&tool_result),
+            };
+            let _ = parent_control.submit_tool_if_active(parent_result);
+        }
+        state
+            .service
+            .unregister_child_task(remote_session, child.child_id);
+        let _ = (child_chat, child_output);
+    });
+}
+
+fn bounded_child_text(value: &str) -> String {
+    let mut safe = String::new();
+    for ch in value.chars() {
+        if (ch.is_control() && ch != '\n' && ch != '\t')
+            || matches!(ch as u32, 0x202a..=0x202e | 0x2066..=0x2069)
+        {
+            continue;
+        }
+        if safe.len() + ch.len_utf8() > 32_000 {
+            break;
+        }
+        safe.push(ch);
+    }
+    safe
+}
+
 async fn live_pending(
     state: &OutputActionState,
     owner: &str,
     context: &CallerContext,
+    remote_session_id: Uuid,
     chat_session_id: Uuid,
     output_id: Uuid,
 ) -> Result<crate::domain::models::tools::PendingTool, Response> {
@@ -273,6 +695,16 @@ async fn live_pending(
         .get(output_id)
         .ok_or_else(|| failure(crate::core::process_numbers::OUTPUT_NOT_RUNNING))?;
     if *control.cancel.borrow() {
+        return Err(failure(crate::core::process_numbers::OUTPUT_NOT_RUNNING));
+    }
+    if state
+        .service
+        .store
+        .child_for_output(owner, remote_session_id, chat_session_id, output_id)
+        .await
+        .map_err(map_error)?
+        .is_some_and(|child| child.status.terminal() || child.cancel_requested)
+    {
         return Err(failure(crate::core::process_numbers::OUTPUT_NOT_RUNNING));
     }
     control
@@ -323,7 +755,16 @@ async fn create_output_action(
     Path((remote_session, chat_session, output)): Path<(Uuid, Uuid, Uuid)>,
     Json(body): Json<CreateOutputAction>,
 ) -> Response {
-    let pending = match live_pending(&state, &owner, &context, chat_session, output).await {
+    let pending = match live_pending(
+        &state,
+        &owner,
+        &context,
+        remote_session,
+        chat_session,
+        output,
+    )
+    .await
+    {
         Ok(pending) => pending,
         Err(error) => return error,
     };
@@ -449,7 +890,16 @@ async fn answer_output_action(
     Path((remote_session, chat_session, output, action_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
     Json(body): Json<AnswerOutputAction>,
 ) -> Response {
-    let pending = match live_pending(&state, &owner, &context, chat_session, output).await {
+    let pending = match live_pending(
+        &state,
+        &owner,
+        &context,
+        remote_session,
+        chat_session,
+        output,
+    )
+    .await
+    {
         Ok(pending) => pending,
         Err(error) => return error,
     };
@@ -502,7 +952,16 @@ async fn claim_output_action(
     Path((remote_session, chat_session, output, action_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
     Json(body): Json<ClaimOutputAction>,
 ) -> Response {
-    let pending = match live_pending(&state, &owner, &context, chat_session, output).await {
+    let pending = match live_pending(
+        &state,
+        &owner,
+        &context,
+        remote_session,
+        chat_session,
+        output,
+    )
+    .await
+    {
         Ok(pending) => pending,
         Err(error) => return error,
     };
@@ -581,6 +1040,21 @@ async fn create_child(
     }
 }
 
+async fn child_detail(
+    State(service): State<AgentRunService>,
+    UserId(owner): UserId,
+    Path((session, child)): Path<(Uuid, Uuid)>,
+) -> Response {
+    match service
+        .store
+        .events_after(&owner, session, child, i64::MAX as u64, 1)
+        .await
+    {
+        Ok((run, _)) => Envelope::new("Child run loaded", run).into_response(),
+        Err(error) => map_error(error),
+    }
+}
+
 async fn append_event(
     State(service): State<AgentRunService>,
     UserId(owner): UserId,
@@ -652,11 +1126,14 @@ async fn cancel(
         .request_cancel(&owner, session, child, Uuid::now_v7(), now())
         .await
     {
-        Ok(event) => (
-            StatusCode::ACCEPTED,
-            Envelope::new("Cancellation requested", event),
-        )
-            .into_response(),
+        Ok(event) => {
+            service.cancel_child_task(session, child);
+            (
+                StatusCode::ACCEPTED,
+                Envelope::new("Cancellation requested", event),
+            )
+                .into_response()
+        }
         Err(e) => map_error(e),
     }
 }

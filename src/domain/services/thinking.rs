@@ -93,13 +93,37 @@ impl Thinking {
             }
         }
         let prompt = render(low).0;
+        let remaining = input
+            .budget
+            .as_ref()
+            .map_or(u64::MAX, |budget| budget.remaining());
+        let prompt_tokens = self
+            .config
+            .estimate_tokens(&system)
+            .saturating_add(self.config.estimate_tokens(&prompt))
+            .saturating_add(self.config.chat_template_token_reserve);
+        let output_allowance = remaining.saturating_sub(prompt_tokens).min(
+            self.config
+                .model_context_tokens
+                .saturating_sub(prompt_tokens),
+        );
+        if output_allowance == 0 {
+            return Err(DriverError::InvalidInput);
+        }
         Ok(CallInput {
             role: role.into(),
             system,
             prompt,
             images: input.images.clone(),
             temperature: self.config.query_temperature,
-            max_tokens,
+            max_tokens: u64::from(max_tokens)
+                .min(output_allowance)
+                .min(u64::from(u32::MAX)) as u32,
+            context_tokens: self
+                .config
+                .model_context_tokens
+                .min(remaining)
+                .min(u64::from(u32::MAX)) as u32,
             prefix: None,
             allow_tools: role == "answer" && input.tools_enabled,
             tool_history: vec![],
@@ -125,7 +149,22 @@ impl Thinking {
                 sink.driver(stage, role.clone(), event);
             }
         });
-        let outcome = self.driver.call(input.model, call, tx, signal).await;
+        let outcome = self
+            .driver
+            .call(input.model, call, tx, signal)
+            .await
+            .and_then(|outcome| {
+                if let Some(budget) = &input.budget {
+                    let actual = outcome
+                        .usage
+                        .input_tokens
+                        .saturating_add(outcome.usage.output_tokens);
+                    if !outcome.usage_measured || !budget.charge(actual) {
+                        return Err(DriverError::InvalidInput);
+                    }
+                }
+                Ok(outcome)
+            });
         let _ = forward.await;
         outcome
     }
@@ -397,5 +436,296 @@ impl Thinking {
             return Ok(outcome);
         }
         Err(DriverError::InvalidInput)
+    }
+}
+
+#[cfg(test)]
+mod child_budget_tests {
+    use super::*;
+    use crate::{
+        core::config::Config,
+        domain::models::{
+            context::AssembledContext,
+            driver::{DriverEvent, OutputModel},
+            identity::Caller,
+            run_record::ModelCall,
+        },
+    };
+    use chrono::Utc;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FakeDriver {
+        outcomes: std::sync::Mutex<VecDeque<CallOutcome>>,
+        calls: std::sync::Mutex<Vec<CallInput>>,
+    }
+    impl ModelDriver for FakeDriver {
+        fn call<'a>(
+            &'a self,
+            _output: &'a OutputModel,
+            input: CallInput,
+            _events: mpsc::UnboundedSender<DriverEvent>,
+            _cancel: watch::Receiver<bool>,
+        ) -> crate::domain::models::usage::Pending<'a, Result<CallOutcome, DriverError>> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(input);
+                self.outcomes
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or(DriverError::InvalidInput)
+            })
+        }
+    }
+
+    struct PausedDriver {
+        stopped: Arc<AtomicBool>,
+    }
+    impl ModelDriver for PausedDriver {
+        fn call<'a>(
+            &'a self,
+            _output: &'a OutputModel,
+            _input: CallInput,
+            _events: mpsc::UnboundedSender<DriverEvent>,
+            mut cancel: watch::Receiver<bool>,
+        ) -> crate::domain::models::usage::Pending<'a, Result<CallOutcome, DriverError>> {
+            Box::pin(async move {
+                if !*cancel.borrow() {
+                    let _ = cancel.changed().await;
+                }
+                self.stopped.store(true, Ordering::Release);
+                Err(DriverError::Cancelled)
+            })
+        }
+    }
+
+    fn outcome(measured: bool, input_tokens: u64, output_tokens: u64) -> CallOutcome {
+        let now = Utc::now();
+        CallOutcome {
+            inspection: None,
+            text: "bounded reply".into(),
+            usage: ModelCall {
+                images: Some(0),
+                audio: None,
+                role: "answer".into(),
+                model: "fake".into(),
+                input_tokens,
+                output_tokens,
+                time_to_first_token_ms: None,
+                total_ms: 1,
+                started_at: now,
+                finished_at: now,
+            },
+            usage_measured: measured,
+            error: None,
+            load_ms: 0,
+            tokens_per_second: None,
+            tool_request: None,
+        }
+    }
+
+    fn make_thinking_input<'a>(
+        model: &'a OutputModel,
+        context: &'a AssembledContext,
+        budget: Arc<TokenBudget>,
+    ) -> ThinkingInput<'a> {
+        ThinkingInput {
+            model,
+            context,
+            images: vec![],
+            prefix: None,
+            tools_enabled: false,
+            budget: Some(budget),
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_calls_clamp_context_and_charge_measured_usage_only() {
+        let config = Config::default();
+        let caller = Caller {
+            app_id: "cortex".into(),
+            user_id: Some("owner".into()),
+            is_admin: false,
+        };
+        let model = OutputModel::new(&caller, uuid::Uuid::now_v7(), false);
+        let context = AssembledContext {
+            question: "Explain briefly".into(),
+            system: "Answer with evidence.".into(),
+            prompt: "Question: Explain briefly".into(),
+            system_personas: vec![],
+            texts: vec![],
+            history: vec![],
+            estimated_input_tokens: 0,
+            reserved_output_tokens: 0,
+            reserved_notes_tokens: 0,
+        };
+        let budget = Arc::new(TokenBudget::new(512));
+        let input = make_thinking_input(&model, &context, budget.clone());
+        let fake = Arc::new(FakeDriver {
+            outcomes: std::sync::Mutex::new(VecDeque::from([outcome(true, 180, 80)])),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let thinking = Thinking::new(&config, fake.clone());
+        let call_input = thinking
+            .call_input(&input, &[], "answer", "Short answer", 1024)
+            .unwrap();
+        let estimated_prompt = config.estimate_tokens(&call_input.system)
+            + config.estimate_tokens(&call_input.prompt)
+            + config.chat_template_token_reserve;
+        assert!(u64::from(call_input.context_tokens) <= budget.remaining());
+        assert!(estimated_prompt + u64::from(call_input.max_tokens) <= budget.remaining());
+        let (events, _receiver, forwarder) =
+            crate::domain::services::events::channel(&config, None);
+        let (_cancel_tx, cancel) = watch::channel(false);
+        thinking
+            .call(&input, call_input, CallStreamRole::Answer, &events, cancel)
+            .await
+            .unwrap();
+        drop(events);
+        forwarder.await.unwrap();
+        assert_eq!(budget.used(), 260);
+        let remaining_input = thinking
+            .call_input(&input, &[], "answer", "Next call", 1024)
+            .unwrap();
+        let remaining_prompt = config.estimate_tokens(&remaining_input.system)
+            + config.estimate_tokens(&remaining_input.prompt)
+            + config.chat_template_token_reserve;
+        assert!(u64::from(remaining_input.context_tokens) <= 252);
+        assert!(remaining_prompt + u64::from(remaining_input.max_tokens) <= 252);
+        let nested_id = uuid::Uuid::now_v7();
+        assert!(budget.reserve(nested_id, 100));
+        assert_eq!(budget.remaining(), 152);
+        assert!(budget.settle_reservation(nested_id, 70));
+        assert_eq!(budget.used(), 330);
+        assert_eq!(budget.remaining(), 182);
+        assert!(
+            thinking
+                .call_input(
+                    &make_thinking_input(&model, &context, Arc::new(TokenBudget::new(1))),
+                    &[],
+                    "answer",
+                    "No room",
+                    32
+                )
+                .is_err()
+        );
+
+        let unmeasured_budget = Arc::new(TokenBudget::new(512));
+        let unmeasured_input = make_thinking_input(&model, &context, unmeasured_budget.clone());
+        let unmeasured_fake = Arc::new(FakeDriver {
+            outcomes: std::sync::Mutex::new(VecDeque::from([outcome(false, 12, 8)])),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let unmeasured = Thinking::new(&config, unmeasured_fake);
+        let request = unmeasured
+            .call_input(&unmeasured_input, &[], "answer", "Short answer", 32)
+            .unwrap();
+        let (events, _receiver, forwarder) =
+            crate::domain::services::events::channel(&config, None);
+        let (_cancel_tx, cancel) = watch::channel(false);
+        assert_eq!(
+            unmeasured
+                .call(
+                    &unmeasured_input,
+                    request,
+                    CallStreamRole::Answer,
+                    &events,
+                    cancel
+                )
+                .await
+                .err(),
+            Some(DriverError::InvalidInput)
+        );
+        drop(events);
+        forwarder.await.unwrap();
+        assert_eq!(unmeasured_budget.used(), 0);
+
+        let excess_budget = Arc::new(TokenBudget::new(512));
+        let excess_input = make_thinking_input(&model, &context, excess_budget.clone());
+        let excess_fake = Arc::new(FakeDriver {
+            outcomes: std::sync::Mutex::new(VecDeque::from([outcome(true, 500, 20)])),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let excess = Thinking::new(&config, excess_fake);
+        let request = excess
+            .call_input(&excess_input, &[], "answer", "Short answer", 32)
+            .unwrap();
+        let (events, _receiver, forwarder) =
+            crate::domain::services::events::channel(&config, None);
+        let (_cancel_tx, cancel) = watch::channel(false);
+        assert_eq!(
+            excess
+                .call(
+                    &excess_input,
+                    request,
+                    CallStreamRole::Answer,
+                    &events,
+                    cancel
+                )
+                .await
+                .err(),
+            Some(DriverError::InvalidInput)
+        );
+        drop(events);
+        forwarder.await.unwrap();
+        assert_eq!(excess_budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_provider_call_is_awaited_until_the_driver_stops() {
+        let config = Config::default();
+        let caller = Caller {
+            app_id: "cortex".into(),
+            user_id: Some("owner".into()),
+            is_admin: false,
+        };
+        let model = OutputModel::new(&caller, uuid::Uuid::now_v7(), false);
+        let context = AssembledContext {
+            question: "wait".into(),
+            system: String::new(),
+            prompt: "Question: wait".into(),
+            system_personas: vec![],
+            texts: vec![],
+            history: vec![],
+            estimated_input_tokens: 0,
+            reserved_output_tokens: 0,
+            reserved_notes_tokens: 0,
+        };
+        let budget = Arc::new(TokenBudget::new(256));
+        let input = make_thinking_input(&model, &context, budget.clone());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let thinking = Thinking::new(
+            &config,
+            Arc::new(PausedDriver {
+                stopped: stopped.clone(),
+            }),
+        );
+        let request = thinking
+            .call_input(&input, &[], "answer", "Stop safely", 64)
+            .unwrap();
+        let (events, _receiver, forwarder) =
+            crate::domain::services::events::channel(&config, None);
+        let call_events = events.clone();
+        let call_budget = budget.clone();
+        let (cancel_tx, cancel) = watch::channel(false);
+        let call = tokio::spawn(async move {
+            let input = make_thinking_input(&model, &context, call_budget);
+            thinking
+                .call(
+                    &input,
+                    request,
+                    CallStreamRole::Answer,
+                    &call_events,
+                    cancel,
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        cancel_tx.send(true).unwrap();
+        assert_eq!(call.await.unwrap().err(), Some(DriverError::Cancelled));
+        assert!(stopped.load(Ordering::Acquire));
+        assert_eq!(budget.used(), 0);
+        drop(events);
+        forwarder.await.unwrap();
     }
 }

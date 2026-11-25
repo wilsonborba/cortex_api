@@ -74,6 +74,7 @@ async fn measure_8192_context_through_the_real_queue() {
             },
             temperature: 0.0,
             max_tokens: 128,
+            context_tokens: config.model_context_tokens as u32,
             prefix: None,
             allow_tools: false,
             tool_history: vec![],

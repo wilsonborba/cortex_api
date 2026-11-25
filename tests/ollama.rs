@@ -196,6 +196,7 @@ fn input(images: bool, role: &str) -> CallInput {
         },
         temperature: 0.0,
         max_tokens: 32,
+        context_tokens: Config::default().model_context_tokens as u32,
         prefix: None,
         allow_tools: false,
         tool_history: vec![],

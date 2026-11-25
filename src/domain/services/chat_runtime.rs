@@ -531,6 +531,7 @@ impl StageServices<Turn> for Run {
                         images: accepted.images.clone(),
                         prefix: None,
                         tools_enabled: accepted.tools_enabled,
+                        budget: turn.token_budget.clone(),
                     },
                     &self.events,
                     self.stop.clone(),
@@ -573,6 +574,7 @@ impl StageServices<Turn> for Run {
                         images: accepted.images.clone(),
                         prefix: continuation.as_ref().map(|c| c.prefix.clone()),
                         tools_enabled: accepted.tools_enabled,
+                        budget: turn.token_budget.clone(),
                     },
                     thinking.as_deref().unwrap_or(&empty),
                     &self.events,
@@ -733,12 +735,12 @@ impl ChatRuntime {
             let (cancel_tx, cancel) = watch::channel(false);
             let (stop_tx, stop) = watch::channel(false);
             let (tool_result_tx, tool_results) = mpsc::unbounded_channel();
-            let control = crate::domain::services::output_controls::Control {
-                cancel: Arc::new(cancel_tx),
-                stop_thinking: Arc::new(stop_tx),
-                live: tokio::sync::broadcast::channel(runtime.config.event_read_batch.max(1)).0,
-                tools: crate::domain::models::tools::ToolControl::new(tool_result_tx),
-            };
+            let control = crate::domain::services::output_controls::Control::new(
+                Arc::new(cancel_tx),
+                Arc::new(stop_tx),
+                tokio::sync::broadcast::channel(runtime.config.event_read_batch.max(1)).0,
+                crate::domain::models::tools::ToolControl::new(tool_result_tx),
+            );
             let live = control.live.clone();
             let journal = runtime.journal.clone();
             let deliver = tokio::spawn(async move {

@@ -49,6 +49,8 @@ pub struct CallInput {
     pub images: Vec<String>,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// Provider context window for this request, bounded by the caller's budget.
+    pub context_tokens: u32,
     /// Saved answer prefix. The model continues it as its own message.
     pub prefix: Option<String>,
     /// Only the explicitly opted-in CLI answer path receives these tools.
@@ -74,6 +76,8 @@ pub struct CallOutcome {
     pub inspection: Option<crate::domain::models::inspection::AnswerInspection>,
     pub text: String,
     pub usage: ModelCall,
+    /// True only when the provider returned both prompt and completion token counts.
+    pub usage_measured: bool,
     pub error: Option<DriverError>,
     pub load_ms: u64,
     pub tokens_per_second: Option<f64>,

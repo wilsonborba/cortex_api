@@ -87,6 +87,7 @@ impl ModelDriver for ToolDriver {
                     started_at: now,
                     finished_at: now,
                 },
+                usage_measured: true,
                 error: None,
                 load_ms: 0,
                 tokens_per_second: None,
@@ -151,6 +152,7 @@ impl ModelDriver for Double {
                     started_at: now,
                     finished_at: now,
                 },
+                usage_measured: true,
                 error: stopped.then_some(DriverError::Cancelled),
                 load_ms: 0,
                 tokens_per_second: None,
@@ -209,6 +211,7 @@ async fn none_path_and_second_round_cap_stream_every_role_with_one_model() {
             images: vec!["fixture image".into()],
             prefix: None,
             tools_enabled: false,
+            budget: None,
         };
         let (sink, mut rx, events) = channel(&config, None);
         let (_stop, stop) = watch::channel(false);
@@ -285,6 +288,7 @@ async fn full_180_second_limit_is_a_notice_and_keeps_attempt_usage() {
         images: vec![],
         prefix: None,
         tools_enabled: false,
+        budget: None,
     };
     let (sink, _rx, events) = channel(&config, None);
     let (_stop, stop) = watch::channel(false);
@@ -317,6 +321,7 @@ async fn stop_thinking_keeps_notes_and_continues_but_cancel_stops_output() {
             images: vec![],
             prefix: None,
             tools_enabled: false,
+            budget: None,
         };
         let (sink, mut rx, events) = channel(&config, None);
         let (stop_tx, stop) = watch::channel(false);
@@ -364,6 +369,7 @@ async fn answer_emits_a_typed_call_waits_for_one_result_and_resumes_the_same_out
         images: vec![],
         prefix: None,
         tools_enabled: true,
+        budget: None,
     };
     let thinking = cortex_api::domain::models::thinking::ThinkingResult::default();
     let (sink, mut events_rx, events_task) = channel(&config, None);
@@ -416,6 +422,7 @@ async fn pending_tool_expires_and_rejects_a_late_result() {
         images: vec![],
         prefix: None,
         tools_enabled: true,
+        budget: None,
     };
     let thinking = cortex_api::domain::models::thinking::ThinkingResult::default();
     let (sink, mut events_rx, events_task) = channel(&config, None);
@@ -471,6 +478,7 @@ async fn cancelling_a_pending_tool_rejects_its_result() {
         images: vec![],
         prefix: None,
         tools_enabled: true,
+        budget: None,
     };
     let thinking = cortex_api::domain::models::thinking::ThinkingResult::default();
     let (sink, mut events_rx, events_task) = channel(&config, None);

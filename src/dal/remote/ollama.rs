@@ -109,6 +109,7 @@ impl Ollama {
         &self,
         _permit: &Permit,
         model: &str,
+        context_tokens: u32,
         events: &mpsc::UnboundedSender<DriverEvent>,
     ) -> Result<u64, DriverError> {
         let response = self
@@ -126,7 +127,7 @@ impl Ollama {
         let loaded: RunningModels = response.json().await.map_err(|_| DriverError::Ollama)?;
         if loaded.models.len() == 1
             && loaded.models[0].name == model
-            && loaded.models[0].context_length == Some(self.config.model_context_tokens)
+            && loaded.models[0].context_length == Some(u64::from(context_tokens))
         {
             let _ = events.send(DriverEvent::ModelReady {
                 model: model.into(),
@@ -145,7 +146,7 @@ impl Ollama {
             )
             .await?;
         }
-        let response=self.post("/api/generate",&json!({"model":model,"keep_alive":self.config.ollama_keep_alive,"stream":false,"options":{"num_ctx":self.config.model_context_tokens}})).await?;
+        let response=self.post("/api/generate",&json!({"model":model,"keep_alive":self.config.ollama_keep_alive,"stream":false,"options":{"num_ctx":context_tokens}})).await?;
         let value: Value = response.json().await.map_err(|_| DriverError::Ollama)?;
         if value.get("error").is_some_and(|v| !v.is_null()) {
             return Err(DriverError::Ollama);
@@ -281,7 +282,7 @@ impl Ollama {
         start: Instant,
     ) -> Result<(), DriverError> {
         collected.sent = true;
-        let options = json!({"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens});
+        let options = json!({"num_ctx":input.context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens});
         // A continuation (cortex_api#125) must extend the saved prefix. Chat
         // templates close the assistant turn, so a raw ChatML prompt is used.
         let (path, mut body) = match &input.prefix {
@@ -487,7 +488,7 @@ impl ModelDriver for Ollama {
                 option_rejected: false,
                 tool_request: None,
             };
-            let result = tokio::select! {biased;_=cancelled(&mut cancel)=>Err(DriverError::Cancelled),result=async{if let Some(permit)=&permit{load_ms=self.prepare(permit,model,&events).await?;}self.generate(&base,model,&input,&events,&mut collected,start).await}=>result};
+            let result = tokio::select! {biased;_=cancelled(&mut cancel)=>Err(DriverError::Cancelled),result=async{if let Some(permit)=&permit{load_ms=self.prepare(permit,model,input.context_tokens,&events).await?;}self.generate(&base,model,&input,&events,&mut collected,start).await}=>result};
             let finished_at = Utc::now();
             let input_tokens = collected.prompt.unwrap_or_else(|| {
                 if collected.sent {
@@ -498,6 +499,7 @@ impl ModelDriver for Ollama {
                     0
                 }
             });
+            let usage_measured = collected.prompt.is_some() && collected.tokens.is_some();
             let output_tokens = collected
                 .tokens
                 .unwrap_or_else(|| self.config.estimate_tokens(&collected.text));
@@ -549,6 +551,7 @@ impl ModelDriver for Ollama {
                 load_ms,
                 tokens_per_second,
                 tool_request: collected.tool_request,
+                usage_measured,
             })
         })
     }

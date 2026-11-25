@@ -154,6 +154,7 @@ impl ModelDriver for Model {
                     started_at: started,
                     finished_at: chrono::Utc::now(),
                 },
+                usage_measured: true,
                 error,
                 load_ms: 0,
                 tokens_per_second: None,

@@ -133,6 +133,7 @@ impl QueryRewriter {
                     images: input.images,
                     temperature: self.config.query_temperature,
                     max_tokens: self.config.query_output_tokens,
+                    context_tokens: self.config.model_context_tokens.min(u32::MAX as u64) as u32,
                     prefix: None,
                     allow_tools: false,
                     tool_history: vec![],
