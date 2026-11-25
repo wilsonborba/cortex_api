@@ -226,14 +226,14 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
 }
 
 async fn stop_owned(slot: &mut Option<OwnedServer>) -> Result<(), DriverError> {
-    let Some(mut owned) = slot.take() else {
+    let Some(owned) = slot.as_mut() else {
         return Ok(());
     };
-    let result = stop_handle(&mut owned).await;
-    if result.is_err() {
-        *slot = Some(owned);
+    stop_handle(owned).await?;
+    if slot.is_some() {
+        *slot = None;
     }
-    result
+    Ok(())
 }
 
 async fn stop_handle(owned: &mut OwnedServer) -> Result<(), DriverError> {
