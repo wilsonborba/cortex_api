@@ -434,6 +434,7 @@ async fn routes_order_page_rename_pin_and_refuse_other_users_even_admins() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error["data"]["error_number"], 1003);
     let old = continue_permanent(
+        &config,
         &a,
         &chat,
         serde_json::from_value(json!({"text":"legacy run record"})).unwrap(),
