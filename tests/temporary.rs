@@ -105,8 +105,10 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
         eprintln!("Skipping temporary cache test: CORTEX_TEST_REDIS_URL is not set");
         return;
     };
-    let mut config = Config::default();
-    config.bonsai_enabled = true;
+    let config = Config {
+        bonsai_enabled: true,
+        ..Config::default()
+    };
     let chats = TemporaryChats::new(&config, cache.clone());
     let actor = fixture_caller();
     let file_id = chats

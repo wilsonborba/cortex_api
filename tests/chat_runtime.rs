@@ -779,9 +779,11 @@ async fn permanent_and_temporary_chats_run_every_stage() {
 
     // T1 uses one T0 vision description before its text-only answer. The logical
     // T1 profile remains selected and a text-only follow-up does not resend an image.
-    let mut t1_config = Config::default();
-    t1_config.hippocampus_url = address.clone();
-    t1_config.bonsai_enabled = true;
+    let t1_config = Config {
+        hippocampus_url: address.clone(),
+        bonsai_enabled: true,
+        ..Config::default()
+    };
     let t1_rt = runtime_with_config(
         pool.clone(),
         cache.clone(),
@@ -1684,9 +1686,11 @@ async fn temporary_image_upload_and_followup_reach_vision_without_persistent_wri
         .unwrap();
     let (log, address) = remote().await;
     let model = Arc::new(Model::default());
-    let mut config = Config::default();
-    config.hippocampus_url = address.clone();
-    config.bonsai_enabled = true;
+    let config = Config {
+        hippocampus_url: address.clone(),
+        bonsai_enabled: true,
+        ..Config::default()
+    };
     let rt = runtime_with_config(pool.clone(), cache.clone(), &address, model.clone(), config);
     let caller = Caller {
         app_id: "cortex".into(),

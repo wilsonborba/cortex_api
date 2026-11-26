@@ -130,8 +130,10 @@ fn ids_attribution_files_and_temporary_never_prepare_for_sql() {
 
 #[test]
 fn tier_one_profiles_survive_preparation_and_invalid_stored_ids_fail_closed() {
-    let mut config = Config::default();
-    config.bonsai_enabled = true;
+    let config = Config {
+        bonsai_enabled: true,
+        ..Config::default()
+    };
     let actor = caller();
     let now = Utc::now();
     let uncensored = new_permanent(&config, &actor, new("new default"), &[], now).unwrap();
@@ -176,8 +178,10 @@ async fn create_continue_and_failure_are_atomic_and_scoped() {
     let migrations = sqlx::migrate!();
     migrations.run(&pool).await.unwrap();
     let repo = Chats { pool: pool.clone() };
-    let mut config = Config::default();
-    config.bonsai_enabled = true;
+    let config = Config {
+        bonsai_enabled: true,
+        ..Config::default()
+    };
     let actor = caller();
     let now = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
     let legacy_session = Uuid::now_v7();
