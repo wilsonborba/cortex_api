@@ -1,28 +1,145 @@
 # Changelog
 
+
 ## Unreleased
+
+
+### Bug Fixes
+
+- Wire remote CLI router and persist state in PostgreSQL and Valkey (#132)
+
+- Wire Valkey limits, robots rules, conditional cache, and politeness into web research (#128)
+
+- Wire catalog router, OpenAlex, and Reddit into runtime
+
+- Pin rustls for non-Reddit clients (#130)
+
+- Reject invalid inclusive read ranges
+
+- Rebudget tool continuations and gate child cancellation
+
+- Canonicalize output action digest
+
+- Preserve approval action description
+
+- Unify phone and local action decisions
+
+- Restore persisted run metadata after reload
+
+- Wait for owned Prism process group teardown
+
+- Keep Prism transitions serialized through cleanup
+
+- Retain process ownership during cancelled teardown
+
+- Wait for Ollama unload before Prism transition
+
+- Authenticate owned Prism requests
+
+
+### Chores
+
+- Merge v2.3.0 back to feature/main
+
+
+### Documentation
+
+- Record reviewed child runs and shared approvals
+
 
 ### Features
 
-- Add opt-in Bonsai 2.5 profiles with uncensored default, official alternative,
-  per-chat persistence, verified single-process Prism loading, and serialized
-  T0/Whisper GPU transitions (#138)
-- Add scoped provider child runs with metered budgets and cancellation (#135)
-- Relay typed local tool requests and results through chat outputs (#137)
+- Add normalized 200-site source catalog and cached configuration (#126)
 
-### Fixes
+- Route research by subject, purpose, language, coverage, budget, and evidence stages (#127)
 
-- Bind local and phone approvals to one canonical action and one executor
-- Keep child cancellation pending until the provider has stopped
-- Use a loopback peer for the internal-call test fixture (#139)
+- Add shared limits, per-host politeness, Retry-After cooldown, and clean stop (#128)
+
+- Add OpenAlex adapter and metadata-vs-read evidence service (#129)
+
+- Add Reddit OAuth adapter and Thai community-source rules (#130)
+
+- Add remote CLI sessions, SSE command/event streams, approvals, and cancel (#132)
+
+- Emit session_id and output_id in first SSE stage event (#134)
+
+- Add child run and action approval lifecycle
+
+- Relay typed local tool requests and results
+
+- Bind approvals to pending chat output actions
+
+- Bind and meter provider child runs
+
+- Integrate reviewed child runs and action decisions
+
+- Add gated Bonsai model profiles and Prism adapter
+
+- Supervise serialized Bonsai runtime transitions
+
+- Route T1 image inputs through T0 vision prepass
+
+
+### Tests
+
+- Isolate cache integration tests to CORTEX_TEST_REDIS_URL (#133)
+
+- Cover bound child cancellation lifecycle
+
+- Stabilize bound child cancellation fixture
+
+- Use loopback peer in LAN fixture
+
+- Assert rejected child authority has no effect
+
+- Use Cortex context for Bonsai matrix
+
+- Defer quality failures through matrix
+
+- Assert profile persistence rows precisely
+
+- Accept normalized synthetic view file args
+
+- Stage Bonsai cancellation and Whisper transitions
+
+- Require active T1 for queued cancellation case
+
+- Preload T0 before Official queue regression
+
+- Guard whisper transition GPU evaluation
+
+- Observe whisper transition while inflight
+
+- Prepare isolated Prism auth smoke
+
+- Isolate Prism auth smoke from Ollama
+
+- Initialize configs directly in fixtures
+
+- Cover public T1 Prism parity paths
+
+- Verify T1 profile inheritance and input bounds
+
+- Pass config to legacy continuation fixture
+
+- Cover restored run token totals
+
+
+### merge
+
+- Review history run metadata on accepted backend base
+
+- Accept tested Bonsai T1 runtime and managed authentication
+
+- Verify public Bonsai T1 contracts (#138)
+
+- Restore persisted run metadata in chat history (#119)
 
 
 ## v2.3.0 - 2026-11-16
 
 
 ### Bug Fixes
-
-- Pin TLS backend for non-Reddit clients (#130)
 
 - Continue with a raw ChatML prompt so the model extends the prefix (#125)
 
@@ -38,6 +155,10 @@
 - Update for #125
 
 - Prepare development for v2.3.0
+
+- Prepare v2.3.0
+
+- Release v2.3.0
 
 
 ### Features
