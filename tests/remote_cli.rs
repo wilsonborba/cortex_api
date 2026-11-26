@@ -416,6 +416,7 @@ fn build_real_app_router_with_agent_runs_and_driver(
                 repo: chats.clone(),
                 config: config.clone(),
                 hippocampus: hippocampus.clone(),
+                runs: None,
             },
             hippocampus: hippocampus.clone(),
         },
