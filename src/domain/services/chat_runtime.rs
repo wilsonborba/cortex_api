@@ -32,6 +32,7 @@ use crate::{
 use chrono::Utc;
 use std::{sync::Arc, time::Instant};
 use tokio::sync::{mpsc, oneshot, watch};
+use uuid::Uuid;
 
 /// Every service that one chat output uses, from Accept to Save.
 pub struct ChatRuntime {
@@ -203,24 +204,46 @@ impl Run {
         }
         let mut files = vec![];
         let mut images = vec![];
+        let mut temporary_pages = vec![];
         for id in file_ids {
-            let file = rt.files.file(caller, id).await?;
-            if file.content_type.to_ascii_lowercase().starts_with("image/") {
-                use base64::Engine;
-                let bytes = rt.files.download(caller, id).await?.bytes;
-                images.push(base64::engine::general_purpose::STANDARD.encode(bytes));
+            match rt.files.file(caller, id).await {
+                Ok(file) => {
+                    if file.content_type.to_ascii_lowercase().starts_with("image/") {
+                        use base64::Engine;
+                        let bytes = rt.files.download(caller, id).await?.bytes;
+                        images.push(base64::engine::general_purpose::STANDARD.encode(bytes));
+                    }
+                    files.push(SessionFile {
+                        file_id: id.clone(),
+                        memory_id: file.memory_id,
+                        name: file.name,
+                    });
+                }
+                Err(process) if process.number == process_numbers::FILE_NOT_FOUND.number => {
+                    // Only an explicit lookup miss can fall back to the existing
+                    // caller/app/TTL-scoped temporary file store. Never downgrade
+                    // storage outages or other permanent-file failures.
+                    let file_id =
+                        Uuid::parse_str(id).map_err(|_| process_numbers::FILE_NOT_FOUND)?;
+                    let file = rt.temporary.file(caller, file_id).await?;
+                    if file.pages.is_empty() {
+                        return Err(process_numbers::FILE_NOT_FOUND);
+                    }
+                    temporary_pages.extend(file.pages);
+                }
+                Err(process) => return Err(process),
             }
-            files.push(SessionFile {
-                file_id: id.clone(),
-                memory_id: file.memory_id,
-                name: file.name,
-            });
         }
         let (prepared, persona_id) = match turn.request.as_ref() {
-            TurnRequest::New(body) => (
-                chat_session::new_permanent(&rt.config, caller, body.clone(), &files, now)?,
-                body.persona_id.clone(),
-            ),
+            TurnRequest::New(body) => {
+                let mut body = body.clone();
+                body.file_ids = files.iter().map(|file| file.file_id.clone()).collect();
+                let persona_id = body.persona_id.clone();
+                (
+                    chat_session::new_permanent(&rt.config, caller, body, &files, now)?,
+                    persona_id,
+                )
+            }
             TurnRequest::Next(session, body) => {
                 let chat = rt
                     .chats
@@ -228,6 +251,8 @@ impl Run {
                     .await
                     .map_err(|_| process_numbers::HISTORY_FAILED)?
                     .ok_or(process_numbers::CHAT_NOT_FOUND)?;
+                let mut body = body.clone();
+                body.file_ids = files.iter().map(|file| file.file_id.clone()).collect();
                 (
                     chat_session::continue_permanent(
                         &rt.config,
@@ -298,7 +323,7 @@ impl Run {
                 false,
                 &prepared.input,
                 history,
-                vec![],
+                temporary_pages,
             )?
             .with_persona(persona_id)
             .with_images(caller, images);

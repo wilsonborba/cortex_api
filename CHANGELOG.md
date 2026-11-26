@@ -6,6 +6,8 @@
 
 ### Bug Fixes
 
+- Serve scoped temporary image bytes from the existing file-content route
+
 - Align source selection range grammar (#136)
 
 - Wire remote CLI router and persist state in PostgreSQL and Valkey (#132)
