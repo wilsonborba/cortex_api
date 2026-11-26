@@ -6,8 +6,6 @@
 
 ### Bug Fixes
 
-- Serve scoped temporary image bytes from the existing file-content route
-
 - Align source selection range grammar (#136)
 
 - Wire remote CLI router and persist state in PostgreSQL and Valkey (#132)
@@ -48,6 +46,8 @@
 
 - Preserve T0 on absent unit, add kill_on_drop, and refine polkit template (#138)
 
+- Map scoped temporary misses to not found
+
 
 ### Chores
 
@@ -65,6 +65,10 @@
 - Record reviewed child runs and shared approvals
 
 - Record internal Prism authentication removal
+
+- Record staged Prism service infrastructure
+
+- Normalize generated ending
 
 
 ### Features
@@ -101,9 +105,13 @@
 
 - Integrate reviewed child runs and action decisions
 
+- Consume selected temporary sources per turn
+
 - Stage systemd service units launcher and supervisor control
 
 - Stage the managed Prism infrastructure service (#138)
+
+- Serve owner-scoped temporary image bytes
 
 
 ### Tests
@@ -154,6 +162,8 @@
 
 - Strengthen scheduler blocking and T0 absent-unit provider fixtures (#138)
 
+- Expect success status for streamed chat fixture
+
 
 ### merge
 
@@ -167,6 +177,10 @@
 
 - Restrict temporary file context to approved source selections (#136)
 
+
+### style
+
+- Format scoped temporary miss mapping
 
 ## v2.3.0 - 2026-11-16
 
