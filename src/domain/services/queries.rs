@@ -81,6 +81,8 @@ impl QueryRewriter {
             &self.config,
             ContextInput {
                 question: input.question.into(),
+                context_tokens: Some(input.model.context_tokens(&self.config)),
+                output_tokens: Some(input.model.max_output_tokens(&self.config)),
                 ..Default::default()
             },
         ) {
@@ -105,7 +107,7 @@ impl QueryRewriter {
             .saturating_add(self.config.estimate_tokens(&assembled.prompt))
             .saturating_add(self.config.chat_template_token_reserve)
             .saturating_add(u64::from(self.config.query_output_tokens));
-        if budget > self.config.model_context_tokens {
+        if budget > input.model.context_tokens(&self.config) {
             return QueryResult {
                 queries: vec![],
                 call: None,
@@ -132,8 +134,14 @@ impl QueryRewriter {
                     prompt: assembled.prompt,
                     images: input.images,
                     temperature: self.config.query_temperature,
-                    max_tokens: self.config.query_output_tokens,
-                    context_tokens: self.config.model_context_tokens.min(u32::MAX as u64) as u32,
+                    max_tokens: self
+                        .config
+                        .query_output_tokens
+                        .min(input.model.max_output_tokens(&self.config) as u32),
+                    context_tokens: input
+                        .model
+                        .context_tokens(&self.config)
+                        .min(u32::MAX as u64) as u32,
                     prefix: None,
                     allow_tools: false,
                     tool_history: vec![],

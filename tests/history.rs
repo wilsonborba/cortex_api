@@ -113,6 +113,7 @@ async fn save_history_cache_loss_scope_and_earlier_files() {
             vec![]
         };
         let prepared = continue_permanent(
+            &config,
             &actor,
             &chat,
             body,
@@ -204,6 +205,7 @@ async fn save_history_cache_loss_scope_and_earlier_files() {
         let body: NextInput =
             serde_json::from_value(serde_json::json!({"text":"partial input"})).unwrap();
         let prepared = continue_permanent(
+            &config,
             &actor,
             &chat,
             body,
@@ -284,7 +286,7 @@ async fn save_history_cache_loss_scope_and_earlier_files() {
     );
     // A rejected empty request never produces a storage plan or input row.
     let empty: NextInput = serde_json::from_value(serde_json::json!({"text":""})).unwrap();
-    assert!(continue_permanent(&actor, &chat, empty, &[], now).is_err());
+    assert!(continue_permanent(&config, &actor, &chat, empty, &[], now).is_err());
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_inputs")
         .fetch_one(&pool)
         .await

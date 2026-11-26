@@ -100,9 +100,13 @@ pub fn assemble(config: &Config, input: ContextInput) -> Result<AssembledContext
     } else {
         0
     };
+    let output_reserve = config
+        .answer_token_reserve
+        .min(input.output_tokens.unwrap_or(config.answer_token_reserve));
     let available = config
         .model_context_tokens
-        .saturating_sub(config.answer_token_reserve)
+        .min(input.context_tokens.unwrap_or(config.model_context_tokens))
+        .saturating_sub(output_reserve)
         .saturating_sub(notes);
     let fits = |personas: &[ContextText], history: &[Exchange], texts: &[ContextText]| {
         render(config, &input.question, personas, history, texts).2 <= available
@@ -205,7 +209,7 @@ pub fn assemble(config: &Config, input: ContextInput) -> Result<AssembledContext
         texts,
         history,
         estimated_input_tokens,
-        reserved_output_tokens: config.answer_token_reserve,
+        reserved_output_tokens: output_reserve,
         reserved_notes_tokens: notes,
     })
 }

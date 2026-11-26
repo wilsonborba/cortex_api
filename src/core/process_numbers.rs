@@ -244,6 +244,10 @@ pub const AGENT_RUN_CONFLICT: ProcessNumber = ProcessNumber {
     number: 1058,
     message: "The child run or action is no longer pending",
 };
+pub const MODEL_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1059,
+    message: "The selected model profile is unavailable",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -304,6 +308,7 @@ pub const REGISTRY: &[ProcessNumber] = &[
     WEB_RATE_LIMITED,
     AGENT_RUN_NOT_FOUND,
     AGENT_RUN_CONFLICT,
+    MODEL_UNAVAILABLE,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

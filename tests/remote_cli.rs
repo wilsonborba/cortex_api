@@ -112,6 +112,46 @@ impl ModelDriver for StubDriver {
     }
 }
 
+struct ProfileRecordingDriver {
+    profiles: mpsc::UnboundedSender<cortex_api::domain::models::model_profile::ModelProfile>,
+}
+impl ModelDriver for ProfileRecordingDriver {
+    fn call<'a>(
+        &'a self,
+        output: &'a OutputModel,
+        input: CallInput,
+        _: mpsc::UnboundedSender<DriverEvent>,
+        _: watch::Receiver<bool>,
+    ) -> Pending<'a, Result<CallOutcome, DriverError>> {
+        Box::pin(async move {
+            let profile = output.profile();
+            let _ = self.profiles.send(profile);
+            let now = chrono::Utc::now();
+            Ok(CallOutcome {
+                inspection: None,
+                text: "synthetic child result".into(),
+                usage: ModelCall {
+                    images: None,
+                    audio: None,
+                    role: input.role,
+                    model: profile.id().into(),
+                    input_tokens: 3,
+                    output_tokens: 3,
+                    time_to_first_token_ms: Some(1),
+                    total_ms: 1,
+                    started_at: now,
+                    finished_at: now,
+                },
+                usage_measured: true,
+                error: None,
+                load_ms: 0,
+                tokens_per_second: None,
+                tool_request: None,
+            })
+        })
+    }
+}
+
 struct PausedCancelDriver {
     started: tokio::sync::mpsc::UnboundedSender<Uuid>,
     cancel_seen: Arc<tokio::sync::Notify>,
@@ -345,6 +385,19 @@ fn build_real_app_router_with_agent_runs_and_driver(
         hippocampus_url: "http://127.0.0.1:1".into(),
         ..Default::default()
     };
+    build_real_app_router_with_agent_runs_and_driver_config(
+        pool, cache, remote_cli, agent_runs, driver, config,
+    )
+}
+
+fn build_real_app_router_with_agent_runs_and_driver_config(
+    pool: sqlx::PgPool,
+    cache: RedisCache,
+    remote_cli: RemoteCliService,
+    agent_runs: cortex_api::domain::services::agent_runs::AgentRunService,
+    driver: Arc<dyn ModelDriver>,
+    config: Config,
+) -> (axum::Router, Arc<ChatRuntime>) {
     let store = Arc::new(
         RunStore::new(
             &config,
@@ -449,15 +502,28 @@ struct ParentFixture {
 }
 
 async fn parent_fixture(pool: &sqlx::PgPool, runtime: &Arc<ChatRuntime>) -> ParentFixture {
+    parent_fixture_with_profile(
+        pool,
+        runtime,
+        cortex_api::domain::models::model_profile::ModelProfile::CortexT0,
+    )
+    .await
+}
+
+async fn parent_fixture_with_profile(
+    pool: &sqlx::PgPool,
+    runtime: &Arc<ChatRuntime>,
+    profile: cortex_api::domain::models::model_profile::ModelProfile,
+) -> ParentFixture {
     let chat = Uuid::now_v7();
     let input = Uuid::now_v7();
     let output = Uuid::now_v7();
     let call = Uuid::now_v7();
     let now = chrono::Utc::now();
-    sqlx::query("INSERT INTO chats(session_id,app_id,user_id,title,created_at,updated_at) VALUES($1,'cortex','owner','child cancellation fixture',$2,$2)")
-        .bind(chat).bind(now).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO chat_inputs(input_id,session_id,text,needs_web,web_mode,use_memory,thinking,created_at) VALUES($1,$2,'fixture prompt',false,'fast',false,false,$3)")
-        .bind(input).bind(chat).bind(now).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO chats(session_id,app_id,user_id,title,model_id,created_at,updated_at) VALUES($1,'cortex','owner','child cancellation fixture',$2,$3,$3)")
+        .bind(chat).bind(profile.id()).bind(now).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO chat_inputs(input_id,session_id,text,needs_web,web_mode,use_memory,thinking,model_id,created_at) VALUES($1,$2,'fixture prompt',false,'fast',false,false,$3,$4)")
+        .bind(input).bind(chat).bind(profile.id()).bind(now).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO chat_outputs(output_id,input_id,session_id,status,text,created_at) VALUES($1,$2,$3,'running','',$4)")
         .bind(output).bind(input).bind(chat).bind(now).execute(pool).await.unwrap();
 
@@ -473,15 +539,14 @@ async fn parent_fixture(pool: &sqlx::PgPool, runtime: &Arc<ChatRuntime>) -> Pare
     let (cancel, cancel_receiver) = watch::channel(false);
     let (stop_thinking, _) = watch::channel(false);
     let (live, _) = tokio::sync::broadcast::channel(8);
-    runtime.controls.open(
-        output,
-        cortex_api::domain::services::output_controls::Control::new(
-            Arc::new(cancel),
-            Arc::new(stop_thinking),
-            live,
-            tools,
-        ),
+    let control = cortex_api::domain::services::output_controls::Control::new(
+        Arc::new(cancel),
+        Arc::new(stop_thinking),
+        live,
+        tools,
     );
+    control.set_model_profile(profile);
+    runtime.controls.open(output, control);
     ParentFixture {
         chat,
         output,
@@ -1575,6 +1640,212 @@ async fn bound_child_parent_cancel_waits_for_real_chat_runtime_provider_stop() {
     assert!(parent_during_binding.results.try_recv().is_err());
 
     pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires the explicitly approved cortex_api_test database; all model/action effects are fixture-only"]
+async fn t1_bound_child_inherits_parent_profile_and_approved_tool_result_is_delivered() {
+    dotenvy::dotenv().ok();
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_t1_bound_child_{}", Uuid::now_v7().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    let config = Config {
+        hippocampus_url: "http://127.0.0.1:1".into(),
+        bonsai_enabled: true,
+        ..Config::default()
+    };
+    let cache = RedisCache::new(None, Duration::from_millis(50));
+    let remote_cli = RemoteCliService::new(
+        Arc::new(PostgresRemoteCliStore::new(pool.clone())),
+        cache.clone(),
+        &config,
+    );
+    let session = remote_cli
+        .register("owner", "synthetic parity fixture", "test", 1_000)
+        .await
+        .unwrap()
+        .session_id;
+    let agent_runs = cortex_api::domain::services::agent_runs::AgentRunService::new(
+        Arc::new(PostgresAgentRunStore::new(pool.clone())),
+        120_000,
+        4,
+        2,
+        8192,
+    );
+    let (profile_tx, mut profile_rx) = mpsc::unbounded_channel();
+    let (app, runtime) = build_real_app_router_with_agent_runs_and_driver_config(
+        pool.clone(),
+        cache,
+        remote_cli,
+        agent_runs,
+        Arc::new(ProfileRecordingDriver {
+            profiles: profile_tx,
+        }),
+        config,
+    );
+
+    for profile in [
+        cortex_api::domain::models::model_profile::ModelProfile::Bonsai25Uncensored,
+        cortex_api::domain::models::model_profile::ModelProfile::Bonsai25Official,
+    ] {
+        let mut parent = parent_fixture_with_profile(&pool, &runtime, profile).await;
+        let child_path = format!(
+            "/remote/sessions/{session}/outputs/{}/{}/children",
+            parent.chat, parent.output
+        );
+        let (status, child) = json_req(
+            &app,
+            "POST",
+            &child_path,
+            Some("owner"),
+            Some(json!({"call_id":parent.call})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{child}");
+        let child_id: Uuid = child["data"]["child_id"].as_str().unwrap().parse().unwrap();
+
+        let observed = tokio::time::timeout(Duration::from_secs(5), profile_rx.recv())
+            .await
+            .expect("the bound child reaches its ModelDriver")
+            .expect("profile observation channel remains open");
+        assert_eq!(
+            observed, profile,
+            "the child uses its trusted parent profile"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status: String = sqlx::query_scalar(
+                    "SELECT status FROM remote_cli_children WHERE session_id=$1 AND child_id=$2",
+                )
+                .bind(Uuid::parse_str(&session).unwrap())
+                .bind(child_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if status == "completed" {
+                    break;
+                }
+                assert_ne!(status, "failed", "synthetic child should finish");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("bound child output and budget settle");
+        let child_input_profile: String = sqlx::query_scalar(
+            "SELECT i.model_id FROM remote_cli_children c JOIN chat_outputs o ON o.output_id=c.child_output_id JOIN chat_inputs i ON i.input_id=o.input_id WHERE c.session_id=$1 AND c.child_id=$2",
+        )
+        .bind(Uuid::parse_str(&session).unwrap())
+        .bind(child_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(child_input_profile, profile.id());
+        let child_result = tokio::time::timeout(Duration::from_secs(1), parent.results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(child_result.call_id, parent.call);
+        assert!(child_result.output.contains("synthetic child result"));
+
+        // Exercise the existing approval/claim handoff without invoking a
+        // command runner. A synthetic result is posted only after approval.
+        let parent_control = runtime.controls.get(parent.output).unwrap();
+        assert_eq!(parent_control.model_profile(), Some(profile));
+        parent_control.tools.clear_pending(parent.call);
+        let command_call = Uuid::now_v7();
+        let command_arguments = json!({"cwd":"/synthetic","argv":["print-fixture"]});
+        assert!(
+            parent_control
+                .tools
+                .set_pending(cortex_api::domain::models::tools::PendingTool {
+                    call_id: command_call,
+                    name: cortex_api::domain::models::tools::ToolName::RunCommand,
+                    arguments: command_arguments.clone(),
+                })
+        );
+        let action_path = format!(
+            "/remote/sessions/{session}/outputs/{}/{}/actions",
+            parent.chat, parent.output
+        );
+        let (created_status, action) = json_req(
+            &app,
+            "POST",
+            &action_path,
+            Some("owner"),
+            Some(json!({"call_id":command_call})),
+        )
+        .await;
+        assert_eq!(created_status, StatusCode::CREATED, "{action}");
+        let action_id = action["data"]["action_id"].as_str().unwrap();
+        let digest = action["data"]["action_digest"].as_str().unwrap();
+        let answer_path = format!("{action_path}/{action_id}/answer");
+        let (approved, _) = json_req(
+            &app,
+            "POST",
+            &answer_path,
+            Some("owner"),
+            Some(json!({"approved":true})),
+        )
+        .await;
+        assert_eq!(approved, StatusCode::OK);
+        let claim_path = format!("{action_path}/{action_id}/claim");
+        let (claimed, _) = json_req(
+            &app,
+            "POST",
+            &claim_path,
+            Some("owner"),
+            Some(json!({"call_id":command_call,"action_digest":digest})),
+        )
+        .await;
+        assert_eq!(claimed, StatusCode::OK);
+        let (result_status, _) = json_req(
+            &app,
+            "POST",
+            &format!(
+                "/chats/{}/outputs/{}/tool-results",
+                parent.chat, parent.output
+            ),
+            Some("owner"),
+            Some(json!({
+                "call_id":command_call,
+                "name":"run_command",
+                "result":{"output":"synthetic approved result"}
+            })),
+        )
+        .await;
+        assert_eq!(result_status, StatusCode::ACCEPTED);
+        let delivered = tokio::time::timeout(Duration::from_secs(1), parent.results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered.call_id, command_call);
+        assert_eq!(delivered.output, "synthetic approved result");
+        assert_eq!(parent_control.model_profile(), Some(profile));
+
+        sqlx::query("DELETE FROM chats WHERE session_id=$1")
+            .bind(parent.chat)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await

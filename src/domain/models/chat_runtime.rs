@@ -40,9 +40,9 @@ impl AcceptedTurn {
     pub fn with_persona(self, persona_id: Option<String>) -> Self {
         Self { persona_id, ..self }
     }
-    pub fn with_images(self, caller: &Caller, images: Vec<String>) -> Self {
+    pub fn with_images(self, _caller: &Caller, images: Vec<String>) -> Self {
         Self {
-            model: OutputModel::new(caller, self.ids.output_id, !images.is_empty()),
+            model: self.model.clone().with_images(!images.is_empty()),
             images,
             ..self
         }
@@ -98,6 +98,11 @@ impl Turn {
 impl crate::domain::models::pipeline::PipelineData for Turn {
     fn thinking(&self) -> bool {
         self.accepted.as_ref().is_some_and(|a| a.thinking)
+    }
+    fn files_before_other_gather(&self) -> bool {
+        self.accepted.as_ref().is_some_and(|accepted| {
+            accepted.model.profile().uses_prism() && !accepted.images.is_empty()
+        })
     }
     fn merge_gather(previous: &Self, files: Self, memory: Self, web: Self) -> Self {
         let mut data = previous.clone();

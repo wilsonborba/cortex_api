@@ -95,7 +95,35 @@ impl Run {
             TurnRequest::New(body) => (&body.text, &body.file_ids),
             TurnRequest::Next(_, body) => (&body.text, &body.file_ids),
         };
-        input_guard::check(&rt.config, text).map_err(|_| process_numbers::INPUT_TOKEN_LIMIT)?;
+        let requested_profile = match turn.request.as_ref() {
+            TurnRequest::New(body) => body.model_id,
+            TurnRequest::Next(_, body) => body.model_id,
+        };
+        if requested_profile.is_some_and(|profile| profile.uses_prism())
+            && !rt.config.bonsai_enabled
+        {
+            return Err(process_numbers::MODEL_UNAVAILABLE);
+        }
+        let profile_for_guard = requested_profile.or_else(|| match turn.request.as_ref() {
+            TurnRequest::New(_) if rt.config.bonsai_enabled => {
+                Some(crate::domain::models::model_profile::ModelProfile::default())
+            }
+            TurnRequest::New(_) => {
+                Some(crate::domain::models::model_profile::ModelProfile::legacy_default())
+            }
+            TurnRequest::Next(_, _) => None,
+        });
+        if let Some(profile) = profile_for_guard {
+            input_guard::check_profile(
+                &rt.config,
+                text,
+                profile.context_tokens(&rt.config),
+                profile.max_output_tokens(&rt.config),
+            )
+            .map_err(|_| process_numbers::INPUT_TOKEN_LIMIT)?;
+        } else {
+            input_guard::check(&rt.config, text).map_err(|_| process_numbers::INPUT_TOKEN_LIMIT)?;
+        }
         // Security runs before anything is saved (9.1).
         rt.shield.check(text).await.map_err(|e| e.process())?;
         self.events.send(NativeEvent::Step(StepProgress::new(
@@ -166,7 +194,7 @@ impl Run {
                     input,
                     history,
                     chat.files.iter().flat_map(|f| f.pages.clone()).collect(),
-                )
+                )?
                 .with_persona(chat.persona_id.clone())
                 .with_images(
                     caller,
@@ -201,7 +229,14 @@ impl Run {
                     .map_err(|_| process_numbers::HISTORY_FAILED)?
                     .ok_or(process_numbers::CHAT_NOT_FOUND)?;
                 (
-                    chat_session::continue_permanent(caller, &chat, body.clone(), &files, now)?,
+                    chat_session::continue_permanent(
+                        &rt.config,
+                        caller,
+                        &chat,
+                        body.clone(),
+                        &files,
+                        now,
+                    )?,
                     chat.persona_id.clone(),
                 )
             }
@@ -264,7 +299,7 @@ impl Run {
                 &prepared.input,
                 history,
                 vec![],
-            )
+            )?
             .with_persona(persona_id)
             .with_images(caller, images);
         accepted.continuation = continuation;
@@ -278,9 +313,11 @@ impl Run {
         input: &crate::domain::models::storage::ChatInput,
         history: Vec<Exchange>,
         temporary_files: Vec<ContextText>,
-    ) -> AcceptedTurn {
-        AcceptedTurn {
-            model: OutputModel::new(&turn.caller, ids.output_id, false),
+    ) -> Result<AcceptedTurn, ProcessNumber> {
+        let profile = crate::domain::models::model_profile::ModelProfile::from_id(&input.model_id)
+            .ok_or(process_numbers::MODEL_UNAVAILABLE)?;
+        Ok(AcceptedTurn {
+            model: OutputModel::for_profile(&turn.caller, ids.output_id, profile, false),
             ids,
             temporary,
             tools_enabled: turn.tools_enabled,
@@ -295,7 +332,7 @@ impl Run {
             history,
             temporary_files,
             continuation: None,
-        }
+        })
     }
     /// All files of the chat are candidates, ranked by BM25 (14.3, 7.2).
     async fn file_chunks(&self, turn: &Turn) -> (Vec<ContextText>, Vec<SourceNotice>) {
@@ -376,6 +413,7 @@ impl StageServices<Turn> for Run {
         Box::pin(async move {
             match self.accept_turn(&turn).await {
                 Ok(accepted) => {
+                    self.control.set_model_profile(accepted.model.profile());
                     // Open controls before publishing ids so a client reacting to
                     // the first SSE event can cancel immediately.
                     self.runtime
@@ -398,6 +436,49 @@ impl StageServices<Turn> for Run {
             turn.files = files;
             let mut value = StageValue::ok(turn);
             value.output.notices = notices;
+            let accepted = value.output.data.accepted.clone().expect("accepted");
+            if accepted.model.profile().uses_prism() && !accepted.images.is_empty() {
+                if *self.cancel.borrow() {
+                    value.status = StageStatus::Cancelled;
+                    return value;
+                }
+                let vision_model = accepted.model.clone().with_profile(
+                    crate::domain::models::model_profile::ModelProfile::CortexT0,
+                    true,
+                );
+                match self
+                    .runtime
+                    .thinking
+                    .describe_images_for_text_profile(
+                        &vision_model,
+                        &accepted.question,
+                        &value.output.data.files,
+                        accepted.images.clone(),
+                        value.output.data.token_budget.clone(),
+                        &self.events,
+                        self.cancel.clone(),
+                    )
+                    .await
+                {
+                    Ok((description, call)) => {
+                        if !description.trim().is_empty() {
+                            value.output.data.files.push(ContextText {
+                                label: "Image description".into(),
+                                source: None,
+                                text: description,
+                            });
+                        }
+                        value.output.calls.push(call);
+                    }
+                    Err(crate::domain::models::driver::DriverError::Cancelled) => {
+                        value.status = StageStatus::Cancelled;
+                    }
+                    Err(crate::domain::models::driver::DriverError::InvalidInput) => {
+                        value.status = StageStatus::Failed(process_numbers::INPUT_TOKEN_LIMIT);
+                    }
+                    Err(error) => value.status = driver_status(error),
+                }
+            }
             value
         })
     }
@@ -482,6 +563,8 @@ impl StageServices<Turn> for Run {
             let assembled = context::assemble(
                 &self.runtime.config,
                 ContextInput {
+                    context_tokens: Some(accepted.model.context_tokens(&self.runtime.config)),
+                    output_tokens: Some(accepted.model.max_output_tokens(&self.runtime.config)),
                     question: accepted.question.clone(),
                     thinking: accepted.thinking,
                     history: accepted.history.clone(),
@@ -528,7 +611,11 @@ impl StageServices<Turn> for Run {
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
-                        images: accepted.images.clone(),
+                        images: if accepted.model.profile().uses_prism() {
+                            vec![]
+                        } else {
+                            accepted.images.clone()
+                        },
                         prefix: None,
                         tools_enabled: accepted.tools_enabled,
                         budget: turn.token_budget.clone(),
@@ -571,7 +658,11 @@ impl StageServices<Turn> for Run {
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
-                        images: accepted.images.clone(),
+                        images: if accepted.model.profile().uses_prism() {
+                            vec![]
+                        } else {
+                            accepted.images.clone()
+                        },
                         prefix: continuation.as_ref().map(|c| c.prefix.clone()),
                         tools_enabled: accepted.tools_enabled,
                         budget: turn.token_budget.clone(),

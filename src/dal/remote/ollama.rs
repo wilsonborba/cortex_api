@@ -58,6 +58,7 @@ pub struct Ollama {
     client: reqwest::Client,
     config: Config,
     queue: Scheduler,
+    prism_supervisor: Option<std::sync::Arc<super::prism_supervisor::PrismSupervisor>>,
 }
 struct Collected {
     text: String,
@@ -82,7 +83,15 @@ impl Ollama {
                 .expect("Ollama client"),
             config,
             queue,
+            prism_supervisor: None,
         }
+    }
+    pub fn with_prism_supervisor(
+        mut self,
+        supervisor: std::sync::Arc<super::prism_supervisor::PrismSupervisor>,
+    ) -> Self {
+        self.prism_supervisor = Some(supervisor);
+        self
     }
     async fn post(&self, path: &str, body: &Value) -> Result<reqwest::Response, DriverError> {
         self.post_to(&self.config.ollama_url, path, body).await
@@ -105,6 +114,29 @@ impl Ollama {
         }
         Ok(response)
     }
+    async fn running_models(&self) -> Result<RunningModels, DriverError> {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let response = self
+                .client
+                .get(format!(
+                    "{}/api/ps",
+                    self.config.ollama_url.trim_end_matches('/')
+                ))
+                .send()
+                .await
+                .map_err(|_| DriverError::Ollama)?;
+            if !response.status().is_success() {
+                return Err(DriverError::Ollama);
+            }
+            let bytes = response.bytes().await.map_err(|_| DriverError::Ollama)?;
+            if bytes.len() > 64 * 1024 {
+                return Err(DriverError::Ollama);
+            }
+            serde_json::from_slice(&bytes).map_err(|_| DriverError::Ollama)
+        })
+        .await
+        .map_err(|_| DriverError::Ollama)?
+    }
     async fn prepare(
         &self,
         _permit: &Permit,
@@ -112,6 +144,9 @@ impl Ollama {
         context_tokens: u32,
         events: &mpsc::UnboundedSender<DriverEvent>,
     ) -> Result<u64, DriverError> {
+        if let Some(supervisor) = &self.prism_supervisor {
+            supervisor.stop().await?;
+        }
         let response = self
             .client
             .get(format!(
@@ -159,27 +194,73 @@ impl Ollama {
         Ok(load_ms)
     }
     pub async fn release_models_for_local_job(&self, _permit: &Permit) -> Result<(), DriverError> {
-        let response = self
-            .client
-            .get(format!(
-                "{}/api/ps",
-                self.config.ollama_url.trim_end_matches('/')
-            ))
-            .send()
+        if let Some(supervisor) = &self.prism_supervisor {
+            supervisor.stop().await?;
+        }
+        self.unload_models(None).await
+    }
+    /// Unload local Ollama models while preserving a same-profile Prism server.
+    pub async fn release_models_for_prism_transition(
+        &self,
+        _permit: &Permit,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> Result<(), DriverError> {
+        self.unload_models(Some(cancel)).await
+    }
+    async fn unload_models(
+        &self,
+        cancel: Option<&mut watch::Receiver<bool>>,
+    ) -> Result<(), DriverError> {
+        const SETTLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        let deadline = tokio::time::Instant::now() + SETTLE_LIMIT;
+        let mut cancellation_requested = cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+        if cancellation_requested {
+            return Err(DriverError::Cancelled);
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let models = tokio::time::timeout(left, self.running_models())
             .await
-            .map_err(|_| DriverError::Ollama)?;
-        if !response.status().is_success() {
-            return Err(DriverError::Ollama);
-        }
-        let models: RunningModels = response.json().await.map_err(|_| DriverError::Ollama)?;
+            .map_err(|_| DriverError::Ollama)??;
+        cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
         for model in models.models {
-            self.post(
-                "/api/generate",
-                &json!({"model":model.name,"keep_alive":0,"stream":false}),
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
+            tokio::time::timeout(
+                left,
+                self.post(
+                    "/api/generate",
+                    &json!({"model":model.name,"keep_alive":0,"stream":false}),
+                ),
             )
-            .await?;
+            .await
+            .map_err(|_| DriverError::Ollama)??;
         }
-        Ok(())
+        loop {
+            cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
+            let remaining = tokio::time::timeout(left, self.running_models())
+                .await
+                .map_err(|_| DriverError::Ollama)??;
+            cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+            if remaining.models.is_empty() {
+                return if cancellation_requested {
+                    Err(DriverError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
+            tokio::time::sleep(POLL_INTERVAL.min(left)).await;
+        }
     }
     fn frame(
         &self,
@@ -309,13 +390,7 @@ impl Ollama {
         if input.allow_tools && input.role == "answer" && input.prefix.is_none() {
             // Tool-call argument objects are provider-complete, never streamed fragments.
             body["stream"] = json!(false);
-            body["tools"] = json!([
-                {"type":"function","function":{"name":"invoke_subagent","description":"Delegate a bounded task to a mapped child agent.","parameters":{"type":"object","properties":{"role":{"type":"string"},"task":{"type":"string"},"context":{"type":"string"}},"required":["role","task"],"additionalProperties":false}}},
-                {"type":"function","function":{"name":"view_file","description":"Read a bounded section of a workspace file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}}},
-                {"type":"function","function":{"name":"grep_search","description":"Search selected workspace paths.","parameters":{"type":"object","properties":{"query":{"type":"string"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":32},"max_results":{"type":"integer","minimum":1,"maximum":100}},"required":["query","paths"],"additionalProperties":false}}},
-                {"type":"function","function":{"name":"replace_file_content","description":"Request an exact workspace file edit; the CLI must obtain approval first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"find":{"type":"string"},"replace":{"type":"string"}},"required":["path","find","replace"],"additionalProperties":false}}},
-                {"type":"function","function":{"name":"run_command","description":"Request a workspace command; the CLI must obtain approval first.","parameters":{"type":"object","properties":{"cwd":{"type":"string"},"argv":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":64}},"required":["cwd","argv"],"additionalProperties":false}}}
-            ]);
+            body["tools"] = crate::domain::models::tools::provider_definitions();
             collected.probabilities = false;
         }
         if input.role == "answer" && collected.probabilities {

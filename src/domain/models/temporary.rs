@@ -1,6 +1,7 @@
 use crate::domain::models::{
     context::ContextText,
     events::{Memory, Source},
+    model_profile::ModelProfile,
     storage::{ChatInput, ChatOutput},
 };
 use serde::{Deserialize, Serialize};
@@ -24,11 +25,17 @@ pub struct TemporaryOutput {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TemporaryChat {
     pub session_id: Uuid,
+    #[serde(default = "legacy_model_id")]
+    pub model_id: String,
     pub title: String,
     pub persona_id: Option<String>,
     pub inputs: Vec<ChatInput>,
     pub outputs: Vec<TemporaryOutput>,
     pub files: Vec<TemporaryFile>,
+}
+
+fn legacy_model_id() -> String {
+    ModelProfile::legacy_default().id().into()
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TemporaryData {

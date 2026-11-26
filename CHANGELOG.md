@@ -4,6 +4,9 @@
 
 ### Features
 
+- Add opt-in Bonsai 2.5 profiles with uncensored default, official alternative,
+  per-chat persistence, verified single-process Prism loading, and serialized
+  T0/Whisper GPU transitions (#138)
 - Add scoped provider child runs with metered budgets and cancellation (#135)
 - Relay typed local tool requests and results through chat outputs (#137)
 
