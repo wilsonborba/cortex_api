@@ -110,6 +110,8 @@ pub struct Config {
     pub prism_url: String,
     /// Installed Prism llama.cpp server. This is process configuration, never client input.
     pub prism_server_path: std::path::PathBuf,
+    /// Atomic profile selector file written for the staged Prism host service.
+    pub prism_profile_path: std::path::PathBuf,
     /// Installed allowlisted Bonsai artifacts. Filenames come only from ModelProfile.
     pub bonsai_model_directory: std::path::PathBuf,
     /// T1 is opt-in through the service environment; no model is loaded at startup.
@@ -180,6 +182,9 @@ impl Config {
             && url.fragment().is_none()
         {
             config.prism_url = candidate.trim_end_matches('/').to_owned();
+        }
+        if let Ok(candidate) = std::env::var("CORTEX_PRISM_PROFILE_PATH") {
+            config.prism_profile_path = std::path::PathBuf::from(candidate);
         }
         config
     }
@@ -290,6 +295,7 @@ impl Default for Config {
             ollama_url: "http://127.0.0.1:11434".into(),
             prism_url: "http://127.0.0.1:49100".into(),
             prism_server_path: "models/prism/llama-server".into(),
+            prism_profile_path: "/run/prism/profile".into(),
             bonsai_model_directory: "models/bonsai".into(),
             bonsai_enabled: false,
             model_context_tokens: 8192,

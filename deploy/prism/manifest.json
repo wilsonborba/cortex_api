@@ -1,0 +1,53 @@
+{
+  "schema_version": "1.0.0",
+  "name": "prism-host-service",
+  "description": "Staged service units, launcher, tmpfiles, and polkit policy for unprivileged on-demand Prism service management",
+  "service": {
+    "unit_name": "prism.service",
+    "loopback_address": "127.0.0.1",
+    "fixed_port": 49100,
+    "cortex_binding": "cortex-api.service"
+  },
+  "profiles": {
+    "bonsai25-uncensored": {
+      "model_path": "/var/lib/prism/models/bonsai/bonsai25-atomicchat-uncensored-PTQ1_0.gguf",
+      "model_sha256": "f6b5f856c3981ff5ba1db1ce13cdf1ca85f2f701d26ce287e03983b659b681b4",
+      "runtime_alias": "bonsai25-uncensored"
+    },
+    "bonsai25-official": {
+      "model_path": "/var/lib/prism/models/bonsai/bonsai25-official-PTQ1_0-mtp.gguf",
+      "model_sha256": "e0fc5f3d47b9c926d52677d303b19df356a2376614b3e1cb9973865fc04ca431",
+      "runtime_alias": "bonsai25-official"
+    }
+  },
+  "runtime_server": {
+    "path": "/opt/prism/current/llama-server",
+    "sha256": "89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c"
+  },
+  "staged_files": [
+    {
+      "path": "deploy/prism/prism.service",
+      "target_path": "/etc/systemd/system/prism.service",
+      "mode": "0644",
+      "sha256": "338922623bc274625c64c68056028e941b608ec4ba0b8378b9d9d8b250245a69"
+    },
+    {
+      "path": "deploy/prism/prism-launch",
+      "target_path": "/usr/local/bin/prism-launch",
+      "mode": "0755",
+      "sha256": "baa01f80ca5838435825aa4109be4889ad81c09a6626d8390011617a272a778a"
+    },
+    {
+      "path": "deploy/prism/prism-tmpfiles.conf",
+      "target_path": "/etc/tmpfiles.d/prism.conf",
+      "mode": "0644",
+      "sha256": "f55465abad60b36aeb80e1845fcee3a85f610f6f3eaae63d301f8bbaab315a26"
+    },
+    {
+      "path": "deploy/prism/49-prism-systemd.rules",
+      "target_path": "/etc/polkit-1/rules.d/49-prism-systemd.rules",
+      "mode": "0644",
+      "sha256": "3159ef5eda1427be6a3b5a715c8e67c6dab21b00c9709058f191cdcf8df6b6aa"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+[Unit]
+Description=Prism Bonsai Inference Service
+BindsTo=cortex-api.service
+After=cortex-api.service
+
+[Service]
+Type=exec
+User=prism
+Group=prism
+ExecStart=/usr/local/bin/prism-launch
+Restart=no
+KillMode=control-group
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/opt/prism /var/lib/prism/models/bonsai /run/prism
