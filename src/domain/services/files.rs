@@ -418,17 +418,13 @@ impl FileProxy {
             Err(process) if process.number == process_numbers::FILE_NOT_FOUND.number => {
                 let id =
                     uuid::Uuid::parse_str(file_id).map_err(|_| process_numbers::FILE_NOT_FOUND)?;
-                let file = self
-                    .temporary
-                    .file(caller, id)
-                    .await
-                    .map_err(|process| {
-                        if process.number == process_numbers::CHAT_NOT_FOUND.number {
-                            process_numbers::FILE_NOT_FOUND
-                        } else {
-                            process
-                        }
-                    })?;
+                let file = self.temporary.file(caller, id).await.map_err(|process| {
+                    if process.number == process_numbers::CHAT_NOT_FOUND.number {
+                        process_numbers::FILE_NOT_FOUND
+                    } else {
+                        process
+                    }
+                })?;
                 temporary_image_content(file, self.config.file_bytes)
             }
             Err(process) => Err(process),
