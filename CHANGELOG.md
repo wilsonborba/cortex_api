@@ -38,6 +38,10 @@
 
 - Restore persisted run metadata after reload
 
+- Remove internal API key authentication
+
+- Integrate owner-requested unauthenticated local inference (#138)
+
 
 ### Chores
 
@@ -46,6 +50,8 @@
 - Merge v2.3.0 back to feature/main
 
 - Record persisted history run metadata
+
+- Record bounded temporary source selections
 
 
 ### Documentation
@@ -146,7 +152,6 @@
 - Restore persisted run metadata in chat history (#119)
 
 - Restrict temporary file context to approved source selections (#136)
-
 
 ## v2.3.0 - 2026-11-16
 
@@ -959,5 +964,3 @@
 - Finalize generic judge command lists in release/main
 
 - Issues #33 #34 #35 full calibration sweep into release/main
-
-
