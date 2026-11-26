@@ -112,10 +112,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let queue = Scheduler::new(ledger.clone());
         let prism_supervisor =
             std::sync::Arc::new(cortex_api::dal::remote::prism_supervisor::PrismSupervisor::new());
-        let ollama = std::sync::Arc::new(
-            Ollama::new(config.clone(), queue.clone())
-                .with_prism_supervisor(prism_supervisor.clone()),
-        );
+        let mut ollama_builder = Ollama::new(config.clone(), queue.clone());
+        if config.bonsai_enabled {
+            ollama_builder = ollama_builder.with_prism_supervisor(prism_supervisor.clone());
+        }
+        let ollama = std::sync::Arc::new(ollama_builder);
         let prism = std::sync::Arc::new(cortex_api::dal::remote::prism::Prism::managed(
             config.clone(),
             queue.clone(),

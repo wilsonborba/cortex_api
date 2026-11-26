@@ -1,35 +1,239 @@
-//! Owns the one Prism server process and one allowlisted loaded Bonsai artifact.
-//! The server is never started at application boot and is not a system service.
+//! Manages the staged on-demand Prism host service (`prism.service`) and the active profile.
+//! The service is unprivileged, loopback-only, unauthenticated, and never started at boot.
+
 use crate::{
     core::config::Config,
-    domain::models::{driver::DriverError, model_profile::ModelProfile},
+    domain::models::{driver::DriverError, model_profile::ModelProfile, usage::Pending},
 };
 use sha2::{Digest, Sha256};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::AsyncReadExt,
-    process::{Child, Command},
+    process::Command,
     sync::{Mutex, watch},
 };
 
 const SERVER_SHA256: &str = "89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c";
+pub const ALLOWED_UNIT: &str = "prism.service";
 
-fn clear_runtime_api_auth_env(command: &mut Command) {
+pub fn clear_runtime_api_auth_env(command: &mut Command) {
     command
         .env_remove("LLAMA_API_KEY")
         .env_remove("LLAMA_ARG_API_KEY_FILE");
 }
 
-struct OwnedServer {
-    profile: ModelProfile,
-    pid: u32,
-    stopping: bool,
-    child: Child,
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnitStatus {
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub main_pid: u32,
+    pub control_group: String,
+    pub invocation_id: String,
 }
 
-#[derive(Default)]
+impl UnitStatus {
+    pub fn is_active(&self) -> bool {
+        self.active_state == "active"
+            && self.sub_state == "running"
+            && self.main_pid > 0
+            && !self.invocation_id.is_empty()
+    }
+
+    pub fn is_inactive(&self) -> bool {
+        (self.active_state == "inactive"
+            || self.active_state == "failed"
+            || self.load_state == "not-found")
+            && self.main_pid == 0
+    }
+}
+
+pub fn parse_unit_status(output: &str) -> Result<UnitStatus, DriverError> {
+    let mut status = UnitStatus::default();
+    for line in output.lines() {
+        if let Some((key, val)) = line.split_once('=') {
+            match key.trim() {
+                "LoadState" => status.load_state = val.trim().to_string(),
+                "ActiveState" => status.active_state = val.trim().to_string(),
+                "SubState" => status.sub_state = val.trim().to_string(),
+                "MainPID" => status.main_pid = val.trim().parse::<u32>().unwrap_or(0),
+                "ControlGroup" => status.control_group = val.trim().to_string(),
+                "InvocationID" => status.invocation_id = val.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    Ok(status)
+}
+
+pub trait SystemdRunner: Send + Sync {
+    fn start_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<(), DriverError>>;
+    fn stop_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<(), DriverError>>;
+    fn show_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<UnitStatus, DriverError>>;
+}
+
+pub struct SystemctlRunner {
+    systemctl_path: std::path::PathBuf,
+    timeout: Duration,
+}
+
+impl Default for SystemctlRunner {
+    fn default() -> Self {
+        Self {
+            systemctl_path: std::path::PathBuf::from("/usr/bin/systemctl"),
+            timeout: Duration::from_secs(15),
+        }
+    }
+}
+
+impl SystemctlRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_path(path: std::path::PathBuf) -> Self {
+        Self {
+            systemctl_path: path,
+            timeout: Duration::from_secs(15),
+        }
+    }
+
+    pub fn with_path_and_timeout(path: std::path::PathBuf, timeout: Duration) -> Self {
+        Self {
+            systemctl_path: path,
+            timeout,
+        }
+    }
+}
+
+impl SystemdRunner for SystemctlRunner {
+    fn start_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<(), DriverError>> {
+        Box::pin(async move {
+            if unit != ALLOWED_UNIT {
+                return Err(DriverError::InvalidInput);
+            }
+            let mut command = Command::new(&self.systemctl_path);
+            command.arg("--no-ask-password");
+            command.args(["start", ALLOWED_UNIT]);
+            command.stdin(Stdio::null());
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::piped());
+            command.kill_on_drop(true);
+            let mut child = command.spawn().map_err(|_| DriverError::Ollama)?;
+            let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(_)) => return Err(DriverError::Ollama),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(DriverError::Ollama);
+                }
+            };
+            if !status.success() {
+                return Err(DriverError::Ollama);
+            }
+            Ok(())
+        })
+    }
+
+    fn stop_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<(), DriverError>> {
+        Box::pin(async move {
+            if unit != ALLOWED_UNIT {
+                return Err(DriverError::InvalidInput);
+            }
+            let mut command = Command::new(&self.systemctl_path);
+            command.arg("--no-ask-password");
+            command.args(["stop", ALLOWED_UNIT]);
+            command.stdin(Stdio::null());
+            command.stdout(Stdio::null());
+            command.stderr(Stdio::piped());
+            command.kill_on_drop(true);
+            let mut child = command.spawn().map_err(|_| DriverError::Ollama)?;
+            let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(_)) => return Err(DriverError::Ollama),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(DriverError::Ollama);
+                }
+            };
+            if !status.success() {
+                return Err(DriverError::Ollama);
+            }
+            Ok(())
+        })
+    }
+
+    fn show_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<UnitStatus, DriverError>> {
+        Box::pin(async move {
+            if unit != ALLOWED_UNIT {
+                return Err(DriverError::InvalidInput);
+            }
+            let mut command = Command::new(&self.systemctl_path);
+            command.arg("--no-ask-password");
+            command.args([
+                "show",
+                ALLOWED_UNIT,
+                "--property=LoadState,ActiveState,SubState,MainPID,ControlGroup,InvocationID",
+            ]);
+            command.stdin(Stdio::null());
+            command.stdout(Stdio::piped());
+            command.stderr(Stdio::piped());
+            command.kill_on_drop(true);
+            let mut child = command.spawn().map_err(|_| DriverError::Ollama)?;
+            let mut stdout = child.stdout.take().ok_or(DriverError::Ollama)?;
+            let timeout_duration = std::cmp::min(self.timeout, Duration::from_secs(10));
+            let outcome = tokio::time::timeout(timeout_duration, async {
+                let mut text = Vec::new();
+                stdout.read_to_end(&mut text).await?;
+                let status = child.wait().await?;
+                Ok::<_, std::io::Error>((status, text))
+            })
+            .await;
+            let (status, text) = match outcome {
+                Ok(Ok((status, text))) => (status, text),
+                Ok(Err(_)) => return Err(DriverError::Ollama),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(DriverError::Ollama);
+                }
+            };
+            if !status.success() {
+                return Err(DriverError::Ollama);
+            }
+            let text = String::from_utf8(text).map_err(|_| DriverError::Ollama)?;
+            parse_unit_status(&text)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveService {
+    pub profile: ModelProfile,
+    pub pid: u32,
+    pub invocation_id: String,
+    pub control_group: String,
+    pub stopping: bool,
+}
+
 pub struct PrismSupervisor {
-    child: Mutex<Option<OwnedServer>>,
+    runner: Arc<dyn SystemdRunner>,
+    pub(crate) child: Mutex<Option<ActiveService>>,
+    #[cfg(test)]
+    pub(crate) skip_hash_for_test: bool,
+}
+
+impl Default for PrismSupervisor {
+    fn default() -> Self {
+        Self {
+            runner: Arc::new(SystemctlRunner::new()),
+            child: Mutex::new(None),
+            #[cfg(test)]
+            skip_hash_for_test: false,
+        }
+    }
 }
 
 impl PrismSupervisor {
@@ -37,26 +241,73 @@ impl PrismSupervisor {
         Self::default()
     }
 
-    /// Stop only this supervisor's child process group. No URL/API kill request is used.
-    pub async fn stop(&self) -> Result<(), DriverError> {
-        let mut slot = self.child.lock().await;
-        stop_owned(&mut slot).await
-    }
-
-    pub async fn is_running(&self, profile: ModelProfile) -> Result<bool, DriverError> {
-        let mut slot = self.child.lock().await;
-        match slot.as_mut() {
-            Some(owned) if owned.profile == profile && !owned.stopping => Ok(owned
-                .child
-                .try_wait()
-                .map_err(|_| DriverError::Ollama)?
-                .is_none()),
-            _ => Ok(false),
+    pub fn with_runner(runner: Arc<dyn SystemdRunner>) -> Self {
+        Self {
+            runner,
+            child: Mutex::new(None),
+            #[cfg(test)]
+            skip_hash_for_test: false,
         }
     }
 
-    /// Hash the pinned runtime and model before starting the fixed server command.
-    /// Repeated requests for the same healthy profile keep the one process loaded.
+    pub async fn stop(&self) -> Result<(), DriverError> {
+        let mut slot = self.child.lock().await;
+        self.stop_locked(&mut slot).await
+    }
+
+    async fn stop_quiescent(&self) -> Result<(), DriverError> {
+        self.runner.stop_unit(ALLOWED_UNIT).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = self.runner.show_unit(ALLOWED_UNIT).await?;
+            if status.is_inactive() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() > deadline {
+                return Err(DriverError::Ollama);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn stop_locked(&self, slot: &mut Option<ActiveService>) -> Result<(), DriverError> {
+        if let Some(active) = slot.as_mut() {
+            active.stopping = true;
+        }
+
+        if slot.is_none() {
+            let status = self.runner.show_unit(ALLOWED_UNIT).await?;
+            if status.is_inactive() {
+                return Ok(());
+            }
+        }
+
+        let res = self.stop_quiescent().await;
+        if res.is_ok() {
+            *slot = None;
+        }
+        res
+    }
+
+    pub async fn is_running(&self, profile: ModelProfile) -> Result<bool, DriverError> {
+        let slot = self.child.lock().await;
+        let Some(active) = slot.as_ref() else {
+            return Ok(false);
+        };
+        if active.profile != profile || active.stopping {
+            return Ok(false);
+        }
+        let status = self.runner.show_unit(ALLOWED_UNIT).await?;
+        if status.is_active()
+            && status.main_pid == active.pid
+            && status.invocation_id == active.invocation_id
+        {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub async fn ensure(
         &self,
         config: &Config,
@@ -66,128 +317,150 @@ impl PrismSupervisor {
         if !config.prism_url_is_loopback() {
             return Err(DriverError::InvalidInput);
         }
-        let alias = profile.runtime_alias().ok_or(DriverError::InvalidInput)?;
-        let filename = profile
-            .artifact_filename()
-            .ok_or(DriverError::InvalidInput)?;
-        let expected_model_hash = profile.artifact_sha256().ok_or(DriverError::InvalidInput)?;
+        if profile != ModelProfile::Bonsai25Uncensored && profile != ModelProfile::Bonsai25Official
+        {
+            return Err(DriverError::InvalidInput);
+        }
         let mut slot = self.child.lock().await;
-        if let Some(owned) = slot.as_mut()
-            && owned.profile == profile
-            && !owned.stopping
-            && owned
-                .child
-                .try_wait()
-                .map_err(|_| DriverError::Ollama)?
-                .is_none()
+        let current_status = self.runner.show_unit(ALLOWED_UNIT).await?;
+        if let Some(active) = slot.as_ref()
+            && active.profile == profile
+            && !active.stopping
+            && current_status.is_active()
+            && current_status.main_pid == active.pid
+            && current_status.invocation_id == active.invocation_id
         {
             return Ok(());
         }
-        stop_owned(&mut slot).await?;
-        let runtime = config.prism_server_path.clone();
-        let model = config.bonsai_model_directory.join(filename);
-        let runtime_hash = tokio::time::timeout(Duration::from_secs(90), sha256(&runtime, cancel))
-            .await
-            .map_err(|_| DriverError::Ollama)??;
-        let model_hash = tokio::time::timeout(Duration::from_secs(180), sha256(&model, cancel))
-            .await
-            .map_err(|_| DriverError::Ollama)??;
-        if runtime_hash != SERVER_SHA256 || model_hash != expected_model_hash {
-            return Err(DriverError::Ollama);
+
+        // Before writing selector or starting, require the actual unit to be confirmed quiescent.
+        // Even if slot is None (e.g. fresh supervisor instance), any existing running, activating,
+        // or stale unit must be stopped and verified inactive.
+        if !current_status.is_inactive() || slot.is_some() {
+            self.stop_locked(&mut slot).await?;
         }
+
+        #[cfg(test)]
+        let skip_hash = self.skip_hash_for_test;
+        #[cfg(not(test))]
+        let skip_hash = false;
+
+        if !skip_hash {
+            let filename = profile
+                .artifact_filename()
+                .ok_or(DriverError::InvalidInput)?;
+            let expected_model_hash = profile.artifact_sha256().ok_or(DriverError::InvalidInput)?;
+            let runtime = config.prism_server_path.clone();
+            let model = config.bonsai_model_directory.join(filename);
+            let runtime_hash =
+                tokio::time::timeout(Duration::from_secs(90), sha256(&runtime, cancel))
+                    .await
+                    .map_err(|_| DriverError::Ollama)??;
+            let model_hash = tokio::time::timeout(Duration::from_secs(180), sha256(&model, cancel))
+                .await
+                .map_err(|_| DriverError::Ollama)??;
+            if runtime_hash != SERVER_SHA256 || model_hash != expected_model_hash {
+                return Err(DriverError::Ollama);
+            }
+        }
+
         if *cancel.borrow() {
             return Err(DriverError::Cancelled);
         }
-        let endpoint = url::Url::parse(&config.prism_url).map_err(|_| DriverError::InvalidInput)?;
-        let port = endpoint
-            .port_or_known_default()
-            .ok_or(DriverError::InvalidInput)?;
-        let mut command = Command::new(runtime);
-        let runtime_dir = config
-            .prism_server_path
-            .parent()
-            .ok_or(DriverError::InvalidInput)?;
-        let mut library_path = std::ffi::OsString::from(runtime_dir);
-        if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
-            library_path.push(":");
-            library_path.push(existing);
+
+        // Selector file update only happens after old unit is confirmed inactive
+        write_profile_atomic(&config.prism_profile_path, profile).await?;
+
+        if *cancel.borrow() {
+            return Err(DriverError::Cancelled);
         }
-        command.env("LD_LIBRARY_PATH", library_path);
-        // The pinned runtime enables API authentication from either of these
-        // inherited environment variables. The internal endpoint is loopback-only
-        // and intentionally unauthenticated, so prevent ambient service settings
-        // from silently turning authentication back on.
-        clear_runtime_api_auth_env(&mut command);
-        command
-            .args([
-                "--host",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-                "--model",
-                model.to_str().ok_or(DriverError::InvalidInput)?,
-                "--alias",
-                alias,
-                "--ctx-size",
-                "8192",
-                "--parallel",
-                "1",
-                "--batch-size",
-                "1024",
-                "--ubatch-size",
-                "256",
-                "--threads",
-                "6",
-                "--threads-batch",
-                "6",
-                "--gpu-layers",
-                "all",
-                "--flash-attn",
-                "on",
-                "--cache-type-k",
-                "q8_0",
-                "--cache-type-v",
-                "q8_0",
-                "--reasoning-format",
-                "deepseek",
-                "--min-p",
-                "0",
-                "--jinja",
-                "--no-webui",
-                "--verbosity",
-                "3",
-                "--cors-origins",
-                "localhost",
-                "--no-cors-credentials",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        if profile.uses_mtp() {
-            command.args([
-                "--spec-type",
-                "draft-mtp",
-                "--spec-draft-n-min",
-                "0",
-                "--spec-draft-n-max",
-                "3",
-                "--spec-draft-p-min",
-                "0",
-            ]);
-        }
-        #[cfg(unix)]
-        command.process_group(0);
-        let child = command.spawn().map_err(|_| DriverError::Ollama)?;
-        let pid = child.id().ok_or(DriverError::Ollama)?;
-        *slot = Some(OwnedServer {
+
+        // Track starting state before starting so any subsequent error or cancel cleans up
+        *slot = Some(ActiveService {
             profile,
-            pid,
+            pid: 0,
+            invocation_id: String::new(),
+            control_group: String::new(),
             stopping: false,
-            child,
         });
+
+        if let Err(e) = self.runner.start_unit(ALLOWED_UNIT).await {
+            let _ = self.stop_locked(&mut slot).await;
+            return Err(e);
+        }
+
+        // Poll until active with valid MainPID and InvocationID
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if *cancel.borrow() {
+                self.stop_locked(&mut slot).await?;
+                return Err(DriverError::Cancelled);
+            }
+            let status = match self.runner.show_unit(ALLOWED_UNIT).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = self.stop_locked(&mut slot).await;
+                    return Err(e);
+                }
+            };
+            if status.is_active() {
+                break status;
+            }
+            if tokio::time::Instant::now() > deadline {
+                self.stop_locked(&mut slot).await?;
+                return Err(DriverError::Ollama);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+
+        *slot = Some(ActiveService {
+            profile,
+            pid: status.main_pid,
+            invocation_id: status.invocation_id,
+            control_group: status.control_group,
+            stopping: false,
+        });
+
         Ok(())
     }
+}
+
+pub async fn write_profile_atomic(path: &Path, profile: ModelProfile) -> Result<(), DriverError> {
+    if profile != ModelProfile::Bonsai25Uncensored && profile != ModelProfile::Bonsai25Official {
+        return Err(DriverError::InvalidInput);
+    }
+    let parent = path.parent().ok_or(DriverError::InvalidInput)?;
+    if !tokio::fs::try_exists(parent).await.unwrap_or(false) {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let tmp_path = parent.join(format!(".profile.{}.tmp", uuid::Uuid::new_v4()));
+    let content = format!("{}\n", profile.id());
+    if tokio::fs::write(&tmp_path, content.as_bytes())
+        .await
+        .is_err()
+    {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(DriverError::Ollama);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o640))
+            .await
+            .is_err()
+        {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(DriverError::Ollama);
+        }
+    }
+
+    if tokio::fs::rename(&tmp_path, path).await.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(DriverError::Ollama);
+    }
+
+    Ok(())
 }
 
 impl super::prism::PrismProcessControl for PrismSupervisor {
@@ -196,18 +469,15 @@ impl super::prism::PrismProcessControl for PrismSupervisor {
         config: &'a Config,
         profile: ModelProfile,
         cancel: &'a mut watch::Receiver<bool>,
-    ) -> crate::domain::models::usage::Pending<'a, Result<(), DriverError>> {
+    ) -> Pending<'a, Result<(), DriverError>> {
         Box::pin(async move { PrismSupervisor::ensure(self, config, profile, cancel).await })
     }
 
-    fn stop<'a>(&'a self) -> crate::domain::models::usage::Pending<'a, Result<(), DriverError>> {
+    fn stop<'a>(&'a self) -> Pending<'a, Result<(), DriverError>> {
         Box::pin(async move { PrismSupervisor::stop(self).await })
     }
 
-    fn is_running<'a>(
-        &'a self,
-        profile: ModelProfile,
-    ) -> crate::domain::models::usage::Pending<'a, Result<bool, DriverError>> {
+    fn is_running<'a>(&'a self, profile: ModelProfile) -> Pending<'a, Result<bool, DriverError>> {
         Box::pin(async move { PrismSupervisor::is_running(self, profile).await })
     }
 }
@@ -243,65 +513,20 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
-async fn stop_owned(slot: &mut Option<OwnedServer>) -> Result<(), DriverError> {
-    let Some(owned) = slot.as_mut() else {
-        return Ok(());
-    };
-    owned.stopping = true;
-    stop_handle(owned).await?;
-    if slot.is_some() {
-        *slot = None;
-    }
-    Ok(())
-}
-
-async fn stop_handle(owned: &mut OwnedServer) -> Result<(), DriverError> {
-    let pid = owned.pid;
-    #[cfg(unix)]
-    // SAFETY: the child was started in a new process group owned by this instance.
-    let _ = unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
-    let result = tokio::time::timeout(Duration::from_secs(5), owned.child.wait()).await;
-    if !matches!(result, Ok(Ok(_))) {
-        #[cfg(unix)]
-        // SAFETY: same owned process group as above; only our process group is signalled.
-        let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-        let _ = owned.child.start_kill();
-        tokio::time::timeout(Duration::from_secs(5), owned.child.wait())
-            .await
-            .map_err(|_| DriverError::Ollama)?
-            .map_err(|_| DriverError::Ollama)?;
-    }
-    #[cfg(unix)]
-    {
-        let group_exited = tokio::time::timeout(Duration::from_secs(5), async {
-            while process_group_exists(pid) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .is_ok();
-        if !group_exited {
-            // SAFETY: pid is the process-group ID assigned to this owned child.
-            let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while process_group_exists(pid) {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            })
-            .await
-            .map_err(|_| DriverError::Ollama)?;
-        }
-    }
-    Ok(())
-}
-
+#[cfg(test)]
 #[cfg(unix)]
 fn process_group_exists(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks the existence of the supervisor-owned group.
+    // SAFETY: signal 0 only checks the existence of the process group.
     if unsafe { libc::kill(-(pid as i32), 0) } == 0 {
         return true;
     }
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(test)]
+#[cfg(not(unix))]
+fn process_group_exists(_pid: u32) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -1724,74 +1949,710 @@ mod tests {
         }
     }
 
+    struct MockSystemdRunner {
+        status: Mutex<UnitStatus>,
+        start_calls: Mutex<Vec<String>>,
+        stop_calls: Mutex<Vec<String>>,
+        show_calls: Mutex<Vec<String>>,
+        fail_start: Mutex<bool>,
+        fail_stop: Mutex<bool>,
+        fail_show: Mutex<bool>,
+        fail_show_after_start: Mutex<bool>,
+        stop_hang: Mutex<bool>,
+        stop_clears_active: bool,
+        after_start_cancel_sender: Mutex<Option<watch::Sender<bool>>>,
+    }
+
+    impl MockSystemdRunner {
+        fn new(initial_status: UnitStatus) -> Self {
+            Self {
+                status: Mutex::new(initial_status),
+                start_calls: Mutex::new(Vec::new()),
+                stop_calls: Mutex::new(Vec::new()),
+                show_calls: Mutex::new(Vec::new()),
+                fail_start: Mutex::new(false),
+                fail_stop: Mutex::new(false),
+                fail_show: Mutex::new(false),
+                fail_show_after_start: Mutex::new(false),
+                stop_hang: Mutex::new(false),
+                stop_clears_active: true,
+                after_start_cancel_sender: Mutex::new(None),
+            }
+        }
+    }
+
+    impl SystemdRunner for MockSystemdRunner {
+        fn start_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<(), DriverError>> {
+            Box::pin(async move {
+                if unit != ALLOWED_UNIT {
+                    return Err(DriverError::InvalidInput);
+                }
+                self.start_calls.lock().await.push(unit.to_string());
+                if *self.fail_start.lock().await {
+                    return Err(DriverError::Ollama);
+                }
+                let mut status = self.status.lock().await;
+                status.active_state = "active".to_string();
+                status.sub_state = "running".to_string();
+                if status.main_pid == 0 {
+                    status.main_pid = 4242;
+                }
+                if status.invocation_id.is_empty() {
+                    status.invocation_id = "test-inv-001".to_string();
+                }
+                if status.control_group.is_empty() {
+                    status.control_group = "/system.slice/prism.service".to_string();
+                }
+                if let Some(tx) = self.after_start_cancel_sender.lock().await.as_ref() {
+                    let _ = tx.send(true);
+                }
+                Ok(())
+            })
+        }
+
+        fn stop_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<(), DriverError>> {
+            Box::pin(async move {
+                if unit != ALLOWED_UNIT {
+                    return Err(DriverError::InvalidInput);
+                }
+                self.stop_calls.lock().await.push(unit.to_string());
+                if *self.fail_stop.lock().await {
+                    return Err(DriverError::Ollama);
+                }
+                if *self.stop_hang.lock().await {
+                    return Ok(());
+                }
+                if self.stop_clears_active {
+                    let mut status = self.status.lock().await;
+                    status.active_state = "inactive".to_string();
+                    status.sub_state = "dead".to_string();
+                    status.main_pid = 0;
+                }
+                Ok(())
+            })
+        }
+
+        fn show_unit<'a>(&'a self, unit: &'a str) -> Pending<'a, Result<UnitStatus, DriverError>> {
+            Box::pin(async move {
+                if unit != ALLOWED_UNIT {
+                    return Err(DriverError::InvalidInput);
+                }
+                self.show_calls.lock().await.push(unit.to_string());
+                if *self.fail_show.lock().await {
+                    return Err(DriverError::Ollama);
+                }
+                if *self.fail_show_after_start.lock().await
+                    && !self.start_calls.lock().await.is_empty()
+                {
+                    *self.fail_show_after_start.lock().await = false;
+                    return Err(DriverError::Ollama);
+                }
+                Ok(self.status.lock().await.clone())
+            })
+        }
+    }
+
+    struct TestDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TestDir {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("cortex-prism-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("create test dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
     #[tokio::test]
-    async fn stop_reaps_only_the_owned_process_group() {
-        let mut command = Command::new("/usr/bin/sleep");
-        command
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        command.process_group(0);
-        let child = command.spawn().expect("test child");
-        let pid = child.id().unwrap();
-        let supervisor = PrismSupervisor {
-            child: Mutex::new(Some(OwnedServer {
-                profile: ModelProfile::Bonsai25Official,
-                pid,
-                stopping: false,
-                child,
-            })),
+    async fn systemctl_runner_enforces_unit_allowlist() {
+        let runner = SystemctlRunner::new();
+        assert_eq!(
+            runner.start_unit("forbidden.service").await.unwrap_err(),
+            DriverError::InvalidInput
+        );
+        assert_eq!(
+            runner.stop_unit("cortex-api.service").await.unwrap_err(),
+            DriverError::InvalidInput
+        );
+        assert_eq!(
+            runner.show_unit("other.service").await.unwrap_err(),
+            DriverError::InvalidInput
+        );
+    }
+
+    #[test]
+    fn parse_unit_status_extracts_properties() {
+        let raw = "\
+ActiveState=active
+SubState=running
+MainPID=54321
+ControlGroup=/system.slice/prism.service
+InvocationID=inv-789-xyz
+SomethingElse=ignored
+";
+        let status = parse_unit_status(raw).unwrap();
+        assert_eq!(status.active_state, "active");
+        assert_eq!(status.sub_state, "running");
+        assert_eq!(status.main_pid, 54321);
+        assert_eq!(status.control_group, "/system.slice/prism.service");
+        assert_eq!(status.invocation_id, "inv-789-xyz");
+        assert!(status.is_active());
+        assert!(!status.is_inactive());
+
+        let inactive_raw = "\
+ActiveState=inactive
+SubState=dead
+MainPID=0
+ControlGroup=
+InvocationID=
+";
+        let inact = parse_unit_status(inactive_raw).unwrap();
+        assert!(!inact.is_active());
+        assert!(inact.is_inactive());
+    }
+
+    #[tokio::test]
+    async fn mock_runner_starts_and_reuses_same_profile() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+        }));
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
         };
-        tokio::time::timeout(Duration::from_secs(2), supervisor.stop())
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        // First start
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
             .await
-            .expect("bounded stop")
             .unwrap();
+
+        assert_eq!(
+            runner.start_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+        assert!(
+            supervisor
+                .is_running(ModelProfile::Bonsai25Uncensored)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !supervisor
+                .is_running(ModelProfile::Bonsai25Official)
+                .await
+                .unwrap()
+        );
+
+        // Verify selector file
+        let written_profile = tokio::fs::read_to_string(&profile_path).await.unwrap();
+        assert_eq!(written_profile.trim(), "bonsai25-uncensored");
+
+        // Second call with same profile: reuse without new start_unit call
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await
+            .unwrap();
+        assert_eq!(runner.start_calls.lock().await.len(), 1);
+        assert!(
+            supervisor
+                .is_running(ModelProfile::Bonsai25Uncensored)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_runner_profile_switch_stops_old_before_writing_new() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+        }));
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        // Start Uncensored
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(&profile_path)
+                .await
+                .unwrap()
+                .trim(),
+            "bonsai25-uncensored"
+        );
+
+        // Switch to Official
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Official, &mut cancel)
+            .await
+            .unwrap();
+
+        // Verify stop was called before starting the new profile
+        assert_eq!(
+            runner.stop_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+        assert_eq!(runner.start_calls.lock().await.len(), 2);
+        assert_eq!(
+            tokio::fs::read_to_string(&profile_path)
+                .await
+                .unwrap()
+                .trim(),
+            "bonsai25-official"
+        );
+        assert!(
+            supervisor
+                .is_running(ModelProfile::Bonsai25Official)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !supervisor
+                .is_running(ModelProfile::Bonsai25Uncensored)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_failure_fails_closed_and_marks_inactive() {
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            main_pid: 1234,
+            control_group: "/system.slice/prism.service".into(),
+            invocation_id: "inv-123".into(),
+        }));
+        *runner.fail_stop.lock().await = true;
+
+        let supervisor = PrismSupervisor::with_runner(runner.clone());
+        {
+            let mut slot = supervisor.child.lock().await;
+            *slot = Some(ActiveService {
+                profile: ModelProfile::Bonsai25Uncensored,
+                pid: 1234,
+                invocation_id: "inv-123".into(),
+                control_group: "/system.slice/prism.service".into(),
+                stopping: false,
+            });
+        }
+
+        // Attempting to stop should fail
+        let res = supervisor.stop().await;
+        assert!(res.is_err());
+
+        // Service should not report as healthy running
+        assert!(
+            !supervisor
+                .is_running(ModelProfile::Bonsai25Uncensored)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct LocalOllamaDouble {
+        ps_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        generate_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn run_mock_ollama(listener: tokio::net::TcpListener, state: LocalOllamaDouble) {
+        use std::sync::atomic::Ordering;
+        let app = axum::Router::new()
+            .route(
+                "/api/ps",
+                axum::routing::get({
+                    let state = state.clone();
+                    move || {
+                        state.ps_calls.fetch_add(1, Ordering::SeqCst);
+                        async { axum::Json(serde_json::json!({ "models": [] })) }
+                    }
+                }),
+            )
+            .route(
+                "/api/generate",
+                axum::routing::post({
+                    let state = state.clone();
+                    move || {
+                        state.generate_calls.fetch_add(1, Ordering::SeqCst);
+                        async { axum::Json(serde_json::json!({ "done": true, "response": "ok" })) }
+                    }
+                }),
+            );
+        let _ = axum::serve(listener, app).await;
+    }
+
+    #[tokio::test]
+    async fn scheduler_blocks_next_provider_while_prism_unconfirmed_or_stopping() {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = LocalOllamaDouble::default();
+        let _server = tokio::spawn(run_mock_ollama(listener, mock.clone()));
+
+        let queue = Scheduler::new(Arc::new(EvaluationLedger));
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            main_pid: 1234,
+            control_group: "/system.slice/prism.service".into(),
+            invocation_id: "inv-123".into(),
+        }));
+        *runner.fail_stop.lock().await = true;
+
+        let supervisor = Arc::new(PrismSupervisor::with_runner(runner.clone()));
+        {
+            let mut slot = supervisor.child.lock().await;
+            *slot = Some(ActiveService {
+                profile: ModelProfile::Bonsai25Uncensored,
+                pid: 1234,
+                invocation_id: "inv-123".into(),
+                control_group: "/system.slice/prism.service".into(),
+                stopping: false,
+            });
+        }
+
+        let config = Config {
+            bonsai_enabled: true,
+            ollama_url: format!("http://{addr}"),
+            ..Config::default()
+        };
+        let ollama = Arc::new(
+            Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()),
+        );
+
+        let permit = queue
+            .acquire("test-actor".into(), uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+
+        // 1. Attempt provider while Prism stop is unconfirmed/failing.
+        let res = ollama.release_models_for_local_job(&permit).await;
+        assert_eq!(res.unwrap_err(), DriverError::Ollama);
+        // Confirm ZERO provider requests reached the local fake provider while Prism stop is unconfirmed.
+        assert_eq!(
+            mock.ps_calls.load(Ordering::SeqCst),
+            0,
+            "provider must receive zero requests while Prism stop is unconfirmed"
+        );
+
+        // 2. Repair stop in runner; retry reaches local fake provider.
+        *runner.fail_stop.lock().await = false;
+        let res_ok = ollama.release_models_for_local_job(&permit).await;
+        assert!(res_ok.is_ok());
+        assert!(
+            mock.ps_calls.load(Ordering::SeqCst) > 0,
+            "retry after confirmed stop must reach the local provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn ollama_t0_works_when_bonsai_disabled_and_unit_absent() {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = LocalOllamaDouble::default();
+        let _server = tokio::spawn(run_mock_ollama(listener, mock.clone()));
+
+        let queue = Scheduler::new(Arc::new(EvaluationLedger));
+        let config = Config {
+            bonsai_enabled: false,
+            ollama_url: format!("http://{addr}"),
+            ..Config::default()
+        };
+
+        // Missing-unit SystemctlRunner response shape (not-found / inactive / dead).
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "not-found".into(),
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+        }));
+        let supervisor = Arc::new(PrismSupervisor::with_runner(runner.clone()));
+        let ollama = Arc::new(
+            Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()),
+        );
+        let permit = queue
+            .acquire("test-actor".into(), uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+
+        // Release models / prepare local job for T0 or Whisper:
+        let res = ollama.release_models_for_local_job(&permit).await;
+        assert!(res.is_ok());
+        // Confirm zero systemctl stop commands were issued when unit is absent and Bonsai disabled.
+        assert_eq!(runner.stop_calls.lock().await.len(), 0);
+        // Confirm preparation/provider boundary reaches local fake Ollama provider without systemctl.
+        assert!(
+            mock.ps_calls.load(Ordering::SeqCst) > 0,
+            "T0/Whisper path must reach local provider when unit is absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_unit_reuse_rejection() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+        }));
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await
+            .unwrap();
+
+        // Simulate stale InvocationID in unit status
+        {
+            let mut status = runner.status.lock().await;
+            status.invocation_id = "stale-invocation-different".into();
+        }
+
+        // is_running must return false due to stale InvocationID
+        assert!(
+            !supervisor
+                .is_running(ModelProfile::Bonsai25Uncensored)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_start_skips_start() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+            ..Default::default()
+        }));
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(true); // already cancelled
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert_eq!(res.unwrap_err(), DriverError::Cancelled);
+        assert_eq!(runner.start_calls.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_start_triggers_immediate_stop() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+            ..Default::default()
+        }));
+        let (cancel_tx, mut cancel) = watch::channel(false);
+        *runner.after_start_cancel_sender.lock().await = Some(cancel_tx);
+
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert_eq!(res.unwrap_err(), DriverError::Cancelled);
+        assert_eq!(runner.start_calls.lock().await.len(), 1);
+        assert_eq!(runner.stop_calls.lock().await.len(), 1);
         assert!(supervisor.child.lock().await.is_none());
     }
 
     #[tokio::test]
-    async fn same_profile_reuses_child_and_switch_stops_before_invalid_artifact_fails() {
-        let mut command = Command::new("/usr/bin/sleep");
-        command
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        command.process_group(0);
-        let child = command.spawn().expect("test child");
-        let pid = child.id().unwrap();
-        let supervisor = PrismSupervisor {
-            child: Mutex::new(Some(OwnedServer {
-                profile: ModelProfile::Bonsai25Official,
-                pid,
-                stopping: false,
-                child,
-            })),
-        };
-        let config = Config::default();
-        let (_cancel_tx, mut cancel) = watch::channel(false);
-        supervisor
-            .ensure(&config, ModelProfile::Bonsai25Official, &mut cancel)
-            .await
-            .unwrap();
-        supervisor
-            .ensure(&config, ModelProfile::Bonsai25Official, &mut cancel)
-            .await
-            .unwrap();
-        assert_eq!(supervisor.child.lock().await.as_ref().unwrap().pid, pid);
+    async fn show_error_after_start_quiesces_and_cleans_slot() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+            ..Default::default()
+        }));
+        *runner.fail_show_after_start.lock().await = true;
 
-        assert!(
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert_eq!(res.unwrap_err(), DriverError::Ollama);
+        assert_eq!(runner.start_calls.lock().await.len(), 1);
+        assert_eq!(runner.stop_calls.lock().await.len(), 1);
+        assert!(supervisor.child.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_error_plus_cleanup_error_fails_closed() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+            ..Default::default()
+        }));
+        *runner.fail_start.lock().await = true;
+        *runner.fail_stop.lock().await = true;
+
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert_eq!(res.unwrap_err(), DriverError::Ollama);
+        assert_eq!(runner.start_calls.lock().await.len(), 1);
+        assert_eq!(runner.stop_calls.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn systemctl_runner_timeout_reaps_child() {
+        let test_dir = TestDir::new();
+        let script_path = test_dir.path.join("fake-systemctl");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script_content = "#!/bin/sh\nsleep 30\n";
+            std::fs::write(&script_path, script_content).unwrap();
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+        let runner =
+            SystemctlRunner::with_path_and_timeout(script_path, Duration::from_millis(150));
+        let res = runner.start_unit(ALLOWED_UNIT).await;
+        assert_eq!(res.unwrap_err(), DriverError::Ollama);
+    }
+
+    #[tokio::test]
+    async fn non_loopback_url_rejected() {
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus::default()));
+        let supervisor = PrismSupervisor::with_runner(runner);
+        let config = Config {
+            prism_url: "http://192.168.1.100:49100".into(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+        assert_eq!(
             supervisor
                 .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
                 .await
-                .is_err()
+                .unwrap_err(),
+            DriverError::InvalidInput
         );
-        assert!(supervisor.child.lock().await.is_none());
-        #[cfg(unix)]
-        assert!(!process_group_exists(pid));
+    }
+
+    #[tokio::test]
+    async fn profile_selector_rejects_arbitrary_or_cortex_t0() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        assert_eq!(
+            write_profile_atomic(&profile_path, ModelProfile::CortexT0)
+                .await
+                .unwrap_err(),
+            DriverError::InvalidInput
+        );
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus::default()));
+        let supervisor = PrismSupervisor::with_runner(runner);
+        let config = Config {
+            prism_profile_path: profile_path,
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+        assert_eq!(
+            supervisor
+                .ensure(&config, ModelProfile::CortexT0, &mut cancel)
+                .await
+                .unwrap_err(),
+            DriverError::InvalidInput
+        );
     }
 
     #[tokio::test]
@@ -1817,71 +2678,28 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cancelled_stop_marks_same_profile_unreusable_until_cleanup_retries() {
-        use tokio::io::AsyncBufReadExt;
-        let mut command = Command::new("/usr/bin/python3");
-        command
-            .args([
-                "-u",
-                "-c",
-                "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(30)",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = command.spawn().expect("test child");
-        let pid = child.id().unwrap();
-        let mut stdout = tokio::io::BufReader::new(child.stdout.take().unwrap());
-        let mut ready = String::new();
-        tokio::time::timeout(Duration::from_secs(2), stdout.read_line(&mut ready))
-            .await
-            .expect("child initialized")
-            .unwrap();
-        assert_eq!(ready.trim(), "ready");
-        // Restore the child handle after reading its readiness line.
-        child.stdout = Some(stdout.into_inner());
-        let supervisor = std::sync::Arc::new(PrismSupervisor {
-            child: Mutex::new(Some(OwnedServer {
-                profile: ModelProfile::Bonsai25Official,
-                pid,
-                stopping: false,
-                child,
-            })),
-        });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), supervisor.stop())
-                .await
-                .is_err(),
-            "ignored SIGTERM keeps the stop future pending"
-        );
-        assert!(
-            supervisor
-                .child
-                .lock()
-                .await
-                .as_ref()
-                .is_some_and(|owned| owned.stopping)
-        );
-        assert!(
-            !supervisor
-                .is_running(ModelProfile::Bonsai25Official)
-                .await
-                .unwrap()
-        );
-        let config = Config::default();
-        let (_cancel_tx, mut cancel) = watch::channel(false);
-        assert!(
-            supervisor
-                .ensure(&config, ModelProfile::Bonsai25Official, &mut cancel)
-                .await
-                .is_err()
-        );
-        assert!(supervisor.child.lock().await.is_none());
-        #[cfg(unix)]
-        assert!(!process_group_exists(pid));
+    #[test]
+    fn staged_manifest_matches_checksums() {
+        let manifest_content =
+            std::fs::read_to_string("deploy/prism/manifest.json").expect("read manifest.json");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest_content).expect("parse manifest.json");
+        let files = manifest["staged_files"]
+            .as_array()
+            .expect("staged_files array");
+        assert_eq!(files.len(), 4);
+        for file in files {
+            let path = file["path"].as_str().expect("path string");
+            let expected_sha256 = file["sha256"].as_str().expect("sha256 string");
+            let content = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            let mut hasher = Sha256::new();
+            hasher.update(&content);
+            let calculated = format!("{:x}", hasher.finalize());
+            assert_eq!(
+                calculated, expected_sha256,
+                "Hash mismatch for {path}: expected {expected_sha256}, got {calculated}"
+            );
+        }
     }
 
     #[test]
@@ -1895,5 +2713,140 @@ mod tests {
             assert!(profile.runtime_alias().unwrap().starts_with("bonsai25-"));
         }
         assert!(ModelProfile::CortexT0.artifact_filename().is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_supervisor_with_already_active_unit_stops_before_start() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            main_pid: 9999,
+            control_group: "/system.slice/prism.service".into(),
+            invocation_id: "prior-running-inv".into(),
+        }));
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        // Ensure fresh supervisor slot is None:
+        assert!(supervisor.child.lock().await.is_none());
+
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await
+            .unwrap();
+
+        // Must have called stop_unit to quiesce the unknown running unit before starting
+        assert_eq!(
+            runner.stop_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+        assert_eq!(
+            runner.start_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+        assert!(
+            supervisor
+                .is_running(ModelProfile::Bonsai25Uncensored)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_supervisor_with_activating_unit_stops_before_start() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "activating".into(),
+            sub_state: "start-pre".into(),
+            main_pid: 0,
+            control_group: "/system.slice/prism.service".into(),
+            invocation_id: "activating-inv".into(),
+        }));
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runner.stop_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+        assert_eq!(
+            runner.start_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_unit_failure_quiesces_unit_and_cleans_slot() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+        }));
+        *runner.fail_start.lock().await = true;
+
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert!(res.is_err());
+        assert!(supervisor.child.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_profile_atomic_cleans_up_temp_on_failure() {
+        let test_dir = TestDir::new();
+        let blocker = test_dir.path.join("not_a_dir");
+        std::fs::write(&blocker, b"blocking file").unwrap();
+        let invalid_profile_path = blocker.join("sub/profile");
+
+        let res =
+            write_profile_atomic(&invalid_profile_path, ModelProfile::Bonsai25Uncensored).await;
+        assert!(res.is_err());
+
+        let entries = std::fs::read_dir(&test_dir.path).unwrap();
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(
+                !name.starts_with(".profile.") || !name.ends_with(".tmp"),
+                "leftover tmpfile found: {}",
+                name
+            );
+        }
     }
 }

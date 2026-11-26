@@ -110,6 +110,8 @@ pub struct Config {
     pub prism_url: String,
     /// Installed Prism llama.cpp server. This is process configuration, never client input.
     pub prism_server_path: std::path::PathBuf,
+    /// Atomic profile selector file written for the staged Prism host service.
+    pub prism_profile_path: std::path::PathBuf,
     /// Installed allowlisted Bonsai artifacts. Filenames come only from ModelProfile.
     pub bonsai_model_directory: std::path::PathBuf,
     /// T1 is opt-in through the service environment; no model is loaded at startup.
@@ -165,6 +167,9 @@ impl Config {
         let mut config = Self {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8003),
             hippocampus_url: "http://127.0.0.1:8001".into(),
+            prism_server_path: "/opt/prism/current/llama-server".into(),
+            bonsai_model_directory: "/var/lib/prism/models/bonsai".into(),
+            prism_profile_path: "/run/prism/profile".into(),
             ..Self::default()
         };
         config.bonsai_enabled = std::env::var("CORTEX_BONSAI_ENABLED")
@@ -180,6 +185,9 @@ impl Config {
             && url.fragment().is_none()
         {
             config.prism_url = candidate.trim_end_matches('/').to_owned();
+        }
+        if let Ok(candidate) = std::env::var("CORTEX_PRISM_PROFILE_PATH") {
+            config.prism_profile_path = std::path::PathBuf::from(candidate);
         }
         config
     }
@@ -289,8 +297,9 @@ impl Default for Config {
             worker_timeout: std::time::Duration::from_secs(900),
             ollama_url: "http://127.0.0.1:11434".into(),
             prism_url: "http://127.0.0.1:49100".into(),
-            prism_server_path: "models/prism/llama-server".into(),
-            bonsai_model_directory: "models/bonsai".into(),
+            prism_server_path: "/opt/prism/current/llama-server".into(),
+            prism_profile_path: "/run/prism/profile".into(),
+            bonsai_model_directory: "/var/lib/prism/models/bonsai".into(),
             bonsai_enabled: false,
             model_context_tokens: 8192,
             ollama_keep_alive: "2m".into(),

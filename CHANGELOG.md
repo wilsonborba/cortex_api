@@ -42,6 +42,10 @@
 
 - Integrate owner-requested unauthenticated local inference (#138)
 
+- Resolve supervisor lifecycle quiescence, failure cleanup, and path alignment (#138)
+
+- Preserve T0 on absent unit, add kill_on_drop, and refine polkit template (#138)
+
 
 ### Chores
 
@@ -57,6 +61,8 @@
 ### Documentation
 
 - Record reviewed child runs and shared approvals
+
+- Record internal Prism authentication removal
 
 
 ### Features
@@ -92,6 +98,10 @@
 - Route T1 image inputs through T0 vision prepass
 
 - Integrate reviewed child runs and action decisions
+
+- Stage systemd service units launcher and supervisor control
+
+- Stage the managed Prism infrastructure service (#138)
 
 
 ### Tests
@@ -140,6 +150,8 @@
 
 - Cover selection count boundaries
 
+- Strengthen scheduler blocking and T0 absent-unit provider fixtures (#138)
+
 
 ### merge
 
@@ -152,6 +164,7 @@
 - Restore persisted run metadata in chat history (#119)
 
 - Restrict temporary file context to approved source selections (#136)
+
 
 ## v2.3.0 - 2026-11-16
 

@@ -1,0 +1,74 @@
+#!/bin/bash
+set -euo pipefail
+
+# Clear all ambient runtime authentication inputs
+unset LLAMA_API_KEY
+unset LLAMA_ARG_API_KEY_FILE
+
+PROFILE_FILE="/run/prism/profile"
+if [[ ! -f "$PROFILE_FILE" ]]; then
+    echo "Profile selector file not found: $PROFILE_FILE" >&2
+    exit 1
+fi
+
+PROFILE="$(tr -d '[:space:]' < "$PROFILE_FILE")"
+export LD_LIBRARY_PATH="/opt/prism/current${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+case "$PROFILE" in
+    bonsai25-uncensored)
+        exec /opt/prism/current/llama-server \
+            --host 127.0.0.1 \
+            --port 49100 \
+            --model /var/lib/prism/models/bonsai/bonsai25-atomicchat-uncensored-PTQ1_0.gguf \
+            --alias bonsai25-uncensored \
+            --ctx-size 8192 \
+            --parallel 1 \
+            --batch-size 1024 \
+            --ubatch-size 256 \
+            --threads 6 \
+            --threads-batch 6 \
+            --gpu-layers all \
+            --flash-attn on \
+            --cache-type-k q8_0 \
+            --cache-type-v q8_0 \
+            --reasoning-format deepseek \
+            --min-p 0 \
+            --jinja \
+            --no-webui \
+            --verbosity 3 \
+            --cors-origins localhost \
+            --no-cors-credentials
+        ;;
+    bonsai25-official)
+        exec /opt/prism/current/llama-server \
+            --host 127.0.0.1 \
+            --port 49100 \
+            --model /var/lib/prism/models/bonsai/bonsai25-official-PTQ1_0-mtp.gguf \
+            --alias bonsai25-official \
+            --ctx-size 8192 \
+            --parallel 1 \
+            --batch-size 1024 \
+            --ubatch-size 256 \
+            --threads 6 \
+            --threads-batch 6 \
+            --gpu-layers all \
+            --flash-attn on \
+            --cache-type-k q8_0 \
+            --cache-type-v q8_0 \
+            --reasoning-format deepseek \
+            --min-p 0 \
+            --jinja \
+            --no-webui \
+            --verbosity 3 \
+            --cors-origins localhost \
+            --no-cors-credentials \
+            --spec-type draft-mtp \
+            --spec-draft-n-min 0 \
+            --spec-draft-n-max 3 \
+            --spec-draft-p-min 0
+        ;;
+    *)
+        echo "Unknown or unsupported profile: $PROFILE" >&2
+        exit 2
+        ;;
+esac
