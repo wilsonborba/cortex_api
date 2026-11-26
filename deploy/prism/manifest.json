@@ -41,13 +41,13 @@
       "path": "deploy/prism/prism-tmpfiles.conf",
       "target_path": "/etc/tmpfiles.d/prism.conf",
       "mode": "0644",
-      "sha256": "f55465abad60b36aeb80e1845fcee3a85f610f6f3eaae63d301f8bbaab315a26"
+      "sha256": "2f241c8d5ce1cd62e92e4bca8b77740a1bfcfd6a5a7a9536a006703b73865a30"
     },
     {
       "path": "deploy/prism/49-prism-systemd.rules",
       "target_path": "/etc/polkit-1/rules.d/49-prism-systemd.rules",
       "mode": "0644",
-      "sha256": "3159ef5eda1427be6a3b5a715c8e67c6dab21b00c9709058f191cdcf8df6b6aa"
+      "sha256": "eca259e05bd822743abae163333af2966a0b4835e6f8515efb48ad31a79db7b3"
     }
   ]
 }

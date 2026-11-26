@@ -167,6 +167,9 @@ impl Config {
         let mut config = Self {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8003),
             hippocampus_url: "http://127.0.0.1:8001".into(),
+            prism_server_path: "/opt/prism/current/llama-server".into(),
+            bonsai_model_directory: "/var/lib/prism/models/bonsai".into(),
+            prism_profile_path: "/run/prism/profile".into(),
             ..Self::default()
         };
         config.bonsai_enabled = std::env::var("CORTEX_BONSAI_ENABLED")
@@ -294,9 +297,9 @@ impl Default for Config {
             worker_timeout: std::time::Duration::from_secs(900),
             ollama_url: "http://127.0.0.1:11434".into(),
             prism_url: "http://127.0.0.1:49100".into(),
-            prism_server_path: "models/prism/llama-server".into(),
+            prism_server_path: "/opt/prism/current/llama-server".into(),
             prism_profile_path: "/run/prism/profile".into(),
-            bonsai_model_directory: "models/bonsai".into(),
+            bonsai_model_directory: "/var/lib/prism/models/bonsai".into(),
             bonsai_enabled: false,
             model_context_tokens: 8192,
             ollama_keep_alive: "2m".into(),

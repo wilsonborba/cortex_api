@@ -207,25 +207,30 @@ impl PrismSupervisor {
         self.stop_locked(&mut slot).await
     }
 
-    async fn stop_locked(&self, slot: &mut Option<ActiveService>) -> Result<(), DriverError> {
-        let Some(active) = slot.as_mut() else {
-            return Ok(());
-        };
-        active.stopping = true;
+    async fn stop_quiescent(&self) -> Result<(), DriverError> {
         self.runner.stop_unit(ALLOWED_UNIT).await?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let status = self.runner.show_unit(ALLOWED_UNIT).await?;
             if status.is_inactive() {
-                break;
+                return Ok(());
             }
             if tokio::time::Instant::now() > deadline {
                 return Err(DriverError::Ollama);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        *slot = None;
-        Ok(())
+    }
+
+    async fn stop_locked(&self, slot: &mut Option<ActiveService>) -> Result<(), DriverError> {
+        if let Some(active) = slot.as_mut() {
+            active.stopping = true;
+        }
+        let res = self.stop_quiescent().await;
+        if res.is_ok() {
+            *slot = None;
+        }
+        res
     }
 
     pub async fn is_running(&self, profile: ModelProfile) -> Result<bool, DriverError> {
@@ -272,8 +277,10 @@ impl PrismSupervisor {
             return Ok(());
         }
 
-        // Previous unit must be stopped and confirmed inactive before selector update
-        if current_status.is_active() || slot.is_some() {
+        // Before writing selector or starting, require the actual unit to be confirmed quiescent.
+        // Even if slot is None (e.g. fresh supervisor instance), any existing running, activating,
+        // or stale unit must be stopped and verified inactive.
+        if !current_status.is_inactive() || slot.is_some() {
             self.stop_locked(&mut slot).await?;
         }
 
@@ -312,21 +319,39 @@ impl PrismSupervisor {
             return Err(DriverError::Cancelled);
         }
 
-        self.runner.start_unit(ALLOWED_UNIT).await?;
+        // Track starting state before starting so any subsequent error or cancel cleans up
+        *slot = Some(ActiveService {
+            profile,
+            pid: 0,
+            invocation_id: String::new(),
+            control_group: String::new(),
+            stopping: false,
+        });
+
+        if let Err(e) = self.runner.start_unit(ALLOWED_UNIT).await {
+            let _ = self.stop_locked(&mut slot).await;
+            return Err(e);
+        }
 
         // Poll until active with valid MainPID and InvocationID
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let status = loop {
             if *cancel.borrow() {
-                let _ = self.stop_locked(&mut slot).await;
+                self.stop_locked(&mut slot).await?;
                 return Err(DriverError::Cancelled);
             }
-            let status = self.runner.show_unit(ALLOWED_UNIT).await?;
+            let status = match self.runner.show_unit(ALLOWED_UNIT).await {
+                Ok(s) => s,
+                Err(e) => {
+                    self.stop_locked(&mut slot).await?;
+                    return Err(e);
+                }
+            };
             if status.is_active() {
                 break status;
             }
             if tokio::time::Instant::now() > deadline {
-                let _ = self.stop_locked(&mut slot).await;
+                self.stop_locked(&mut slot).await?;
                 return Err(DriverError::Ollama);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -353,24 +378,31 @@ pub async fn write_profile_atomic(path: &Path, profile: ModelProfile) -> Result<
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     let tmp_path = parent.join(format!(".profile.{}.tmp", uuid::Uuid::new_v4()));
-    let content = format!(
-        "{}
-",
-        profile.id()
-    );
-    tokio::fs::write(&tmp_path, content.as_bytes())
+    let content = format!("{}\n", profile.id());
+    if tokio::fs::write(&tmp_path, content.as_bytes())
         .await
-        .map_err(|_| DriverError::Ollama)?;
+        .is_err()
+    {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(DriverError::Ollama);
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o640)).await;
+        if tokio::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o640))
+            .await
+            .is_err()
+        {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(DriverError::Ollama);
+        }
     }
 
-    tokio::fs::rename(&tmp_path, path)
-        .await
-        .map_err(|_| DriverError::Ollama)?;
+    if tokio::fs::rename(&tmp_path, path).await.is_err() {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(DriverError::Ollama);
+    }
 
     Ok(())
 }
@@ -2345,5 +2377,137 @@ InvocationID=
             assert!(profile.runtime_alias().unwrap().starts_with("bonsai25-"));
         }
         assert!(ModelProfile::CortexT0.artifact_filename().is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_supervisor_with_already_active_unit_stops_before_start() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            main_pid: 9999,
+            control_group: "/system.slice/prism.service".into(),
+            invocation_id: "prior-running-inv".into(),
+        }));
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        // Ensure fresh supervisor slot is None:
+        assert!(supervisor.child.lock().await.is_none());
+
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await
+            .unwrap();
+
+        // Must have called stop_unit to quiesce the unknown running unit before starting
+        assert_eq!(
+            runner.stop_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+        assert_eq!(
+            runner.start_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+        assert!(
+            supervisor
+                .is_running(ModelProfile::Bonsai25Uncensored)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_supervisor_with_activating_unit_stops_before_start() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "activating".into(),
+            sub_state: "start-pre".into(),
+            main_pid: 0,
+            control_group: "/system.slice/prism.service".into(),
+            invocation_id: "activating-inv".into(),
+        }));
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runner.stop_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+        assert_eq!(
+            runner.start_calls.lock().await.as_slice(),
+            &["prism.service"]
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_unit_failure_quiesces_unit_and_cleans_slot() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+        }));
+        *runner.fail_start.lock().await = true;
+
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert!(res.is_err());
+        assert!(supervisor.child.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn write_profile_atomic_cleans_up_temp_on_failure() {
+        let test_dir = TestDir::new();
+        let blocker = test_dir.path.join("not_a_dir");
+        std::fs::write(&blocker, b"blocking file").unwrap();
+        let invalid_profile_path = blocker.join("sub/profile");
+
+        let res =
+            write_profile_atomic(&invalid_profile_path, ModelProfile::Bonsai25Uncensored).await;
+        assert!(res.is_err());
+
+        let entries = std::fs::read_dir(&test_dir.path).unwrap();
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(
+                !name.starts_with(".profile.") || !name.ends_with(".tmp"),
+                "leftover tmpfile found: {}",
+                name
+            );
+        }
     }
 }
