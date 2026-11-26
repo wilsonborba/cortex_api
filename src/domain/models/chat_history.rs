@@ -33,9 +33,26 @@ pub struct OutputDetails {
     pub output: ChatOutput,
     pub sources: Vec<Source>,
     pub memories: Vec<Memory>,
+    /// Bounded scalar metadata recovered from a fully matched persisted run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<OutputRunMetadata>,
     /// Source answer when this answer continues a saved answer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continued_from: Option<crate::domain::models::inspection::ContinuedFrom>,
+}
+#[derive(Serialize)]
+pub struct OutputRunMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_number: Option<u16>,
+    pub total_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<OutputTokenCounts>,
+}
+#[derive(Serialize)]
+pub struct OutputTokenCounts {
+    pub input: u64,
+    pub output: u64,
+    pub total: u64,
 }
 #[derive(Serialize)]
 pub struct ChatWithMemory {

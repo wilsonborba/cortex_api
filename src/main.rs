@@ -270,6 +270,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 config: config.clone(),
                 hippocampus: hippocampus.clone(),
+                runs: Some(
+                    cortex_api::domain::services::run_evidence::RunEvidence::new(store.clone()),
+                ),
             },
             hippocampus,
         },

@@ -91,6 +91,7 @@ pub fn app_router(services: AppServices) -> Router {
     let output_action_runtime = services.runtime.clone();
     let output_action_service = services.agent_runs.clone();
     let output_action_remote_cli = services.remote_cli.clone();
+    let runs = services.runtime.runs.clone();
     let routes = models::router(services.config.clone())
         .merge(chat_inputs::router(services.runtime))
         .merge(personas::router(services.personas))
@@ -100,7 +101,11 @@ pub fn app_router(services: AppServices) -> Router {
         .merge(files::router(files))
         .merge(logs::router(services.logs))
         .merge(telemetry::router(services.ledger, &services.config))
-        .merge(chats::router(services.chats, services.config))
+        .merge(chats::router_with_runs(
+            services.chats,
+            services.config,
+            Some(runs),
+        ))
         .merge(remote_cli::routes(services.remote_cli));
     let routes = routes.merge(agent_runs::router(services.agent_runs));
     let routes = routes.merge(agent_runs::output_router(

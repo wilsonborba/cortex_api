@@ -1,3 +1,4 @@
+use crate::domain::services::run_evidence::RunEvidence;
 use crate::{
     core::{
         config::Config,
@@ -16,6 +17,7 @@ pub struct ChatHistory {
     pub repo: Chats,
     pub config: Config,
     pub hippocampus: Hippocampus,
+    pub runs: Option<RunEvidence>,
 }
 fn error(error: StorageError) -> ProcessNumber {
     match error {
@@ -102,7 +104,61 @@ impl ChatHistory {
             output,
             sources,
             memories,
+            run: None,
             continued_from,
+        })
+    }
+    fn run_metadata(
+        scope: &AppUser,
+        output: &ChatOutput,
+        record: &crate::domain::models::run_record::RunRecord,
+    ) -> Option<OutputRunMetadata> {
+        if record.output_id != output.output_id
+            || record.session_id != output.session_id
+            || record.app_id != scope.app_id
+            || record.user_id != scope.user_id
+        {
+            return None;
+        }
+        let terminal_failure = output.status == "failed"
+            || (output.status == "running"
+                && record
+                    .stages
+                    .last()
+                    .is_some_and(|stage| stage.status == "failed"));
+        let error_number = terminal_failure
+            .then(|| {
+                record.stages.iter().find_map(|stage| {
+                    (stage.status == "failed")
+                        .then_some(stage.error_number)
+                        .flatten()
+                })
+            })
+            .flatten();
+        let tokens = if record.calls.is_empty() {
+            None
+        } else {
+            record
+                .calls
+                .iter()
+                .try_fold((0u64, 0u64), |(i, o), call| {
+                    Some((
+                        i.checked_add(call.input_tokens)?,
+                        o.checked_add(call.output_tokens)?,
+                    ))
+                })
+                .and_then(|(input, output)| {
+                    input.checked_add(output).map(|total| OutputTokenCounts {
+                        input,
+                        output,
+                        total,
+                    })
+                })
+        };
+        Some(OutputRunMetadata {
+            error_number,
+            total_ms: record.total_ms,
+            tokens,
         })
     }
     pub async fn page(
@@ -130,6 +186,30 @@ impl ChatHistory {
                 .map_err(error)?
             {
                 outputs.push(self.details(&scope, output).await?);
+            }
+        }
+        if let Some(runs) = &self.runs {
+            let ids: Vec<_> = outputs.iter().map(|item| item.output.output_id).collect();
+            let mut records = Vec::new();
+            let mut available = true;
+            for batch in ids.chunks(100) {
+                match runs.get_many(batch).await {
+                    Ok(batch_records) => records.extend(batch_records),
+                    Err(_) => {
+                        available = false;
+                        break;
+                    }
+                }
+            }
+            if available {
+                for record in records {
+                    if let Some(item) = outputs
+                        .iter_mut()
+                        .find(|item| item.output.output_id == record.output_id)
+                    {
+                        item.run = Self::run_metadata(&scope, &item.output, &record);
+                    }
+                }
             }
         }
         let mut memory_node_id = None;
@@ -191,7 +271,15 @@ impl ChatHistory {
             .map_err(error)?
             .filter(|o| o.session_id == session)
             .ok_or(process_numbers::OUTPUT_NOT_FOUND)?;
-        self.details(&scope, output).await
+        let mut details = self.details(&scope, output).await?;
+        if let Some(runs) = &self.runs
+            && let Ok(records) = runs.get_many(&[details.output.output_id]).await
+        {
+            details.run = records
+                .iter()
+                .find_map(|record| Self::run_metadata(&scope, &details.output, record));
+        }
+        Ok(details)
     }
     pub async fn patch(
         &self,
@@ -204,5 +292,210 @@ impl ChatHistory {
             .patch_chat(&scope, session, &patch)
             .await
             .map_err(error)
+    }
+}
+
+#[cfg(test)]
+mod run_metadata_tests {
+    use super::*;
+    use crate::domain::models::run_record::{ModelCall, RunCounts, RunMode, StageRecord, WebMode};
+    use chrono::Utc;
+
+    fn output(status: &str, output_id: Uuid, session_id: Uuid) -> ChatOutput {
+        ChatOutput {
+            output_id,
+            input_id: Uuid::new_v4(),
+            session_id,
+            status: status.into(),
+            text: "answer".into(),
+            thinking_text: None,
+            memory_id: None,
+            created_at: Utc::now(),
+            finished_at: None,
+        }
+    }
+    fn record(
+        output_id: Uuid,
+        session_id: Uuid,
+        stages: Vec<StageRecord>,
+    ) -> crate::domain::models::run_record::RunRecord {
+        crate::domain::models::run_record::RunRecord {
+            output_id,
+            session_id,
+            app_id: "cortex".into(),
+            user_id: "owner".into(),
+            created_at: Utc::now(),
+            mode: RunMode {
+                web_mode: WebMode::Fast,
+                thinking: false,
+            },
+            total_ms: 42,
+            stages,
+            calls: vec![],
+            counts: RunCounts {
+                pages_read: 0,
+                chunks_used: 0,
+                files: 0,
+                file_pages: 0,
+                audio_seconds: 0.0,
+            },
+        }
+    }
+    fn stage(status: &str, error_number: Option<u16>) -> StageRecord {
+        StageRecord {
+            name: "answer".into(),
+            status: status.into(),
+            error_number: (status == "failed").then_some(error_number).flatten(),
+            notice_number: (status == "notice").then_some(error_number).flatten(),
+            time_ms: 1,
+        }
+    }
+
+    fn model_call(input_tokens: u64, output_tokens: u64) -> ModelCall {
+        ModelCall {
+            images: None,
+            audio: None,
+            role: "answer".into(),
+            model: "test-model".into(),
+            input_tokens,
+            output_tokens,
+            time_to_first_token_ms: Some(5),
+            total_ms: 10,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn aggregates_model_call_tokens_and_omits_overflow_without_losing_duration() {
+        let output_id = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scope = AppUser {
+            app_id: "cortex".into(),
+            user_id: "owner".into(),
+        };
+
+        let mut multiple = record(output_id, session, vec![stage("ok", None)]);
+        multiple.calls = vec![model_call(7, 3), model_call(5, 2)];
+        let metadata =
+            ChatHistory::run_metadata(&scope, &output("done", output_id, session), &multiple)
+                .unwrap();
+        assert_eq!(metadata.total_ms, 42);
+        let tokens = metadata.tokens.unwrap();
+        assert_eq!(tokens.input, 12);
+        assert_eq!(tokens.output, 5);
+        assert_eq!(tokens.total, 17);
+        assert_eq!(metadata.error_number, None);
+
+        let mut overflow = record(output_id, session, vec![stage("ok", None)]);
+        overflow.calls = vec![model_call(u64::MAX, 1), model_call(1, 1)];
+        let metadata =
+            ChatHistory::run_metadata(&scope, &output("done", output_id, session), &overflow)
+                .unwrap();
+        assert_eq!(metadata.total_ms, 42);
+        assert!(metadata.tokens.is_none());
+        assert_eq!(metadata.error_number, None);
+    }
+
+    #[test]
+    fn exposes_error_only_for_matching_failed_output_and_omits_fallback_error() {
+        let output_id = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scope = AppUser {
+            app_id: "cortex".into(),
+            user_id: "owner".into(),
+        };
+        let failed = record(output_id, session, vec![stage("failed", Some(1042))]);
+        assert_eq!(
+            ChatHistory::run_metadata(&scope, &output("failed", output_id, session), &failed)
+                .unwrap()
+                .error_number,
+            Some(1042)
+        );
+
+        let fallback = record(
+            output_id,
+            session,
+            vec![stage("notice", Some(1042)), stage("ok", None)],
+        );
+        assert_eq!(
+            ChatHistory::run_metadata(&scope, &output("done", output_id, session), &fallback)
+                .unwrap()
+                .error_number,
+            None
+        );
+        assert!(
+            ChatHistory::run_metadata(&scope, &output("done", output_id, session), &fallback)
+                .unwrap()
+                .tokens
+                .is_none()
+        );
+
+        let mut partial_value = serde_json::to_value(&fallback).unwrap();
+        partial_value.as_object_mut().unwrap().remove("calls");
+        let partial: crate::domain::models::run_record::RunRecord =
+            serde_json::from_value(partial_value).unwrap();
+        let partial_metadata =
+            ChatHistory::run_metadata(&scope, &output("done", output_id, session), &partial)
+                .unwrap();
+        assert_eq!(partial_metadata.total_ms, 42);
+        assert!(partial_metadata.tokens.is_none());
+
+        let mut forged = failed;
+        forged.user_id = "other".into();
+        assert!(
+            ChatHistory::run_metadata(&scope, &output("failed", output_id, session), &forged)
+                .is_none()
+        );
+
+        // Live ChatRuntime emits PipelineResult::error(), which selects the
+        // first failed stage. A recoverable notice does not mask a later failure.
+        let terminal = record(
+            output_id,
+            session,
+            vec![stage("notice", Some(1042)), stage("failed", Some(1043))],
+        );
+        assert_eq!(
+            ChatHistory::run_metadata(&scope, &output("failed", output_id, session), &terminal)
+                .unwrap()
+                .error_number,
+            Some(1043)
+        );
+        let save_failure = record(output_id, session, vec![stage("failed", Some(1017))]);
+        assert_eq!(
+            ChatHistory::run_metadata(
+                &scope,
+                &output("running", output_id, session),
+                &save_failure
+            )
+            .unwrap()
+            .error_number,
+            Some(1017)
+        );
+        assert!(
+            ChatHistory::run_metadata(&scope, &output("done", output_id, session), &terminal)
+                .unwrap()
+                .tokens
+                .is_none()
+        );
+        assert!(
+            ChatHistory::run_metadata(
+                &scope,
+                &output("failed", output_id, Uuid::new_v4()),
+                &fallback
+            )
+            .is_none()
+        );
+        assert!(
+            ChatHistory::run_metadata(
+                &AppUser {
+                    app_id: "other".into(),
+                    user_id: "owner".into()
+                },
+                &output("failed", output_id, session),
+                &fallback
+            )
+            .is_none()
+        );
     }
 }

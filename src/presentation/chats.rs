@@ -22,6 +22,13 @@ use axum::{
 };
 use uuid::Uuid;
 pub fn router(repo: Chats, config: Config) -> Router {
+    router_with_runs(repo, config, None)
+}
+pub fn router_with_runs(
+    repo: Chats,
+    config: Config,
+    runs: Option<crate::domain::services::run_evidence::RunEvidence>,
+) -> Router {
     Router::new()
         .route("/chats", get(list))
         .route("/chats/{session_id}", get(page).patch(patch))
@@ -34,6 +41,7 @@ pub fn router(repo: Chats, config: Config) -> Router {
             repo,
             hippocampus: crate::dal::remote::hippocampus::Hippocampus::new(&config)
                 .expect("validated Hippocampus configuration"),
+            runs,
             config,
         })
 }
