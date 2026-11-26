@@ -14,21 +14,29 @@ use cortex_api::{
             database::{self, Target},
         },
         remote::{
-            cache::RedisCache, event_journal::EventJournal, hippocampus::Hippocampus,
-            runs::RunStore, timing::TimingStore, web_page::PageReader,
+            cache::RedisCache,
+            event_journal::EventJournal,
+            hippocampus::Hippocampus,
+            prism::{Prism, PrismProcessControl},
+            runs::RunStore,
+            timing::TimingStore,
+            web_page::PageReader,
         },
     },
     domain::{
         models::{
             driver::{CallInput, CallOutcome, DriverError, DriverEvent, ModelDriver, OutputModel},
+            model_profile::ModelProfile,
             run_record::ModelCall,
             security::{ClassifierUnavailable, InjectionClassifier},
-            usage::Pending,
+            usage::{
+                CallUsage, LedgerUnavailable, Pending, Share, Usage, UsageLedger, WaitingCall,
+            },
         },
         services::{
-            chat_runtime::ChatRuntime, crawler::WebRetriever, exchange_memory::ExchangeMemories,
-            extraction::DocumentExtractor, files::FileProxy, history::History,
-            recall::MemoryRecall, run_evidence::RunEvidence, search::WebSearch,
+            balancer::Scheduler, chat_runtime::ChatRuntime, crawler::WebRetriever,
+            exchange_memory::ExchangeMemories, extraction::DocumentExtractor, files::FileProxy,
+            history::History, recall::MemoryRecall, run_evidence::RunEvidence, search::WebSearch,
             security::SecurityShield, telemetry_reads::TelemetryReads, temporary::TemporaryChats,
             thinking::Thinking,
         },
@@ -42,6 +50,10 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, watch};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -178,6 +190,343 @@ impl ModelDriver for Model {
         })
     }
 }
+
+struct FixturePrismControl {
+    active: Mutex<Option<ModelProfile>>,
+    ensured: Mutex<Vec<ModelProfile>>,
+    stop_count: std::sync::atomic::AtomicUsize,
+}
+impl PrismProcessControl for FixturePrismControl {
+    fn ensure<'a>(
+        &'a self,
+        _: &'a Config,
+        profile: ModelProfile,
+        cancel: &'a mut watch::Receiver<bool>,
+    ) -> Pending<'a, Result<(), DriverError>> {
+        Box::pin(async move {
+            if *cancel.borrow() {
+                return Err(DriverError::Cancelled);
+            }
+            *self.active.lock().unwrap() = Some(profile);
+            self.ensured.lock().unwrap().push(profile);
+            Ok(())
+        })
+    }
+    fn authorization_header<'a>(
+        &'a self,
+        profile: ModelProfile,
+    ) -> Pending<'a, Result<reqwest::header::HeaderValue, DriverError>> {
+        Box::pin(async move {
+            if *self.active.lock().unwrap() != Some(profile) {
+                return Err(DriverError::Ollama);
+            }
+            let mut value = reqwest::header::HeaderValue::from_static("Bearer fixture-prism-key");
+            value.set_sensitive(true);
+            Ok(value)
+        })
+    }
+    fn stop<'a>(&'a self) -> Pending<'a, Result<(), DriverError>> {
+        Box::pin(async move {
+            self.active.lock().unwrap().take();
+            self.stop_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+    fn is_running<'a>(&'a self, profile: ModelProfile) -> Pending<'a, Result<bool, DriverError>> {
+        Box::pin(async move { Ok(*self.active.lock().unwrap() == Some(profile)) })
+    }
+}
+
+struct EmptyFixtureLedger;
+impl UsageLedger for EmptyFixtureLedger {
+    fn share<'a>(
+        &'a self,
+        _: &'a str,
+        _: chrono::DateTime<chrono::Utc>,
+    ) -> Pending<'a, Result<Share, LedgerUnavailable>> {
+        Box::pin(async {
+            Ok(Share {
+                usage: Usage::default(),
+                weight: 1.0,
+                loyalty: None,
+            })
+        })
+    }
+    fn record<'a>(&'a self, _: CallUsage) -> Pending<'a, Result<(), LedgerUnavailable>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn waiting<'a>(&'a self, _: Vec<WaitingCall>) -> Pending<'a, Result<(), LedgerUnavailable>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct PrismBackedFixtureDriver {
+    prism: Arc<Prism>,
+    t0: Arc<Model>,
+}
+impl ModelDriver for PrismBackedFixtureDriver {
+    fn call<'a>(
+        &'a self,
+        output: &'a OutputModel,
+        input: CallInput,
+        events: mpsc::UnboundedSender<DriverEvent>,
+        cancel: watch::Receiver<bool>,
+    ) -> Pending<'a, Result<CallOutcome, DriverError>> {
+        if output.profile().uses_prism() {
+            self.prism.call(output, input, events, cancel)
+        } else {
+            self.t0.call(output, input, events, cancel)
+        }
+    }
+}
+
+#[derive(Default)]
+struct PrismFixtureState {
+    requests: Mutex<Vec<Value>>,
+    authenticated_requests: std::sync::atomic::AtomicUsize,
+    unauthenticated_requests: std::sync::atomic::AtomicUsize,
+}
+
+async fn fixture_http_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let count = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .ok()?
+            .ok()?;
+        if count == 0 || bytes.len().saturating_add(count) > 32 * 1024 {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break end + 4;
+        }
+    };
+    let headers = String::from_utf8(bytes[..header_end].to_vec()).ok()?;
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    if content_length > 1024 * 1024 {
+        return None;
+    }
+    while bytes.len() < header_end + content_length {
+        let count = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk))
+            .await
+            .ok()?
+            .ok()?;
+        if count == 0 {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
+    Some((
+        headers,
+        bytes[header_end..header_end + content_length].to_vec(),
+    ))
+}
+
+async fn fixture_json_reply(stream: &mut TcpStream, value: Value) {
+    let body = value.to_string();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes()).await;
+    let _ = stream.write_all(body.as_bytes()).await;
+    let _ = stream.shutdown().await;
+}
+
+async fn fixture_sse_chunk(stream: &mut TcpStream, frame: &str) -> bool {
+    let bytes = frame.as_bytes();
+    if stream
+        .write_all(format!("{:X}\r\n", bytes.len()).as_bytes())
+        .await
+        .is_err()
+        || stream.write_all(bytes).await.is_err()
+        || stream.write_all(b"\r\n").await.is_err()
+        || stream.flush().await.is_err()
+    {
+        return false;
+    }
+    true
+}
+
+async fn handle_fixture_prism(
+    mut stream: TcpStream,
+    control: Arc<FixturePrismControl>,
+    state: Arc<PrismFixtureState>,
+    config: Config,
+) {
+    let Some((headers, body)) = fixture_http_request(&mut stream).await else {
+        return;
+    };
+    if headers
+        .to_ascii_lowercase()
+        .contains("authorization: bearer fixture-prism-key")
+    {
+        state.authenticated_requests.fetch_add(1, Ordering::SeqCst);
+    } else {
+        state
+            .unauthenticated_requests
+            .fetch_add(1, Ordering::SeqCst);
+        return;
+    }
+    let request_line = headers.lines().next().unwrap_or_default().to_owned();
+    let profile = *control.active.lock().unwrap();
+    let Some(profile) = profile else { return };
+    if request_line.contains("GET /props ") {
+        fixture_json_reply(
+            &mut stream,
+            json!({
+                "model_path": format!("/fixture/{}", profile.artifact_filename().unwrap()),
+                "default_generation_settings": {"n_ctx": 8192}
+            }),
+        )
+        .await;
+    } else if request_line.contains("GET /v1/models ") {
+        fixture_json_reply(
+            &mut stream,
+            json!({"data":[{"id":profile.runtime_alias().unwrap()}]}),
+        )
+        .await;
+    } else if request_line.contains("POST /v1/chat/completions ") {
+        let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+            return;
+        };
+        state.requests.lock().unwrap().push(body.clone());
+        let messages = body["messages"].as_array().cloned().unwrap_or_default();
+        let system = messages
+            .first()
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or_default();
+        let prompt = messages
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let has_tool_result = messages.iter().any(|m| m["role"] == "tool");
+        let has_prefix = body["continue_final_message"] == true;
+        let cancellation = prompt.contains("cancel-parity-marker");
+        let tool_request = body["tools"].as_array().is_some() && !has_tool_result;
+        let thinking = system.contains(&config.thinking_plan_instruction)
+            || system.contains(&config.thinking_work_instruction)
+            || system.contains(&config.thinking_check_instruction);
+
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        if stream.write_all(head.as_bytes()).await.is_err() {
+            return;
+        }
+        if cancellation {
+            let frame = format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{"content":"Partial answer"},"logprobs":{"content":[{"token":"Partial answer","logprob":-0.1,"top_logprobs":[]}]},"finish_reason":null}]})
+            );
+            let _ = fixture_sse_chunk(&mut stream, &frame).await;
+            let mut byte = [0u8; 1];
+            let _ = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte)).await;
+            return;
+        }
+        if tool_request {
+            let id = Uuid::now_v7().to_string();
+            let frame = format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":"view_file","arguments":"{\"path\":\"/synthetic/fixture.txt\"}"}}]},"finish_reason":null}]})
+            );
+            if !fixture_sse_chunk(&mut stream, &frame).await {
+                return;
+            }
+            let finish = format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})
+            );
+            if !fixture_sse_chunk(&mut stream, &finish).await {
+                return;
+            }
+            let usage = format!(
+                "data: {}\n\n",
+                json!({"choices":[],"usage":{"prompt_tokens":31,"completion_tokens":1},"timings":{"predicted_n":1,"predicted_ms":100.0,"predicted_per_second":10.0}})
+            );
+            if !fixture_sse_chunk(&mut stream, &usage).await {
+                return;
+            }
+            let _ = fixture_sse_chunk(&mut stream, "data: [DONE]\n\n").await;
+        } else {
+            let answer = if has_tool_result {
+                "The synthetic tool result was SAFE."
+            } else if has_prefix {
+                "lternative answer is 42."
+            } else if thinking {
+                "NONE"
+            } else {
+                "The answer is 42."
+            };
+            let logprobs = if answer == "The answer is 42." {
+                json!([{"token":"The","logprob":-0.1,"top_logprobs":[{"token":"The","logprob":-0.1},{"token":"A","logprob":-1.0}]},{"token":" answer is 42.","logprob":-0.2,"top_logprobs":[{"token":" answer is 42.","logprob":-0.2}]}])
+            } else {
+                json!([{"token":answer,"logprob":-0.1,"top_logprobs":[{"token":answer,"logprob":-0.1}] }])
+            };
+            let content = format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{"content":answer},"logprobs":{"content":logprobs},"finish_reason":null}]})
+            );
+            if !fixture_sse_chunk(&mut stream, &content).await {
+                return;
+            }
+            let finish = format!(
+                "data: {}\n\n",
+                json!({"choices":[{"delta":{},"finish_reason":"stop"}]})
+            );
+            if !fixture_sse_chunk(&mut stream, &finish).await {
+                return;
+            }
+            let usage = format!(
+                "data: {}\n\n",
+                json!({"choices":[],"usage":{"prompt_tokens":31,"completion_tokens":2},"timings":{"predicted_n":2,"predicted_ms":100.0,"predicted_per_second":10.0}})
+            );
+            if !fixture_sse_chunk(&mut stream, &usage).await {
+                return;
+            }
+            let _ = fixture_sse_chunk(&mut stream, "data: [DONE]\n\n").await;
+        }
+        let _ = stream.write_all(b"0\r\n\r\n").await;
+        let _ = stream.shutdown().await;
+    }
+}
+
+fn fixture_prism_server(
+    control: Arc<FixturePrismControl>,
+    state: Arc<PrismFixtureState>,
+    config: Config,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let listener = TcpListener::from_std(listener).unwrap();
+    let (stop_tx, mut stop_rx) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let mut children = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = stop_rx.changed() => break,
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => { children.spawn(handle_fixture_prism(stream, control.clone(), state.clone(), config.clone())); },
+                    Err(_) => break,
+                }
+            }
+        }
+        stop_tx.send_replace(true);
+        children.abort_all();
+        while children.join_next().await.is_some() {}
+    });
+    (address, task)
+}
 type Log = Arc<Mutex<Vec<(String, Value)>>>;
 fn persona(id: &str, kind: &str, name: &str, is_self: bool, attributes: Value) -> Value {
     json!({"id":id,"workspace_id":"cortex","app_id":"cortex","user_id":"alice","entity_type":kind,"canonical_name":name,"aliases":[],"is_self":is_self,"attributes":attributes,"schema_name":kind,"schema_version":1})
@@ -277,6 +626,38 @@ async fn remote() -> (Log, String) {
             }),
         )
         .route(
+            "/api/v1/search",
+            post(|State(log): State<Log>, Json(body): Json<Value>| async move {
+                log.lock().unwrap().push(("recall".into(), body.clone()));
+                let data = if body["workspace_id"] == "cortex"
+                    && body["app_id"] == "cortex"
+                    && body["user_id"] == "alice"
+                {
+                    json!([{"memory":{
+                        "id":"memory-fixture",
+                        "workspace_id":"cortex",
+                        "app_id":"cortex",
+                        "user_id":"alice",
+                        "memory_type":"semantic",
+                        "title":"Scoped synthetic recall",
+                        "content":"Scoped memory marker: Blue Orchid."
+                    }}])
+                } else {
+                    json!([])
+                };
+                Json(json!({"data":data}))
+            }),
+        )
+        .route(
+            "/research",
+            get(|| async {
+                (
+                    [("content-type", "text/html; charset=utf-8")],
+                    "<html><head><title>Synthetic page</title></head><body><article><p>Grounding marker: river 19 is the sample value.</p></article></body></html>",
+                )
+            }),
+        )
+        .route(
             "/runs/{id}",
             get(|| async { (StatusCode::NOT_FOUND, Json(json!({}))) }).merge(put(
                 |State(log): State<Log>, Path(id): Path<String>, Json(body): Json<Value>| async move {
@@ -310,7 +691,7 @@ fn runtime_with_config(
     pool: sqlx::PgPool,
     cache: RedisCache,
     address: &str,
-    model: Arc<Model>,
+    model: Arc<dyn ModelDriver>,
     config: Config,
 ) -> Arc<ChatRuntime> {
     let hippocampus = Hippocampus::new(&config).unwrap();
@@ -401,6 +782,34 @@ async fn send(
         .await
         .unwrap()
 }
+async fn send_full(
+    rt: &Arc<ChatRuntime>,
+    method: &str,
+    path: &str,
+    user: &str,
+    body: Option<Value>,
+) -> Response {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-uuid", user)
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    if body.is_some() {
+        req = req.header("content-type", "application/json");
+    }
+    full_app(rt)
+        .oneshot(
+            req.body(
+                body.map(|value| Body::from(value.to_string()))
+                    .unwrap_or_default(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+}
 /// SSE frames as (id, event name, body).
 async fn frames(body: Body, stop_after: Option<usize>) -> Vec<(u64, String, Value)> {
     use futures_util::StreamExt;
@@ -432,6 +841,64 @@ async fn frames(body: Body, stop_after: Option<usize>) -> Vec<(u64, String, Valu
         }
     }
     out
+}
+
+async fn frames_until(body: Body, event_name: &str) -> Vec<(u64, String, Value)> {
+    use futures_util::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut text = String::new();
+    let mut out = vec![];
+    while let Some(Ok(chunk)) = stream.next().await {
+        text.push_str(std::str::from_utf8(&chunk).unwrap());
+        while let Some(end) = text.find("\n\n") {
+            let block: String = text.drain(..end + 2).collect();
+            let field = |name: &str| {
+                block
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .map(str::to_owned)
+            };
+            if let (Some(id), Some(event), Some(data)) =
+                (field("id: "), field("event: "), field("data: "))
+            {
+                let event = (
+                    id.parse().unwrap(),
+                    event,
+                    serde_json::from_str(&data).unwrap(),
+                );
+                let reached = event.1 == event_name;
+                out.push(event);
+                if reached {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+async fn send_with_tools(
+    rt: &Arc<ChatRuntime>,
+    method: &str,
+    path: &str,
+    user: &str,
+    body: Value,
+    tools: bool,
+) -> Response {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-uuid", user)
+        .header("content-type", "application/json")
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    if tools {
+        req = req.header("x-cortex-tools", "mapped-v1");
+    }
+    full_app(rt)
+        .oneshot(req.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap()
 }
 async fn lan_call(rt: &Arc<ChatRuntime>, path: &str, body: Value) -> (StatusCode, Value) {
     let req = Request::post(path)
@@ -1030,6 +1497,506 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires approved test PostgreSQL and Valkey; exercises public T1 routes against a local Prism fixture"]
+async fn public_t1_prism_stream_usage_inspection_replay_and_tool_resume() {
+    dotenvy::dotenv().ok();
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping public T1 Prism parity: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_public_t1_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    let prism_control = Arc::new(FixturePrismControl {
+        active: Mutex::new(None),
+        ensured: Mutex::new(Vec::new()),
+        stop_count: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let prism_state = Arc::new(PrismFixtureState::default());
+    let (prism_url, prism_task) = fixture_prism_server(
+        prism_control.clone(),
+        prism_state.clone(),
+        Config::default(),
+    );
+    let (remote_log, hippocampus_url) = remote().await;
+    let config = Config {
+        hippocampus_url: hippocampus_url.clone(),
+        prism_url,
+        bonsai_enabled: true,
+        ..Config::default()
+    };
+    let prism = Arc::new(Prism::managed(
+        config.clone(),
+        Scheduler::new(Arc::new(EmptyFixtureLedger)),
+        prism_control.clone(),
+    ));
+    let driver: Arc<dyn ModelDriver> = Arc::new(PrismBackedFixtureDriver {
+        prism,
+        t0: Arc::new(Model::default()),
+    });
+    let rt = runtime_with_config(pool.clone(), cache, &hippocampus_url, driver, config);
+
+    // Exercise the actual public input assembly for file text, a scoped memory,
+    // a persona, and an explicitly pasted local citation through T1.
+    let request_start = prism_state.requests.lock().unwrap().len();
+    let contextual = send_full(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({
+            "app_id":"cortex",
+            "text":format!("What is the sample value? Read {hippocampus_url}/research"),
+            "file_ids":["r-a"],
+            "persona_id":"b-1",
+            "use_memory":true,
+            "model_id":"bonsai25-official",
+            "thinking":false
+        })),
+    )
+    .await;
+    assert_eq!(contextual.status(), StatusCode::CREATED);
+    let contextual_body = json_body(contextual).await;
+    let contextual_output: Uuid = contextual_body["data"]["output_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let context_request = prism_state.requests.lock().unwrap()[request_start].clone();
+    let assembled = context_request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for marker in [
+        "The secret code is 42.",
+        "Scoped memory marker: Blue Orchid.",
+        "Grounding marker: river 19",
+        "calm style",
+    ] {
+        assert!(
+            assembled.contains(marker),
+            "T1 assembled context missing {marker:?}: {assembled}"
+        );
+    }
+    assert!(remote_log.lock().unwrap().iter().any(|(kind, body)| {
+        kind == "recall" && body["user_id"] == "alice" && body["workspace_id"] == "cortex"
+    }));
+    let cited_urls: Vec<String> = sqlx::query_scalar(
+        "SELECT url FROM chat_output_sources WHERE output_id=$1 ORDER BY position",
+    )
+    .bind(contextual_output)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        cited_urls.contains(&format!("{hippocampus_url}/research")),
+        "sources: {cited_urls:?}"
+    );
+
+    let mut created = Vec::new();
+    for profile in ["bonsai25-uncensored", "bonsai25-official"] {
+        let response = send_full(
+            &rt,
+            "POST",
+            "/chats",
+            "alice",
+            Some(json!({
+                "app_id":"cortex",
+                "text":"What is the answer?",
+                "model_id":profile,
+                "thinking":false,
+                "stream":true
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = frames(response.into_body(), None).await;
+        assert!(
+            events.iter().any(|event| event.1 == "token"),
+            "{profile}: {events:?}"
+        );
+        assert_eq!(events.last().unwrap().1, "done", "{profile}: {events:?}");
+
+        let (session, output): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT session_id, output_id FROM chat_outputs ORDER BY created_at DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let body = json_body(
+            send_full(
+                &rt,
+                "GET",
+                &format!("/chats/{session}/outputs/{output}/inspection"),
+                "alice",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body["data"]["model"], profile);
+        assert!(!body["data"]["tokens"].as_array().unwrap().is_empty());
+
+        let replay = frames(
+            send_full(
+                &rt,
+                "GET",
+                &format!("/chats/{session}/outputs/{output}/events?after=0"),
+                "alice",
+                None,
+            )
+            .await
+            .into_body(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            replay.iter().map(|event| event.0).collect::<Vec<_>>(),
+            events.iter().map(|event| event.0).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            send_full(&rt, "GET", &format!("/chats/{session}"), "bob", None)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND,
+            "a different user cannot read this T1 chat"
+        );
+        let runs = remote_log.lock().unwrap();
+        let run = runs.iter().rev().find(|(key, _)| key.starts_with("run "));
+        assert!(
+            run.is_some(),
+            "RunEvidence should persist measured provider usage"
+        );
+        let calls = run.unwrap().1["calls"].as_array().unwrap();
+        assert!(
+            calls.iter().any(|call| {
+                call["model"] == profile
+                    && call["input_tokens"].as_u64().unwrap_or(0) > 0
+                    && call["output_tokens"].as_u64().unwrap_or(0) > 0
+                    && call["time_to_first_token_ms"].is_number()
+            }),
+            "profile and measured usage should survive RunEvidence: {calls:?}"
+        );
+        created.push((session, output));
+    }
+
+    let (prefix_session, source_output) = created[0];
+    let continuation_start = prism_state.requests.lock().unwrap().len();
+    let continuation = send_full(
+        &rt,
+        "POST",
+        &format!("/chats/{prefix_session}/inputs"),
+        "alice",
+        Some(json!({
+            "thinking":false,
+            "continue_from":{
+                "output_id":source_output,
+                "token_position":0,
+                "alternative_rank":2
+            }
+        })),
+    )
+    .await;
+    assert_eq!(continuation.status(), StatusCode::CREATED);
+    let continuation = json_body(continuation).await;
+    assert_eq!(continuation["data"]["text"], "Alternative answer is 42.");
+    {
+        let continuation_requests = prism_state.requests.lock().unwrap();
+        assert_eq!(
+            continuation_requests[continuation_start]["continue_final_message"],
+            true
+        );
+        assert_eq!(
+            continuation_requests[continuation_start]["add_generation_prompt"],
+            false
+        );
+        assert_eq!(
+            continuation_requests[continuation_start]["model"],
+            "bonsai25-uncensored"
+        );
+    }
+
+    let thinking_start = prism_state.requests.lock().unwrap().len();
+    let thinking_response = send_full(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({
+            "app_id":"cortex",
+            "text":"Answer with the supplied context.",
+            "model_id":"bonsai25-official",
+            "thinking":true
+        })),
+    )
+    .await;
+    assert_eq!(thinking_response.status(), StatusCode::CREATED);
+    {
+        let requests_guard = prism_state.requests.lock().unwrap();
+        let thinking_requests = &requests_guard[thinking_start..];
+        assert!(
+            thinking_requests.len() >= 3,
+            "Thinking steps plus final T1 answer: {thinking_requests:?}"
+        );
+        assert!(
+            thinking_requests.iter().any(|request| {
+                request["messages"][0]["content"]
+                    .as_str()
+                    .is_some_and(|system| {
+                        system.contains(&Config::default().thinking_check_instruction)
+                    })
+            }),
+            "T1 receives Cortex Thinking instructions"
+        );
+    }
+
+    // Temporary public chat creation and continuation retain the selected
+    // logical profile while remaining absent from permanent chat history.
+    let before_permanent: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let temporary = send_full(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({
+            "app_id":"cortex",
+            "text":"temporary question",
+            "model_id":"bonsai25-uncensored",
+            "thinking":false,
+            "temporary":true
+        })),
+    )
+    .await;
+    assert_eq!(temporary.status(), StatusCode::CREATED);
+    let temporary = json_body(temporary).await;
+    let temporary_session: Uuid = temporary["data"]["session_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(temporary["data"]["text"], "The answer is 42.");
+    let followup = send_full(
+        &rt,
+        "POST",
+        &format!("/chats/{temporary_session}/inputs"),
+        "alice",
+        Some(json!({"text":"temporary follow-up","thinking":false})),
+    )
+    .await;
+    assert_eq!(followup.status(), StatusCode::CREATED);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM chats")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        before_permanent,
+        "temporary T1 sessions should not create permanent SQL chats"
+    );
+
+    // The only tool effect is the explicit synthetic result below. No local
+    // filesystem or command executor is available to this provider fixture.
+    let response = send_with_tools(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        json!({
+            "app_id":"cortex",
+            "text":"Read the synthetic fixture file.",
+            "model_id":"bonsai25-uncensored",
+            "thinking":false,
+            "stream":true
+        }),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let early = frames_until(response.into_body(), "tool_call").await;
+    let tool_event = early.iter().find(|event| event.1 == "tool_call").unwrap();
+    assert_eq!(tool_event.2["data"]["name"], "view_file");
+    assert_eq!(
+        tool_event.2["data"]["arguments"]["path"],
+        "/synthetic/fixture.txt"
+    );
+    let (session, output): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT session_id, output_id FROM chat_outputs ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let call_id = tool_event.2["data"]["call_id"].clone();
+    let result = send_full(
+        &rt,
+        "POST",
+        &format!("/chats/{session}/outputs/{output}/tool-results"),
+        "alice",
+        Some(json!({
+            "call_id":call_id,
+            "name":"view_file",
+            "result":{"output":"The fixture contains the word SAFE."}
+        })),
+    )
+    .await;
+    assert_eq!(result.status(), StatusCode::ACCEPTED);
+    let final_events = frames(
+        send_full(
+            &rt,
+            "GET",
+            &format!(
+                "/chats/{session}/outputs/{output}/events?after={}",
+                tool_event.0
+            ),
+            "alice",
+            None,
+        )
+        .await
+        .into_body(),
+        None,
+    )
+    .await;
+    assert!(
+        final_events.iter().any(|event| event.1 == "done"),
+        "{final_events:?}"
+    );
+    assert!(
+        prism_state.requests.lock().unwrap().iter().any(|request| {
+            request["messages"].as_array().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["role"] == "tool"
+                        && message["content"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("SAFE")
+                })
+            })
+        }),
+        "the typed tool result is sent back as a subsequent provider turn"
+    );
+
+    // Public cancellation after the first provider token must retain the
+    // partial answer and make the events replayable from the journal.
+    let response = send_full(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({
+            "app_id":"cortex",
+            "text":"cancel-parity-marker",
+            "model_id":"bonsai25-official",
+            "thinking":false,
+            "stream":true
+        })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let partial_events = frames_until(response.into_body(), "token").await;
+    assert_eq!(
+        partial_events.last().unwrap().2["data"]["text"],
+        "Partial answer"
+    );
+    let (cancel_session, cancel_output): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT session_id, output_id FROM chat_outputs ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let cancelled = send_full(
+        &rt,
+        "PATCH",
+        &format!("/chats/{cancel_session}/outputs/{cancel_output}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(cancelled.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row: (String, String) =
+                sqlx::query_as("SELECT status, text FROM chat_outputs WHERE output_id=$1")
+                    .bind(cancel_output)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            if row.0 != "running" {
+                assert_eq!(row.0, "cancelled");
+                assert!(row.1.contains("Partial answer"), "partial text: {row:?}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("cancelled T1 output settles while preserving partial text");
+    let replayed_cancel = frames(
+        send_full(
+            &rt,
+            "GET",
+            &format!("/chats/{cancel_session}/outputs/{cancel_output}/events?after=0"),
+            "alice",
+            None,
+        )
+        .await
+        .into_body(),
+        None,
+    )
+    .await;
+    assert!(replayed_cancel.iter().any(|event| event.1 == "token"));
+    assert!(
+        replayed_cancel
+            .iter()
+            .any(|event| matches!(event.1.as_str(), "done" | "error"))
+    );
+    assert!(
+        prism_control
+            .ensured
+            .lock()
+            .unwrap()
+            .contains(&ModelProfile::Bonsai25Uncensored)
+    );
+    assert!(
+        prism_control
+            .ensured
+            .lock()
+            .unwrap()
+            .contains(&ModelProfile::Bonsai25Official)
+    );
+    assert!(prism_state.authenticated_requests.load(Ordering::SeqCst) >= 12);
+    assert_eq!(
+        prism_state.unauthenticated_requests.load(Ordering::SeqCst),
+        0
+    );
+
+    prism_task.abort();
+    let _ = prism_task.await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_eq!(created.len(), 2);
+}
+
 async fn json_body(response: Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 1 << 16).await.unwrap()).unwrap()
 }
