@@ -46,8 +46,7 @@ fn record(actor: &str, now: chrono::DateTime<Utc>, calls: Vec<ModelCall>) -> Run
         },
     }
 }
-async fn audit(cache: &RedisCache, keys: &[CacheKey]) {
-    let url = std::env::var("CORTEX_REDIS_URL").unwrap();
+async fn audit(url: &str, cache: &RedisCache, keys: &[CacheKey]) {
     let client =
         redis::Client::open(url).unwrap_or_else(|_| panic!("The test cache address is not valid"));
     let mut connection = client.get_multiplexed_async_connection().await.unwrap();
@@ -63,14 +62,17 @@ async fn audit(cache: &RedisCache, keys: &[CacheKey]) {
     }
 }
 #[tokio::test]
-#[ignore = "requires the Cortex Valkey namespace and cortex_runs_test"]
+#[ignore = "requires CORTEX_TEST_REDIS_URL and cortex_runs_test"]
 async fn loss_rebuilds_saved_and_pending_calls_without_duplicates() {
     dotenvy::dotenv().ok();
+    let Some((test_redis_url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping usage_rebuild test: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
     let now = chrono::DateTime::from_timestamp(Utc::now().timestamp().div_euclid(3600) * 3600, 0)
         .unwrap();
     let actor = format!("test-{}", Uuid::new_v4().simple());
     let queue = format!("test-{}", Uuid::new_v4().simple());
-    let cache = RedisCache::from_environment();
     let source = Arc::new(RunStore::from_environment(RunDatabase::Test).unwrap());
     source.initialize().await.unwrap();
     let saved = record(
@@ -160,7 +162,7 @@ async fn loss_rebuilds_saved_and_pending_calls_without_duplicates() {
     let mut all_keys = keys;
     all_keys.push(CacheKey::Loyalty(actor.clone()));
     all_keys.push(CacheKey::WaitQueue(queue));
-    audit(&cache, &all_keys).await;
+    audit(&test_redis_url, &cache, &all_keys).await;
     for key in all_keys {
         cache.remove(&key).await.unwrap();
     }
@@ -197,7 +199,7 @@ async fn loss_rebuilds_saved_and_pending_calls_without_duplicates() {
     );
     let mut page_keys = page_ledger.bucket_keys(&paged_actor, now);
     page_keys.push(CacheKey::Loyalty(paged_actor));
-    audit(&cache, &page_keys).await;
+    audit(&test_redis_url, &cache, &page_keys).await;
     for key in page_keys {
         cache.remove(&key).await.unwrap();
     }

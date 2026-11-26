@@ -27,6 +27,7 @@ impl StoredEvent {
                     | "sources"
                     | "memories"
                     | "thinking"
+                    | "tool_call"
                     | "token"
                     | "notice"
                     | "error"

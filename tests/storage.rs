@@ -49,6 +49,7 @@ async fn every_table_scope_constraints_and_reversible_migrations() {
         user_id: actor.user_id.clone(),
         title: "Fixture".into(),
         persona_id: None,
+        model_id: "cortex-t0".into(),
         is_pinned: false,
         created_at: clock,
         updated_at: clock,
@@ -71,6 +72,7 @@ async fn every_table_scope_constraints_and_reversible_migrations() {
         use_memory: true,
         memory_topic: Some("fixture".into()),
         thinking: true,
+        model_id: "cortex-t0".into(),
         created_at: clock,
     };
     repo.insert_input(&actor, &input).await.unwrap();

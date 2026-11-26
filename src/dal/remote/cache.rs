@@ -19,6 +19,18 @@ impl RedisCache {
             Config::default().cache_operation_timeout,
         )
     }
+    /// Reads only `CORTEX_TEST_REDIS_URL` for isolated cache tests.
+    /// Returns `None` when unset or blank and never falls back to `CORTEX_REDIS_URL`.
+    pub fn from_test_environment() -> Option<(String, Self)> {
+        let url = std::env::var("CORTEX_TEST_REDIS_URL").ok()?;
+        let url = url.trim().to_owned();
+        if url.is_empty() {
+            return None;
+        }
+        let cache = Self::new(Some(&url), Config::default().cache_operation_timeout);
+        assert!(cache.is_configured(), "CORTEX_TEST_REDIS_URL is not valid");
+        Some((url, cache))
+    }
     pub fn new(url: Option<&str>, timeout: Duration) -> Self {
         Self {
             client: url.and_then(|url| redis::Client::open(url).ok()),
@@ -87,6 +99,25 @@ impl RedisCache {
     pub async fn remove(&self, key: &CacheKey) -> Result<(), CacheError> {
         let _: i64 = self.execute(redis::cmd("DEL").arg(key.name())).await?;
         Ok(())
+    }
+    pub fn is_configured(&self) -> bool {
+        self.client.is_some()
+    }
+    pub async fn publish(&self, channel: &CacheKey, message: &str) -> Result<i64, CacheError> {
+        self.execute(redis::cmd("PUBLISH").arg(channel.name()).arg(message))
+            .await
+    }
+    pub async fn subscribe(&self, channel: &CacheKey) -> Result<redis::aio::PubSub, CacheError> {
+        let client = self.client.as_ref().ok_or(CacheError::Unavailable)?;
+        let mut pubsub = tokio::time::timeout(self.timeout, client.get_async_pubsub())
+            .await
+            .map_err(|_| CacheError::Unavailable)?
+            .map_err(|_| CacheError::Unavailable)?;
+        tokio::time::timeout(self.timeout, pubsub.subscribe(channel.name()))
+            .await
+            .map_err(|_| CacheError::Unavailable)?
+            .map_err(|_| CacheError::Unavailable)?;
+        Ok(pubsub)
     }
 }
 

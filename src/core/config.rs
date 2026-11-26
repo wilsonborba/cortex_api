@@ -59,6 +59,11 @@ pub struct Config {
     pub search_results_per_adapter: usize,
     pub search_rrf_k: u32,
     pub web_html_bytes: usize,
+    pub research_host_spacing: std::time::Duration,
+    pub research_max_global_concurrency: usize,
+    pub research_max_backoff: std::time::Duration,
+    pub research_provider_quota_per_minute: u64,
+    pub research_cache_ttl: std::time::Duration,
     pub hippocampus_url: String,
     pub hippocampus_timeout: std::time::Duration,
     pub history_page_default: u32,
@@ -68,6 +73,8 @@ pub struct Config {
     pub event_retention: std::time::Duration,
     pub event_read_batch: usize,
     pub stream_heartbeat: std::time::Duration,
+    pub remote_cli_reconnect_window: std::time::Duration,
+    pub remote_cli_command_ttl: std::time::Duration,
     pub shield_model_path: std::path::PathBuf,
     pub shield_tokenizer_path: std::path::PathBuf,
     pub shield_runtime_path: std::path::PathBuf,
@@ -99,6 +106,14 @@ pub struct Config {
     pub worker_listen: SocketAddr,
     pub worker_timeout: std::time::Duration,
     pub ollama_url: String,
+    /// Loopback-only OpenAI-compatible endpoint for the single active Prism model.
+    pub prism_url: String,
+    /// Installed Prism llama.cpp server. This is process configuration, never client input.
+    pub prism_server_path: std::path::PathBuf,
+    /// Installed allowlisted Bonsai artifacts. Filenames come only from ModelProfile.
+    pub bonsai_model_directory: std::path::PathBuf,
+    /// T1 is opt-in through the service environment; no model is loaded at startup.
+    pub bonsai_enabled: bool,
     pub model_context_tokens: u64,
     pub ollama_keep_alive: String,
     pub ollama_connect_timeout: std::time::Duration,
@@ -134,12 +149,39 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn prism_url_is_loopback(&self) -> bool {
+        url::Url::parse(&self.prism_url).is_ok_and(|url| {
+            url.scheme() == "http"
+                && url.host_str() == Some("127.0.0.1")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && (url.path().is_empty() || url.path() == "/")
+                && url.query().is_none()
+                && url.fragment().is_none()
+        })
+    }
+
     pub fn production() -> Self {
-        Self {
+        let mut config = Self {
             listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8003),
             hippocampus_url: "http://127.0.0.1:8001".into(),
             ..Self::default()
+        };
+        config.bonsai_enabled = std::env::var("CORTEX_BONSAI_ENABLED")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+        if let Ok(candidate) = std::env::var("CORTEX_PRISM_URL")
+            && let Ok(url) = url::Url::parse(&candidate)
+            && url.scheme() == "http"
+            && (url.path().is_empty() || url.path() == "/")
+            && url.host_str().is_some_and(|host| host == "127.0.0.1")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+        {
+            config.prism_url = candidate.trim_end_matches('/').to_owned();
         }
+        config
     }
 }
 
@@ -195,6 +237,11 @@ impl Default for Config {
             search_results_per_adapter:10,
             search_rrf_k:60,
             web_html_bytes:2_000_000,
+            research_host_spacing:std::time::Duration::from_millis(250),
+            research_max_global_concurrency:4,
+            research_max_backoff:std::time::Duration::from_secs(30),
+            research_provider_quota_per_minute:120,
+            research_cache_ttl:std::time::Duration::from_secs(900),
             hippocampus_url:"http://127.0.0.1:18001".into(),
             hippocampus_timeout:std::time::Duration::from_secs(5),
             history_page_default:20,
@@ -204,6 +251,8 @@ impl Default for Config {
             event_retention:std::time::Duration::from_secs(3600),
             event_read_batch:200,
             stream_heartbeat:std::time::Duration::from_secs(5),
+            remote_cli_reconnect_window:std::time::Duration::from_secs(15),
+            remote_cli_command_ttl:std::time::Duration::from_secs(10),
             shield_model_path:"models/prompt-guard-2-22m/model.onnx".into(),
             shield_tokenizer_path:"models/prompt-guard-2-22m/tokenizer.json".into(),
             shield_runtime_path:"models/onnxruntime/lib/libonnxruntime.so".into(),
@@ -239,6 +288,10 @@ impl Default for Config {
             worker_listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 18090),
             worker_timeout: std::time::Duration::from_secs(900),
             ollama_url: "http://127.0.0.1:11434".into(),
+            prism_url: "http://127.0.0.1:49100".into(),
+            prism_server_path: "models/prism/llama-server".into(),
+            bonsai_model_directory: "models/bonsai".into(),
+            bonsai_enabled: false,
             model_context_tokens: 8192,
             ollama_keep_alive: "2m".into(),
             ollama_connect_timeout: std::time::Duration::from_secs(5),

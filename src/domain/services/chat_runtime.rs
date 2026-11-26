@@ -50,6 +50,7 @@ pub struct ChatRuntime {
     pub journal: EventJournal,
     pub personas: crate::domain::services::personas::Personas,
     pub controls: crate::domain::services::output_controls::OutputControls,
+    pub agent_runs: crate::domain::services::agent_runs::AgentRunService,
 }
 /// The final state of one output, for an input sent without `stream`.
 pub struct Finished {
@@ -82,6 +83,8 @@ struct Run {
     stop: watch::Receiver<bool>,
     ids: watch::Sender<Option<(InputIds, bool)>>,
     control: crate::domain::services::output_controls::Control,
+    tool_results:
+        tokio::sync::Mutex<mpsc::UnboundedReceiver<crate::domain::models::tools::ToolResult>>,
     finished: std::sync::Mutex<Option<FinishedOutput>>,
 }
 impl Run {
@@ -92,7 +95,35 @@ impl Run {
             TurnRequest::New(body) => (&body.text, &body.file_ids),
             TurnRequest::Next(_, body) => (&body.text, &body.file_ids),
         };
-        input_guard::check(&rt.config, text).map_err(|_| process_numbers::INPUT_TOKEN_LIMIT)?;
+        let requested_profile = match turn.request.as_ref() {
+            TurnRequest::New(body) => body.model_id,
+            TurnRequest::Next(_, body) => body.model_id,
+        };
+        if requested_profile.is_some_and(|profile| profile.uses_prism())
+            && !rt.config.bonsai_enabled
+        {
+            return Err(process_numbers::MODEL_UNAVAILABLE);
+        }
+        let profile_for_guard = requested_profile.or_else(|| match turn.request.as_ref() {
+            TurnRequest::New(_) if rt.config.bonsai_enabled => {
+                Some(crate::domain::models::model_profile::ModelProfile::default())
+            }
+            TurnRequest::New(_) => {
+                Some(crate::domain::models::model_profile::ModelProfile::legacy_default())
+            }
+            TurnRequest::Next(_, _) => None,
+        });
+        if let Some(profile) = profile_for_guard {
+            input_guard::check_profile(
+                &rt.config,
+                text,
+                profile.context_tokens(&rt.config),
+                profile.max_output_tokens(&rt.config),
+            )
+            .map_err(|_| process_numbers::INPUT_TOKEN_LIMIT)?;
+        } else {
+            input_guard::check(&rt.config, text).map_err(|_| process_numbers::INPUT_TOKEN_LIMIT)?;
+        }
         // Security runs before anything is saved (9.1).
         rt.shield.check(text).await.map_err(|e| e.process())?;
         self.events.send(NativeEvent::Step(StepProgress::new(
@@ -163,7 +194,7 @@ impl Run {
                     input,
                     history,
                     chat.files.iter().flat_map(|f| f.pages.clone()).collect(),
-                )
+                )?
                 .with_persona(chat.persona_id.clone())
                 .with_images(
                     caller,
@@ -198,7 +229,14 @@ impl Run {
                     .map_err(|_| process_numbers::HISTORY_FAILED)?
                     .ok_or(process_numbers::CHAT_NOT_FOUND)?;
                 (
-                    chat_session::continue_permanent(caller, &chat, body.clone(), &files, now)?,
+                    chat_session::continue_permanent(
+                        &rt.config,
+                        caller,
+                        &chat,
+                        body.clone(),
+                        &files,
+                        now,
+                    )?,
                     chat.persona_id.clone(),
                 )
             }
@@ -261,7 +299,7 @@ impl Run {
                 &prepared.input,
                 history,
                 vec![],
-            )
+            )?
             .with_persona(persona_id)
             .with_images(caller, images);
         accepted.continuation = continuation;
@@ -275,11 +313,14 @@ impl Run {
         input: &crate::domain::models::storage::ChatInput,
         history: Vec<Exchange>,
         temporary_files: Vec<ContextText>,
-    ) -> AcceptedTurn {
-        AcceptedTurn {
-            model: OutputModel::new(&turn.caller, ids.output_id, false),
+    ) -> Result<AcceptedTurn, ProcessNumber> {
+        let profile = crate::domain::models::model_profile::ModelProfile::from_id(&input.model_id)
+            .ok_or(process_numbers::MODEL_UNAVAILABLE)?;
+        Ok(AcceptedTurn {
+            model: OutputModel::for_profile(&turn.caller, ids.output_id, profile, false),
             ids,
             temporary,
+            tools_enabled: turn.tools_enabled,
             question: input.text.clone(),
             needs_web: input.needs_web,
             web_mode: web_mode(&input.web_mode),
@@ -291,7 +332,7 @@ impl Run {
             history,
             temporary_files,
             continuation: None,
-        }
+        })
     }
     /// All files of the chat are candidates, ranked by BM25 (14.3, 7.2).
     async fn file_chunks(&self, turn: &Turn) -> (Vec<ContextText>, Vec<SourceNotice>) {
@@ -372,13 +413,15 @@ impl StageServices<Turn> for Run {
         Box::pin(async move {
             match self.accept_turn(&turn).await {
                 Ok(accepted) => {
-                    let _ = self
-                        .ids
-                        .send(Some((accepted.ids.clone(), accepted.temporary)));
-                    // Temporary chats have no reconnect, but can be cancelled.
+                    self.control.set_model_profile(accepted.model.profile());
+                    // Open controls before publishing ids so a client reacting to
+                    // the first SSE event can cancel immediately.
                     self.runtime
                         .controls
                         .open(accepted.ids.output_id, self.control.clone());
+                    let _ = self
+                        .ids
+                        .send(Some((accepted.ids.clone(), accepted.temporary)));
                     turn.accepted = Some(Arc::new(accepted));
                     StageValue::ok(turn)
                 }
@@ -393,6 +436,49 @@ impl StageServices<Turn> for Run {
             turn.files = files;
             let mut value = StageValue::ok(turn);
             value.output.notices = notices;
+            let accepted = value.output.data.accepted.clone().expect("accepted");
+            if accepted.model.profile().uses_prism() && !accepted.images.is_empty() {
+                if *self.cancel.borrow() {
+                    value.status = StageStatus::Cancelled;
+                    return value;
+                }
+                let vision_model = accepted.model.clone().with_profile(
+                    crate::domain::models::model_profile::ModelProfile::CortexT0,
+                    true,
+                );
+                match self
+                    .runtime
+                    .thinking
+                    .describe_images_for_text_profile(
+                        &vision_model,
+                        &accepted.question,
+                        &value.output.data.files,
+                        accepted.images.clone(),
+                        value.output.data.token_budget.clone(),
+                        &self.events,
+                        self.cancel.clone(),
+                    )
+                    .await
+                {
+                    Ok((description, call)) => {
+                        if !description.trim().is_empty() {
+                            value.output.data.files.push(ContextText {
+                                label: "Image description".into(),
+                                source: None,
+                                text: description,
+                            });
+                        }
+                        value.output.calls.push(call);
+                    }
+                    Err(crate::domain::models::driver::DriverError::Cancelled) => {
+                        value.status = StageStatus::Cancelled;
+                    }
+                    Err(crate::domain::models::driver::DriverError::InvalidInput) => {
+                        value.status = StageStatus::Failed(process_numbers::INPUT_TOKEN_LIMIT);
+                    }
+                    Err(error) => value.status = driver_status(error),
+                }
+            }
             value
         })
     }
@@ -477,6 +563,8 @@ impl StageServices<Turn> for Run {
             let assembled = context::assemble(
                 &self.runtime.config,
                 ContextInput {
+                    context_tokens: Some(accepted.model.context_tokens(&self.runtime.config)),
+                    output_tokens: Some(accepted.model.max_output_tokens(&self.runtime.config)),
                     question: accepted.question.clone(),
                     thinking: accepted.thinking,
                     history: accepted.history.clone(),
@@ -523,8 +611,14 @@ impl StageServices<Turn> for Run {
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
-                        images: accepted.images.clone(),
+                        images: if accepted.model.profile().uses_prism() {
+                            vec![]
+                        } else {
+                            accepted.images.clone()
+                        },
                         prefix: None,
+                        tools_enabled: accepted.tools_enabled,
+                        budget: turn.token_budget.clone(),
                     },
                     &self.events,
                     self.stop.clone(),
@@ -556,19 +650,28 @@ impl StageServices<Turn> for Run {
                 // Clients show the saved prefix first, then the new tokens.
                 self.events.send(NativeEvent::Token(c.prefix.clone()));
             }
+            let mut tool_results = self.tool_results.lock().await;
             let outcome = self
                 .runtime
                 .thinking
-                .answer(
+                .answer_with_tools(
                     &ThinkingInput {
                         model: &accepted.model,
                         context: &context,
-                        images: accepted.images.clone(),
+                        images: if accepted.model.profile().uses_prism() {
+                            vec![]
+                        } else {
+                            accepted.images.clone()
+                        },
                         prefix: continuation.as_ref().map(|c| c.prefix.clone()),
+                        tools_enabled: accepted.tools_enabled,
+                        budget: turn.token_budget.clone(),
                     },
                     thinking.as_deref().unwrap_or(&empty),
                     &self.events,
                     self.cancel.clone(),
+                    &self.control.tools,
+                    &mut tool_results,
                 )
                 .await;
             match outcome {
@@ -722,30 +825,64 @@ impl ChatRuntime {
             let (ids_tx, ids_rx) = watch::channel::<Option<(InputIds, bool)>>(None);
             let (cancel_tx, cancel) = watch::channel(false);
             let (stop_tx, stop) = watch::channel(false);
-            let control = crate::domain::services::output_controls::Control {
-                cancel: Arc::new(cancel_tx),
-                stop_thinking: Arc::new(stop_tx),
-                live: tokio::sync::broadcast::channel(runtime.config.event_read_batch.max(1)).0,
-            };
+            let (tool_result_tx, tool_results) = mpsc::unbounded_channel();
+            let control = crate::domain::services::output_controls::Control::new(
+                Arc::new(cancel_tx),
+                Arc::new(stop_tx),
+                tokio::sync::broadcast::channel(runtime.config.event_read_batch.max(1)).0,
+                crate::domain::models::tools::ToolControl::new(tool_result_tx),
+            );
             let live = control.live.clone();
             let journal = runtime.journal.clone();
             let deliver = tokio::spawn(async move {
                 let mut ids_rx = ids_rx;
+                let mut ids_open = true;
+                let mut accepted: Option<(InputIds, bool)> = None;
+                let mut first_ids_attached = false;
                 let mut pending = vec![];
-                while let Some(event) = output.recv().await {
-                    if let Some(stream) = &stream {
-                        let _ = stream.send(event.clone());
-                    }
-                    pending.push(event);
-                    let ids = ids_rx.borrow_and_update().clone();
-                    // Temporary chats have no reconnect (10.4.8).
-                    if let Some((ids, false)) = ids {
-                        for event in pending.drain(..) {
-                            let stored = StoredEvent::from(&event);
-                            let _ = journal.append(ids.output_id, &stored).await;
-                            // Live after the journal, so a reconnect misses nothing.
-                            let _ = live.send(stored);
+                loop {
+                    tokio::select! {
+                        maybe = output.recv() => match maybe {
+                            Some(event) => pending.push(event),
+                            None => break,
+                        },
+                        res = ids_rx.changed(), if ids_open => {
+                            if res.is_err() {
+                                ids_open = false;
+                            }
                         }
+                    }
+                    if accepted.is_none() {
+                        accepted = ids_rx.borrow_and_update().clone();
+                    }
+                    if let Some((ref ids, temporary)) = accepted {
+                        for mut event in pending.drain(..) {
+                            if !first_ids_attached
+                                && let NativeEvent::Stage(stage) = &mut event.event
+                            {
+                                stage.session_id = Some(ids.session_id);
+                                stage.output_id = Some(ids.output_id);
+                                first_ids_attached = true;
+                            }
+                            if let Some(stream) = &stream {
+                                let _ = stream.send(event.clone());
+                            }
+                            // Temporary chats have no reconnect (10.4.8).
+                            if !temporary {
+                                let stored = StoredEvent::from(&event);
+                                let _ = journal.append(ids.output_id, &stored).await;
+                                // Live after the journal, so a reconnect misses nothing.
+                                let _ = live.send(stored);
+                            }
+                        }
+                    }
+                }
+                // Rejected turns never set ids; flush their stage/error events without ids.
+                if accepted.is_none()
+                    && let Some(stream) = &stream
+                {
+                    for event in pending.drain(..) {
+                        let _ = stream.send(event);
                     }
                 }
             });
@@ -756,6 +893,7 @@ impl ChatRuntime {
                 stop,
                 ids: ids_tx,
                 control,
+                tool_results: tokio::sync::Mutex::new(tool_results),
                 finished: Default::default(),
             };
             let reporter = pipeline::StageReporter::new(stage_tx);

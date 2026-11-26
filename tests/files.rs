@@ -443,13 +443,17 @@ async fn temporary_upload_with_redis_down_is_refused_and_not_sent_to_hippocampus
     assert!(double.calls.lock().unwrap().is_empty());
 }
 #[tokio::test]
-#[ignore = "requires approved Valkey; only one unique cortex:temp UUID key is written"]
+#[ignore = "requires CORTEX_TEST_REDIS_URL; only one unique cortex:temp UUID key is written"]
 async fn temporary_upload_stays_in_redis() {
+    dotenvy::dotenv().ok();
+    let Some((url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping temporary_upload_stays_in_redis: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
     let (double, config) = server().await;
-    let url = std::env::var("CORTEX_REDIS_URL").unwrap();
     let user = format!("test-{}", uuid::Uuid::new_v4());
     let (status, body) = upload(
-        app(&config, RedisCache::new(Some(&url), Duration::from_secs(2))),
+        app(&config, cache),
         Some(&user),
         &[
             ("app_id", None, "cortex"),

@@ -91,6 +91,12 @@ pub struct StageProgress {
     /// Present on the first stage event. Null means no completed runs exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_ms: Option<Option<u64>>,
+    /// Present on the first stage event once the input is accepted and saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+    /// Present on the first stage event once the input is accepted and saved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_id: Option<Uuid>,
 }
 impl StageProgress {
     pub fn start(stage: StageName) -> Self {
@@ -101,6 +107,8 @@ impl StageProgress {
             error_number: None,
             notice_number: None,
             expected_ms: None,
+            session_id: None,
+            output_id: None,
         }
     }
     pub fn end(stage: StageName, record: StageRecord) -> Self {
@@ -111,6 +119,8 @@ impl StageProgress {
             error_number: record.error_number,
             notice_number: record.notice_number,
             expected_ms: None,
+            session_id: None,
+            output_id: None,
         }
     }
 }
@@ -148,6 +158,7 @@ pub enum NativeEvent {
         round: u8,
         text: String,
     },
+    ToolCall(crate::domain::models::tools::ToolRequest),
     Token(String),
     Notice(ProcessNumber),
     Error(ProcessNumber),
@@ -166,6 +177,7 @@ impl NativeEvent {
             Self::Sources(_) => "sources",
             Self::Memories(_) => "memories",
             Self::Thinking { .. } => "thinking",
+            Self::ToolCall(_) => "tool_call",
             Self::Token(_) => "token",
             Self::Notice(_) => "notice",
             Self::Error(_) => "error",
@@ -185,6 +197,7 @@ impl NativeEvent {
             Self::Sources(_) => "Sources found",
             Self::Memories(_) => "Memories used",
             Self::Thinking { .. } => "Thinking",
+            Self::ToolCall(_) => "Tool requested",
             Self::Token(_) => "Answer text",
             Self::Notice(p) | Self::Error(p) => p.message,
             Self::Done { .. } => "Output complete",
@@ -198,6 +211,7 @@ impl NativeEvent {
             Self::Sources(s) => json!({"sources":s}),
             Self::Memories(m) => json!({"memories":m}),
             Self::Thinking { role, round, text } => json!({"role":role,"round":round,"text":text}),
+            Self::ToolCall(request) => to_value(request).expect("tool request serializes"),
             Self::Token(text) => json!({"text":text}),
             Self::Notice(p) => json!({"notice_number":p.number}),
             Self::Error(p) => json!({"error_number":p.number}),

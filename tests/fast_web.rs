@@ -156,9 +156,11 @@ impl ModelDriver for AnswerDouble {
                     started_at: started,
                     finished_at: started,
                 },
+                usage_measured: true,
                 error: None,
                 load_ms: 0,
                 tokens_per_second: None,
+                tool_request: None,
             })
         })
     }
@@ -232,7 +234,10 @@ async fn fast_gather_assembly_one_answer_and_native_source_events() {
                 images: vec![],
                 temperature: 0.0,
                 max_tokens: 1024,
+                context_tokens: Config::default().model_context_tokens as u32,
                 prefix: None,
+                allow_tools: false,
+                tool_history: vec![],
             },
             tx,
             signal,

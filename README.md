@@ -29,12 +29,41 @@ for rollback. A database restore is required before starting Hippo v1 again.
 
 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`.
 Ignored tests need explicit local dependencies or the approved MSI GPU window.
-They use test stores. Local reports and benchmark data stay under ignored `docs/`.
+They use test stores. Cache integration tests read only `CORTEX_TEST_REDIS_URL`
+(set to a separate test cache index or a local throwaway Valkey via
+`scripts/setup-test-valkey.sh`, never `CORTEX_REDIS_URL`) and skip when unset.
+Local reports and benchmark data stay under ignored `docs/`.
 
 The shield uses deterministic EN/PT/TH rules and the publisher ProtectAI
 `deberta-v3-base-prompt-injection-v2` ONNX model on CPU. Its Apache-2.0 model
 is English-focused, and the publisher project is archived. No multilingual or
 jailbreak detection guarantee is made. Missing model files fail closed.
+
+## Optional Bonsai profiles
+
+Bonsai 2.5 T1 is disabled by default. To enable it, set the service-only
+`CORTEX_BONSAI_ENABLED=true`; clients cannot choose a runtime endpoint or model
+file. The API starts one owned Prism `llama-server` on loopback when a T1 chat
+needs it, then stops it before local T0 inference or Whisper uses the GPU.
+Omitted model selection defaults to the evaluated AtomicChat uncensored profile;
+the official profile remains selectable. Both profiles use text-only native
+calls. On T1 image requests, one bounded call through the existing T0 vision
+route adds a description before context assembly; every T1 call receives no
+image payload. T0 image requests keep their existing route.
+
+Provision the pinned local files before enabling T1:
+
+| Path | SHA-256 |
+| --- | --- |
+| `models/prism/llama-server` | `89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c` |
+| `models/bonsai/bonsai25-atomicchat-uncensored-PTQ1_0.gguf` | `f6b5f856c3981ff5ba1db1ce13cdf1ca85f2f701d26ce287e03983b659b681b4` |
+| `models/bonsai/bonsai25-official-PTQ1_0-mtp.gguf` | `e0fc5f3d47b9c926d52677d303b19df356a2376614b3e1cb9973865fc04ca431` |
+
+The official profile uses the measured MTP export. The loader checks each
+artifact hash before spawning the single fixed Prism command. Unknown profile
+IDs, mismatched artifacts, failed readiness checks, and disabled T1 selection
+fail closed. `install.sh --prepare` and `--check` verify these files when T1 is
+enabled; neither command starts the model or changes a service.
 
 Plain labelled context is the default selected by the fixed real-model experiment.
 JSON and TOON remain configurable for model context. Service traffic stays JSON.

@@ -14,6 +14,44 @@ exec 9>var/deploy.lock
 flock -n 9 || { printf 'Another deployment is in progress.\n' >&2; exit 1; }
 binaries=(cortex-api)
 units=(cortex-api)
+verify_bonsai_assets() {
+  local enabled=false
+  local enabled_value=${CORTEX_BONSAI_ENABLED:-}
+  if [ "${enabled_value,,}" = true ]; then enabled=true; fi
+  if [ -f .env ] && python3 -c 'import pathlib,sys; sys.exit(0 if any((p:=line.partition("="))[0].strip()=="CORTEX_BONSAI_ENABLED" and p[2].strip().strip(chr(34)+chr(39)).lower()=="true" for line in pathlib.Path(sys.argv[1]).read_text().splitlines()) else 1)' .env; then
+    enabled=true
+  fi
+  local paths=(
+    models/prism/llama-server
+    models/bonsai/bonsai25-atomicchat-uncensored-PTQ1_0.gguf
+    models/bonsai/bonsai25-official-PTQ1_0-mtp.gguf
+  )
+  local hashes=(
+    89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c
+    f6b5f856c3981ff5ba1db1ce13cdf1ca85f2f701d26ce287e03983b659b681b4
+    e0fc5f3d47b9c926d52677d303b19df356a2376614b3e1cb9973865fc04ca431
+  )
+  for index in "${!paths[@]}"; do
+    path=${paths[$index]}
+    if [ ! -f "$path" ]; then
+      if [ "$enabled" = true ]; then
+        printf 'Bonsai is enabled, but required artifact is missing: %s\n' "$path" >&2
+        return 1
+      fi
+      continue
+    fi
+    actual=$(sha256sum "$path" | cut -d ' ' -f1)
+    if [ "$actual" != "${hashes[$index]}" ]; then
+      printf 'Bonsai artifact hash mismatch: %s\n' "$path" >&2
+      return 1
+    fi
+    if [ "$index" = 0 ] && [ ! -x "$path" ]; then
+      printf 'Prism server is not executable: %s\n' "$path" >&2
+      return 1
+    fi
+  done
+}
+verify_bonsai_assets
 source_hash() {
   git ls-files -z -- Cargo.toml Cargo.lock build.rs src migrations .cargo "scripts/install.sh" |
     LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f1

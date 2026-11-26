@@ -1,9 +1,11 @@
 pub mod balancer;
+pub mod community_research;
 pub mod files;
 pub mod identity;
 pub mod input_guard;
 pub mod memory_graph;
 pub mod memory_overview;
+pub mod openalex;
 pub mod output_controls;
 pub mod personas;
 pub mod pipeline;
@@ -34,9 +36,14 @@ pub mod queries;
 
 pub mod robots;
 
+pub mod agent_runs;
 pub mod crawler;
 pub mod extraction;
 pub mod recall;
+pub mod remote_cli;
+pub mod research_catalog;
+pub mod research_limits;
+pub mod research_router;
 pub mod run_evidence;
 pub mod telemetry_reads;
 pub mod temporary;

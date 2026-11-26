@@ -18,6 +18,7 @@ pub enum TurnRequest {
 pub struct AcceptedTurn {
     pub ids: InputIds,
     pub temporary: bool,
+    pub tools_enabled: bool,
     pub question: String,
     pub needs_web: bool,
     pub web_mode: WebMode,
@@ -39,9 +40,9 @@ impl AcceptedTurn {
     pub fn with_persona(self, persona_id: Option<String>) -> Self {
         Self { persona_id, ..self }
     }
-    pub fn with_images(self, caller: &Caller, images: Vec<String>) -> Self {
+    pub fn with_images(self, _caller: &Caller, images: Vec<String>) -> Self {
         Self {
-            model: OutputModel::new(caller, self.ids.output_id, !images.is_empty()),
+            model: self.model.clone().with_images(!images.is_empty()),
             images,
             ..self
         }
@@ -51,6 +52,7 @@ impl AcceptedTurn {
 #[derive(Clone)]
 pub struct Turn {
     pub caller: Caller,
+    pub tools_enabled: bool,
     pub request: Arc<TurnRequest>,
     pub accepted: Option<Arc<AcceptedTurn>>,
     pub files: Vec<ContextText>,
@@ -65,11 +67,13 @@ pub struct Turn {
     pub answer: String,
     pub inspection: Option<Arc<crate::domain::models::inspection::AnswerInspection>>,
     pub personas: crate::domain::services::personas::PersonaContext,
+    pub token_budget: Option<Arc<crate::domain::models::thinking::TokenBudget>>,
 }
 impl Turn {
     pub fn new(caller: Caller, request: TurnRequest) -> Self {
         Self {
             caller,
+            tools_enabled: false,
             request: Arc::new(request),
             accepted: None,
             files: vec![],
@@ -84,6 +88,7 @@ impl Turn {
             answer: String::new(),
             inspection: None,
             personas: Default::default(),
+            token_budget: None,
         }
     }
     pub fn accepted(&self) -> &AcceptedTurn {
@@ -93,6 +98,11 @@ impl Turn {
 impl crate::domain::models::pipeline::PipelineData for Turn {
     fn thinking(&self) -> bool {
         self.accepted.as_ref().is_some_and(|a| a.thinking)
+    }
+    fn files_before_other_gather(&self) -> bool {
+        self.accepted.as_ref().is_some_and(|accepted| {
+            accepted.model.profile().uses_prism() && !accepted.images.is_empty()
+        })
     }
     fn merge_gather(previous: &Self, files: Self, memory: Self, web: Self) -> Self {
         let mut data = previous.clone();

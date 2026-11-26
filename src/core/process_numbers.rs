@@ -212,6 +212,42 @@ pub const FILE_WORKER_FAILED: ProcessNumber = ProcessNumber {
     number: 1050,
     message: "The file worker did not answer",
 };
+pub const REMOTE_SESSION_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1051,
+    message: "The remote session was not found",
+};
+pub const REMOTE_SESSION_FORBIDDEN: ProcessNumber = ProcessNumber {
+    number: 1052,
+    message: "The remote session belongs to another user",
+};
+pub const REMOTE_APPROVAL_ANSWERED: ProcessNumber = ProcessNumber {
+    number: 1053,
+    message: "The approval request was already answered",
+};
+pub const REMOTE_CLI_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1054,
+    message: "The remote session store is not available",
+};
+pub const WEB_SOURCE_BLOCKED: ProcessNumber = ProcessNumber {
+    number: 1055,
+    message: "The web source blocked access",
+};
+pub const WEB_RATE_LIMITED: ProcessNumber = ProcessNumber {
+    number: 1056,
+    message: "The web source rate limit was reached",
+};
+pub const AGENT_RUN_NOT_FOUND: ProcessNumber = ProcessNumber {
+    number: 1057,
+    message: "The child run or action was not found",
+};
+pub const AGENT_RUN_CONFLICT: ProcessNumber = ProcessNumber {
+    number: 1058,
+    message: "The child run or action is no longer pending",
+};
+pub const MODEL_UNAVAILABLE: ProcessNumber = ProcessNumber {
+    number: 1059,
+    message: "The selected model profile is unavailable",
+};
 pub const REGISTRY: &[ProcessNumber] = &[
     NOT_FOUND,
     WRONG_METHOD,
@@ -264,6 +300,15 @@ pub const REGISTRY: &[ProcessNumber] = &[
     AUDIO_LIMIT,
     AUDIO_FAILED,
     FILE_WORKER_FAILED,
+    REMOTE_SESSION_NOT_FOUND,
+    REMOTE_SESSION_FORBIDDEN,
+    REMOTE_APPROVAL_ANSWERED,
+    REMOTE_CLI_UNAVAILABLE,
+    WEB_SOURCE_BLOCKED,
+    WEB_RATE_LIMITED,
+    AGENT_RUN_NOT_FOUND,
+    AGENT_RUN_CONFLICT,
+    MODEL_UNAVAILABLE,
 ];
 
 pub fn for_status(status: StatusCode) -> ProcessNumber {

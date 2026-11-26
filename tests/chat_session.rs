@@ -94,13 +94,13 @@ fn ids_attribution_files_and_temporary_never_prepare_for_sql() {
     assert_eq!(prepared.output.status, "running");
     assert!(prepared.output.text.is_empty());
     let chat = prepared.new_chat.unwrap();
-    let follow = continue_permanent(&actor, &chat, next("next"), &[], now)
+    let follow = continue_permanent(&config, &actor, &chat, next("next"), &[], now)
         .unwrap_or_else(|_| panic!("continuation failed"));
     assert_eq!(follow.input.session_id, chat.session_id);
     assert!(follow.new_chat.is_none());
     let mut wrong = actor.clone();
     wrong.user_id = Some("user-b".into());
-    assert!(continue_permanent(&wrong, &chat, next("next"), &[], now).is_err());
+    assert!(continue_permanent(&config, &wrong, &chat, next("next"), &[], now).is_err());
     let mut unknown = new("question");
     unknown.app_id = "unknown".into();
     assert_eq!(
@@ -127,6 +127,36 @@ fn ids_attribution_files_and_temporary_never_prepare_for_sql() {
     assert_eq!(prepared.files[0].memory_id, "memory");
     assert_eq!(prepared.new_chat.unwrap().title, "name.txt");
 }
+
+#[test]
+fn tier_one_profiles_survive_preparation_and_invalid_stored_ids_fail_closed() {
+    let config = Config {
+        bonsai_enabled: true,
+        ..Config::default()
+    };
+    let actor = caller();
+    let now = Utc::now();
+    let uncensored = new_permanent(&config, &actor, new("new default"), &[], now).unwrap();
+    assert_eq!(uncensored.input.model_id, "bonsai25-uncensored");
+    assert_eq!(
+        uncensored.new_chat.as_ref().unwrap().model_id,
+        "bonsai25-uncensored"
+    );
+    let mut chat = uncensored.new_chat.unwrap();
+    chat.model_id = "bonsai25-official".into();
+    let inherited = continue_permanent(&config, &actor, &chat, next("continue"), &[], now).unwrap();
+    assert_eq!(inherited.input.model_id, "bonsai25-official");
+    let mut invalid = chat;
+    invalid.model_id = "unknown-model".into();
+    assert_eq!(
+        continue_permanent(&config, &actor, &invalid, next("continue"), &[], now)
+            .err()
+            .unwrap()
+            .number,
+        cortex_api::core::process_numbers::MODEL_UNAVAILABLE.number
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires cortex_api_test; uses a unique temporary schema"]
 async fn create_continue_and_failure_are_atomic_and_scoped() {
@@ -148,20 +178,67 @@ async fn create_continue_and_failure_are_atomic_and_scoped() {
     let migrations = sqlx::migrate!();
     migrations.run(&pool).await.unwrap();
     let repo = Chats { pool: pool.clone() };
-    let config = Config::default();
+    let config = Config {
+        bonsai_enabled: true,
+        ..Config::default()
+    };
     let actor = caller();
     let now = Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap();
+    let legacy_session = Uuid::now_v7();
+    let legacy_input = Uuid::now_v7();
+    sqlx::query("INSERT INTO chats(session_id,app_id,user_id,title,is_pinned,created_at,updated_at) VALUES($1,'cortex','user-a','legacy',false,$2,$2)")
+        .bind(legacy_session).bind(now).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO chat_inputs(input_id,session_id,text,needs_web,web_mode,use_memory,thinking,created_at) VALUES($1,$2,'legacy',false,'fast',false,false,$3)")
+        .bind(legacy_input).bind(legacy_session).bind(now).execute(&pool).await.unwrap();
+    assert_eq!(
+        repo.chat(&actor.storage_scope(), legacy_session)
+            .await
+            .unwrap()
+            .unwrap()
+            .model_id,
+        "cortex-t0"
+    );
+    assert_eq!(
+        repo.input(&actor.storage_scope(), legacy_input)
+            .await
+            .unwrap()
+            .unwrap()
+            .model_id,
+        "cortex-t0"
+    );
+    sqlx::query("DELETE FROM chats WHERE session_id=$1")
+        .bind(legacy_session)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let baseline_input_count: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_inputs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        baseline_input_count, 0,
+        "deleting the legacy chat cascades its input"
+    );
     let mut body = new("first question");
     body.persona_id = Some("bot-persona".into());
     let first =
         new_permanent(&config, &actor, body, &[], now).unwrap_or_else(|_| panic!("prepare failed"));
     repo.save_accepted(&first).await.unwrap();
-    let chat = repo
+    let mut chat = repo
         .chat(&actor.storage_scope(), first.input.session_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(chat.persona_id.as_deref(), Some("bot-persona"));
+    assert_eq!(chat.model_id, "bonsai25-uncensored");
+    assert_eq!(
+        repo.input(&actor.storage_scope(), first.input.input_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .model_id,
+        "bonsai25-uncensored"
+    );
     assert_eq!(
         repo.output(&actor.storage_scope(), first.output.output_id)
             .await
@@ -171,9 +248,27 @@ async fn create_continue_and_failure_are_atomic_and_scoped() {
         "running"
     );
     let later = now + chrono::Duration::seconds(1);
-    let follow = continue_permanent(&actor, &chat, next("second question"), &[], later)
+    let mut official_next = next("second question");
+    official_next.model_id =
+        Some(cortex_api::domain::models::model_profile::ModelProfile::Bonsai25Official);
+    let follow = continue_permanent(&config, &actor, &chat, official_next, &[], later)
         .unwrap_or_else(|_| panic!("prepare failed"));
     repo.save_accepted(&follow).await.unwrap();
+    let switched = repo
+        .chat(&actor.storage_scope(), chat.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(switched.model_id, "bonsai25-official");
+    chat = switched;
+    assert_eq!(
+        repo.input(&actor.storage_scope(), follow.input.input_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .model_id,
+        "bonsai25-official"
+    );
     assert_eq!(
         repo.chat(&actor.storage_scope(), chat.session_id)
             .await
@@ -206,13 +301,27 @@ async fn create_continue_and_failure_are_atomic_and_scoped() {
             .unwrap()
             .is_none()
     );
+    // The legacy input was removed with its parent chat above (CASCADE); at
+    // this point only the initial and official follow-up inputs may remain.
+    let persisted_input_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT input_id FROM chat_inputs WHERE session_id=$1 ORDER BY created_at",
+    )
+    .bind(chat.session_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        persisted_input_ids,
+        vec![first.input.input_id, follow.input.input_id]
+    );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_inputs")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count, 2);
-    let older = continue_permanent(&actor, &chat, next("older clock"), &[], now)
+    assert_eq!(count, baseline_input_count + 2);
+    let older = continue_permanent(&config, &actor, &chat, next("older clock"), &[], now)
         .unwrap_or_else(|_| panic!("prepare failed"));
+    assert_eq!(older.input.model_id, "bonsai25-official");
     repo.save_accepted(&older).await.unwrap();
     assert_eq!(
         repo.chat(&actor.storage_scope(), chat.session_id)

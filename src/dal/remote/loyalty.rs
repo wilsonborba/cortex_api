@@ -54,6 +54,7 @@ impl SupabaseClient {
         }
         Ok(Self {
             client: reqwest::Client::builder()
+                .use_rustls_tls()
                 .timeout(config.loyalty_source_timeout)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()

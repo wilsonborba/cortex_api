@@ -28,6 +28,17 @@ struct RunningModels {
 struct Message {
     #[serde(default)]
     content: String,
+    #[serde(default)]
+    tool_calls: Vec<ProviderToolCall>,
+}
+#[derive(Deserialize)]
+struct ProviderToolCall {
+    function: ProviderFunction,
+}
+#[derive(Deserialize)]
+struct ProviderFunction {
+    name: String,
+    arguments: Value,
 }
 #[derive(Default, Deserialize)]
 struct Frame {
@@ -47,6 +58,7 @@ pub struct Ollama {
     client: reqwest::Client,
     config: Config,
     queue: Scheduler,
+    prism_supervisor: Option<std::sync::Arc<super::prism_supervisor::PrismSupervisor>>,
 }
 struct Collected {
     text: String,
@@ -59,17 +71,27 @@ struct Collected {
     inspection_limit: usize,
     probabilities: bool,
     option_rejected: bool,
+    tool_request: Option<crate::domain::models::tools::ToolRequest>,
 }
 impl Ollama {
     pub fn new(config: Config, queue: Scheduler) -> Self {
         Self {
             client: reqwest::Client::builder()
+                .use_rustls_tls()
                 .connect_timeout(config.ollama_connect_timeout)
                 .build()
                 .expect("Ollama client"),
             config,
             queue,
+            prism_supervisor: None,
         }
+    }
+    pub fn with_prism_supervisor(
+        mut self,
+        supervisor: std::sync::Arc<super::prism_supervisor::PrismSupervisor>,
+    ) -> Self {
+        self.prism_supervisor = Some(supervisor);
+        self
     }
     async fn post(&self, path: &str, body: &Value) -> Result<reqwest::Response, DriverError> {
         self.post_to(&self.config.ollama_url, path, body).await
@@ -92,12 +114,39 @@ impl Ollama {
         }
         Ok(response)
     }
+    async fn running_models(&self) -> Result<RunningModels, DriverError> {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let response = self
+                .client
+                .get(format!(
+                    "{}/api/ps",
+                    self.config.ollama_url.trim_end_matches('/')
+                ))
+                .send()
+                .await
+                .map_err(|_| DriverError::Ollama)?;
+            if !response.status().is_success() {
+                return Err(DriverError::Ollama);
+            }
+            let bytes = response.bytes().await.map_err(|_| DriverError::Ollama)?;
+            if bytes.len() > 64 * 1024 {
+                return Err(DriverError::Ollama);
+            }
+            serde_json::from_slice(&bytes).map_err(|_| DriverError::Ollama)
+        })
+        .await
+        .map_err(|_| DriverError::Ollama)?
+    }
     async fn prepare(
         &self,
         _permit: &Permit,
         model: &str,
+        context_tokens: u32,
         events: &mpsc::UnboundedSender<DriverEvent>,
     ) -> Result<u64, DriverError> {
+        if let Some(supervisor) = &self.prism_supervisor {
+            supervisor.stop().await?;
+        }
         let response = self
             .client
             .get(format!(
@@ -113,7 +162,7 @@ impl Ollama {
         let loaded: RunningModels = response.json().await.map_err(|_| DriverError::Ollama)?;
         if loaded.models.len() == 1
             && loaded.models[0].name == model
-            && loaded.models[0].context_length == Some(self.config.model_context_tokens)
+            && loaded.models[0].context_length == Some(u64::from(context_tokens))
         {
             let _ = events.send(DriverEvent::ModelReady {
                 model: model.into(),
@@ -132,7 +181,7 @@ impl Ollama {
             )
             .await?;
         }
-        let response=self.post("/api/generate",&json!({"model":model,"keep_alive":self.config.ollama_keep_alive,"stream":false,"options":{"num_ctx":self.config.model_context_tokens}})).await?;
+        let response=self.post("/api/generate",&json!({"model":model,"keep_alive":self.config.ollama_keep_alive,"stream":false,"options":{"num_ctx":context_tokens}})).await?;
         let value: Value = response.json().await.map_err(|_| DriverError::Ollama)?;
         if value.get("error").is_some_and(|v| !v.is_null()) {
             return Err(DriverError::Ollama);
@@ -145,27 +194,73 @@ impl Ollama {
         Ok(load_ms)
     }
     pub async fn release_models_for_local_job(&self, _permit: &Permit) -> Result<(), DriverError> {
-        let response = self
-            .client
-            .get(format!(
-                "{}/api/ps",
-                self.config.ollama_url.trim_end_matches('/')
-            ))
-            .send()
+        if let Some(supervisor) = &self.prism_supervisor {
+            supervisor.stop().await?;
+        }
+        self.unload_models(None).await
+    }
+    /// Unload local Ollama models while preserving a same-profile Prism server.
+    pub async fn release_models_for_prism_transition(
+        &self,
+        _permit: &Permit,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> Result<(), DriverError> {
+        self.unload_models(Some(cancel)).await
+    }
+    async fn unload_models(
+        &self,
+        cancel: Option<&mut watch::Receiver<bool>>,
+    ) -> Result<(), DriverError> {
+        const SETTLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        let deadline = tokio::time::Instant::now() + SETTLE_LIMIT;
+        let mut cancellation_requested = cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+        if cancellation_requested {
+            return Err(DriverError::Cancelled);
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let models = tokio::time::timeout(left, self.running_models())
             .await
-            .map_err(|_| DriverError::Ollama)?;
-        if !response.status().is_success() {
-            return Err(DriverError::Ollama);
-        }
-        let models: RunningModels = response.json().await.map_err(|_| DriverError::Ollama)?;
+            .map_err(|_| DriverError::Ollama)??;
+        cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
         for model in models.models {
-            self.post(
-                "/api/generate",
-                &json!({"model":model.name,"keep_alive":0,"stream":false}),
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
+            tokio::time::timeout(
+                left,
+                self.post(
+                    "/api/generate",
+                    &json!({"model":model.name,"keep_alive":0,"stream":false}),
+                ),
             )
-            .await?;
+            .await
+            .map_err(|_| DriverError::Ollama)??;
         }
-        Ok(())
+        loop {
+            cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
+            let remaining = tokio::time::timeout(left, self.running_models())
+                .await
+                .map_err(|_| DriverError::Ollama)??;
+            cancellation_requested |= cancel.as_ref().is_some_and(|receiver| *receiver.borrow());
+            if remaining.models.is_empty() {
+                return if cancellation_requested {
+                    Err(DriverError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(DriverError::Ollama);
+            }
+            tokio::time::sleep(POLL_INTERVAL.min(left)).await;
+        }
     }
     fn frame(
         &self,
@@ -174,6 +269,7 @@ impl Ollama {
         role: &str,
         events: &mpsc::UnboundedSender<DriverEvent>,
         start: Instant,
+        allow_tools: bool,
     ) -> Result<bool, DriverError> {
         let frame: Frame = serde_json::from_slice(line).map_err(|_| DriverError::Ollama)?;
         if role == "answer" {
@@ -186,7 +282,29 @@ impl Ollama {
                 collected.text.is_empty() && probability_option_error(&error);
             return Err(DriverError::Ollama);
         }
-        let content = frame.message.map(|m| m.content).or(frame.response);
+        let content = if let Some(message) = frame.message {
+            if !message.tool_calls.is_empty() {
+                if !allow_tools || message.tool_calls.len() != 1 || collected.tool_request.is_some()
+                {
+                    return Err(DriverError::InvalidInput);
+                }
+                let call = message
+                    .tool_calls
+                    .into_iter()
+                    .next()
+                    .expect("one tool call");
+                collected.tool_request = Some(
+                    crate::domain::models::tools::ToolRequest::from_provider(
+                        &call.function.name,
+                        call.function.arguments,
+                    )
+                    .map_err(|_| DriverError::InvalidInput)?,
+                );
+            }
+            Some(message.content)
+        } else {
+            frame.response
+        };
         if let Some(content) = content
             && !content.is_empty()
         {
@@ -245,7 +363,7 @@ impl Ollama {
         start: Instant,
     ) -> Result<(), DriverError> {
         collected.sent = true;
-        let options = json!({"num_ctx":self.config.model_context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens});
+        let options = json!({"num_ctx":input.context_tokens,"temperature":input.temperature,"num_predict":input.max_tokens});
         // A continuation (cortex_api#125) must extend the saved prefix. Chat
         // templates close the assistant turn, so a raw ChatML prompt is used.
         let (path, mut body) = match &input.prefix {
@@ -259,12 +377,22 @@ impl Ollama {
                     messages.push(json!({"role":"system","content":input.system}));
                 }
                 messages.push(json!({"role":"user","content":input.prompt,"images":input.images}));
+                for exchange in &input.tool_history {
+                    messages.push(json!({"role":"assistant","content":"","tool_calls":[{"function":{"name":exchange.request.name.as_str(),"arguments":exchange.request.arguments}}]}));
+                    messages.push(json!({"role":"tool","tool_name":exchange.request.name.as_str(),"content":exchange.output}));
+                }
                 (
                     "/api/chat",
                     json!({"model":model,"messages":messages,"stream":true,"keep_alive":self.config.ollama_keep_alive,"options":options}),
                 )
             }
         };
+        if input.allow_tools && input.role == "answer" && input.prefix.is_none() {
+            // Tool-call argument objects are provider-complete, never streamed fragments.
+            body["stream"] = json!(false);
+            body["tools"] = crate::domain::models::tools::provider_definitions();
+            collected.probabilities = false;
+        }
         if input.role == "answer" && collected.probabilities {
             body["logprobs"] = json!(true);
             body["top_logprobs"] = json!(crate::domain::models::inspection::ALTERNATIVES);
@@ -324,13 +452,27 @@ impl Ollama {
                 if line.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
-                if self.frame(&line, collected, &input.role, events, start)? {
+                if self.frame(
+                    &line,
+                    collected,
+                    &input.role,
+                    events,
+                    start,
+                    input.allow_tools,
+                )? {
                     return Ok(());
                 }
             }
         }
         if !buffer.iter().all(u8::is_ascii_whitespace)
-            && self.frame(&buffer, collected, &input.role, events, start)?
+            && self.frame(
+                &buffer,
+                collected,
+                &input.role,
+                events,
+                start,
+                input.allow_tools,
+            )?
         {
             return Ok(());
         }
@@ -386,6 +528,7 @@ impl ModelDriver for Ollama {
                 || input.max_tokens == 0
                 || u64::from(input.max_tokens) > self.config.model_context_tokens
                 || (!output.is_vision() && !input.images.is_empty())
+                || (input.allow_tools && input.role != "answer")
             {
                 return Err(DriverError::InvalidInput);
             }
@@ -418,8 +561,9 @@ impl ModelDriver for Ollama {
                 inspection_limit: input.max_tokens as usize,
                 probabilities: true,
                 option_rejected: false,
+                tool_request: None,
             };
-            let result = tokio::select! {biased;_=cancelled(&mut cancel)=>Err(DriverError::Cancelled),result=async{if let Some(permit)=&permit{load_ms=self.prepare(permit,model,&events).await?;}self.generate(&base,model,&input,&events,&mut collected,start).await}=>result};
+            let result = tokio::select! {biased;_=cancelled(&mut cancel)=>Err(DriverError::Cancelled),result=async{if let Some(permit)=&permit{load_ms=self.prepare(permit,model,input.context_tokens,&events).await?;}self.generate(&base,model,&input,&events,&mut collected,start).await}=>result};
             let finished_at = Utc::now();
             let input_tokens = collected.prompt.unwrap_or_else(|| {
                 if collected.sent {
@@ -430,6 +574,7 @@ impl ModelDriver for Ollama {
                     0
                 }
             });
+            let usage_measured = collected.prompt.is_some() && collected.tokens.is_some();
             let output_tokens = collected
                 .tokens
                 .unwrap_or_else(|| self.config.estimate_tokens(&collected.text));
@@ -480,6 +625,8 @@ impl ModelDriver for Ollama {
                 error: result.err(),
                 load_ms,
                 tokens_per_second,
+                tool_request: collected.tool_request,
+                usage_measured,
             })
         })
     }

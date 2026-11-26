@@ -29,7 +29,10 @@ async fn measure_8192_context_through_the_real_queue() {
         is_admin: false,
     };
     let queue_id = format!("test-model-{}", Uuid::new_v4().simple());
-    let cache = RedisCache::from_environment();
+    let Some((test_redis_url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!("Skipping ollama_msi cache check: CORTEX_TEST_REDIS_URL is not set");
+        return;
+    };
     let store = Arc::new(RunStore::from_environment(RunDatabase::Test).unwrap());
     store.initialize().await.unwrap();
     let ledger = Arc::new(RedisLedger::new(
@@ -71,7 +74,10 @@ async fn measure_8192_context_through_the_real_queue() {
             },
             temperature: 0.0,
             max_tokens: 128,
+            context_tokens: config.model_context_tokens as u32,
             prefix: None,
+            allow_tools: false,
+            tool_history: vec![],
         };
         let result = tokio::time::timeout(
             Duration::from_secs(600),
@@ -154,9 +160,8 @@ async fn measure_8192_context_through_the_real_queue() {
         .unwrap();
     cache.remove(&CacheKey::WaitQueue(queue_id)).await.unwrap();
     // Calls should finish inside one hour, but remove any earlier fixture buckets too.
-    let url = std::env::var("CORTEX_REDIS_URL").unwrap();
-    let client =
-        redis::Client::open(url).unwrap_or_else(|_| panic!("The test cache address is not valid"));
+    let client = redis::Client::open(test_redis_url)
+        .unwrap_or_else(|_| panic!("The test cache address is not valid"));
     let mut connection = client.get_multiplexed_async_connection().await.unwrap();
     for key in keys {
         let _: i64 = redis::cmd("DEL")

@@ -16,6 +16,18 @@ pub enum CacheKey {
         app: String,
         user: String,
     },
+    /// Active remote CLI presence lease (#132).
+    RemoteCliPresence(String),
+    /// Remote CLI command fan-out channel (#132).
+    RemoteCliCliChannel(String),
+    /// Remote CLI controller event fan-out channel (#132).
+    RemoteCliCtrlChannel(String),
+    /// Shared research rate-limit counter (#128).
+    ResearchLimit(String),
+    /// Shared research host/provider cooldown (#128).
+    ResearchCooldown(String),
+    /// Cached conditional web page metadata and body (#128).
+    ResearchPageCache(String),
 }
 impl CacheKey {
     pub fn name(&self) -> String {
@@ -30,6 +42,12 @@ impl CacheKey {
             Self::MemoryOverview { app, user } => {
                 format!("cortex:memory_overview:{app}:{user}")
             }
+            Self::RemoteCliPresence(id) => format!("cortex:remote_cli:presence:{id}"),
+            Self::RemoteCliCliChannel(id) => format!("cortex:remote_cli:cli:{id}"),
+            Self::RemoteCliCtrlChannel(id) => format!("cortex:remote_cli:ctrl:{id}"),
+            Self::ResearchLimit(scope) => format!("cortex:research:limit:{scope}"),
+            Self::ResearchCooldown(scope) => format!("cortex:research:cooldown:{scope}"),
+            Self::ResearchPageCache(key) => format!("cortex:research:page:{key}"),
         }
     }
 }
