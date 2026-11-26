@@ -24,6 +24,7 @@ pub fn clear_runtime_api_auth_env(command: &mut Command) {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnitStatus {
+    pub load_state: String,
     pub active_state: String,
     pub sub_state: String,
     pub main_pid: u32,
@@ -40,7 +41,10 @@ impl UnitStatus {
     }
 
     pub fn is_inactive(&self) -> bool {
-        (self.active_state == "inactive" || self.active_state == "failed") && self.main_pid == 0
+        (self.active_state == "inactive"
+            || self.active_state == "failed"
+            || self.load_state == "not-found")
+            && self.main_pid == 0
     }
 }
 
@@ -49,6 +53,7 @@ pub fn parse_unit_status(output: &str) -> Result<UnitStatus, DriverError> {
     for line in output.lines() {
         if let Some((key, val)) = line.split_once('=') {
             match key.trim() {
+                "LoadState" => status.load_state = val.trim().to_string(),
                 "ActiveState" => status.active_state = val.trim().to_string(),
                 "SubState" => status.sub_state = val.trim().to_string(),
                 "MainPID" => status.main_pid = val.trim().parse::<u32>().unwrap_or(0),
@@ -69,12 +74,14 @@ pub trait SystemdRunner: Send + Sync {
 
 pub struct SystemctlRunner {
     systemctl_path: std::path::PathBuf,
+    timeout: Duration,
 }
 
 impl Default for SystemctlRunner {
     fn default() -> Self {
         Self {
             systemctl_path: std::path::PathBuf::from("/usr/bin/systemctl"),
+            timeout: Duration::from_secs(15),
         }
     }
 }
@@ -87,6 +94,14 @@ impl SystemctlRunner {
     pub fn with_path(path: std::path::PathBuf) -> Self {
         Self {
             systemctl_path: path,
+            timeout: Duration::from_secs(15),
+        }
+    }
+
+    pub fn with_path_and_timeout(path: std::path::PathBuf, timeout: Duration) -> Self {
+        Self {
+            systemctl_path: path,
+            timeout,
         }
     }
 }
@@ -98,15 +113,23 @@ impl SystemdRunner for SystemctlRunner {
                 return Err(DriverError::InvalidInput);
             }
             let mut command = Command::new(&self.systemctl_path);
+            command.arg("--no-ask-password");
             command.args(["start", ALLOWED_UNIT]);
             command.stdin(Stdio::null());
             command.stdout(Stdio::null());
             command.stderr(Stdio::piped());
-            let output = tokio::time::timeout(Duration::from_secs(15), command.output())
-                .await
-                .map_err(|_| DriverError::Ollama)?
-                .map_err(|_| DriverError::Ollama)?;
-            if !output.status.success() {
+            command.kill_on_drop(true);
+            let mut child = command.spawn().map_err(|_| DriverError::Ollama)?;
+            let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(_)) => return Err(DriverError::Ollama),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(DriverError::Ollama);
+                }
+            };
+            if !status.success() {
                 return Err(DriverError::Ollama);
             }
             Ok(())
@@ -119,15 +142,23 @@ impl SystemdRunner for SystemctlRunner {
                 return Err(DriverError::InvalidInput);
             }
             let mut command = Command::new(&self.systemctl_path);
+            command.arg("--no-ask-password");
             command.args(["stop", ALLOWED_UNIT]);
             command.stdin(Stdio::null());
             command.stdout(Stdio::null());
             command.stderr(Stdio::piped());
-            let output = tokio::time::timeout(Duration::from_secs(15), command.output())
-                .await
-                .map_err(|_| DriverError::Ollama)?
-                .map_err(|_| DriverError::Ollama)?;
-            if !output.status.success() {
+            command.kill_on_drop(true);
+            let mut child = command.spawn().map_err(|_| DriverError::Ollama)?;
+            let status = match tokio::time::timeout(self.timeout, child.wait()).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(_)) => return Err(DriverError::Ollama),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(DriverError::Ollama);
+                }
+            };
+            if !status.success() {
                 return Err(DriverError::Ollama);
             }
             Ok(())
@@ -140,22 +171,39 @@ impl SystemdRunner for SystemctlRunner {
                 return Err(DriverError::InvalidInput);
             }
             let mut command = Command::new(&self.systemctl_path);
+            command.arg("--no-ask-password");
             command.args([
                 "show",
                 ALLOWED_UNIT,
-                "--property=ActiveState,SubState,MainPID,ControlGroup,InvocationID",
+                "--property=LoadState,ActiveState,SubState,MainPID,ControlGroup,InvocationID",
             ]);
             command.stdin(Stdio::null());
             command.stdout(Stdio::piped());
             command.stderr(Stdio::piped());
-            let output = tokio::time::timeout(Duration::from_secs(10), command.output())
-                .await
-                .map_err(|_| DriverError::Ollama)?
-                .map_err(|_| DriverError::Ollama)?;
-            if !output.status.success() {
+            command.kill_on_drop(true);
+            let mut child = command.spawn().map_err(|_| DriverError::Ollama)?;
+            let mut stdout = child.stdout.take().ok_or(DriverError::Ollama)?;
+            let timeout_duration = std::cmp::min(self.timeout, Duration::from_secs(10));
+            let outcome = tokio::time::timeout(timeout_duration, async {
+                let mut text = Vec::new();
+                stdout.read_to_end(&mut text).await?;
+                let status = child.wait().await?;
+                Ok::<_, std::io::Error>((status, text))
+            })
+            .await;
+            let (status, text) = match outcome {
+                Ok(Ok((status, text))) => (status, text),
+                Ok(Err(_)) => return Err(DriverError::Ollama),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(DriverError::Ollama);
+                }
+            };
+            if !status.success() {
                 return Err(DriverError::Ollama);
             }
-            let text = String::from_utf8(output.stdout).map_err(|_| DriverError::Ollama)?;
+            let text = String::from_utf8(text).map_err(|_| DriverError::Ollama)?;
             parse_unit_status(&text)
         })
     }
@@ -226,6 +274,14 @@ impl PrismSupervisor {
         if let Some(active) = slot.as_mut() {
             active.stopping = true;
         }
+
+        if slot.is_none() {
+            let status = self.runner.show_unit(ALLOWED_UNIT).await?;
+            if status.is_inactive() {
+                return Ok(());
+            }
+        }
+
         let res = self.stop_quiescent().await;
         if res.is_ok() {
             *slot = None;
@@ -343,7 +399,7 @@ impl PrismSupervisor {
             let status = match self.runner.show_unit(ALLOWED_UNIT).await {
                 Ok(s) => s,
                 Err(e) => {
-                    self.stop_locked(&mut slot).await?;
+                    let _ = self.stop_locked(&mut slot).await;
                     return Err(e);
                 }
             };
@@ -1900,8 +1956,11 @@ mod tests {
         show_calls: Mutex<Vec<String>>,
         fail_start: Mutex<bool>,
         fail_stop: Mutex<bool>,
+        fail_show: Mutex<bool>,
+        fail_show_after_start: Mutex<bool>,
         stop_hang: Mutex<bool>,
         stop_clears_active: bool,
+        after_start_cancel_sender: Mutex<Option<watch::Sender<bool>>>,
     }
 
     impl MockSystemdRunner {
@@ -1913,8 +1972,11 @@ mod tests {
                 show_calls: Mutex::new(Vec::new()),
                 fail_start: Mutex::new(false),
                 fail_stop: Mutex::new(false),
+                fail_show: Mutex::new(false),
+                fail_show_after_start: Mutex::new(false),
                 stop_hang: Mutex::new(false),
                 stop_clears_active: true,
+                after_start_cancel_sender: Mutex::new(None),
             }
         }
     }
@@ -1940,6 +2002,9 @@ mod tests {
                 }
                 if status.control_group.is_empty() {
                     status.control_group = "/system.slice/prism.service".to_string();
+                }
+                if let Some(tx) = self.after_start_cancel_sender.lock().await.as_ref() {
+                    let _ = tx.send(true);
                 }
                 Ok(())
             })
@@ -1973,6 +2038,15 @@ mod tests {
                     return Err(DriverError::InvalidInput);
                 }
                 self.show_calls.lock().await.push(unit.to_string());
+                if *self.fail_show.lock().await {
+                    return Err(DriverError::Ollama);
+                }
+                if *self.fail_show_after_start.lock().await
+                    && !self.start_calls.lock().await.is_empty()
+                {
+                    *self.fail_show_after_start.lock().await = false;
+                    return Err(DriverError::Ollama);
+                }
                 Ok(self.status.lock().await.clone())
             })
         }
@@ -2050,6 +2124,7 @@ InvocationID=
         let test_dir = TestDir::new();
         let profile_path = test_dir.path.join("profile");
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
             active_state: "inactive".into(),
             sub_state: "dead".into(),
             main_pid: 0,
@@ -2111,6 +2186,7 @@ InvocationID=
         let test_dir = TestDir::new();
         let profile_path = test_dir.path.join("profile");
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
             active_state: "inactive".into(),
             sub_state: "dead".into(),
             main_pid: 0,
@@ -2173,8 +2249,9 @@ InvocationID=
     }
 
     #[tokio::test]
-    async fn stop_failure_holds_permit_and_fails_closed() {
+    async fn stop_failure_fails_closed_and_marks_inactive() {
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
             active_state: "active".into(),
             sub_state: "running".into(),
             main_pid: 1234,
@@ -2209,10 +2286,84 @@ InvocationID=
     }
 
     #[tokio::test]
+    async fn scheduler_blocks_next_provider_while_prism_unconfirmed_or_stopping() {
+        let queue = Scheduler::new(Arc::new(EvaluationLedger));
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            main_pid: 1234,
+            control_group: "/system.slice/prism.service".into(),
+            invocation_id: "inv-123".into(),
+        }));
+        *runner.fail_stop.lock().await = true;
+
+        let supervisor = Arc::new(PrismSupervisor::with_runner(runner.clone()));
+        {
+            let mut slot = supervisor.child.lock().await;
+            *slot = Some(ActiveService {
+                profile: ModelProfile::Bonsai25Uncensored,
+                pid: 1234,
+                invocation_id: "inv-123".into(),
+                control_group: "/system.slice/prism.service".into(),
+                stopping: false,
+            });
+        }
+
+        let config = Config {
+            bonsai_enabled: true,
+            ..Config::default()
+        };
+        let ollama = Arc::new(
+            Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()),
+        );
+
+        let permit = queue
+            .acquire("test-actor".into(), uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+        let res = ollama.release_models_for_local_job(&permit).await;
+        assert_eq!(res.unwrap_err(), DriverError::Ollama);
+
+        *runner.fail_stop.lock().await = false;
+        let res_ok = supervisor.stop().await;
+        assert!(res_ok.is_ok());
+    }
+
+    #[tokio::test]
+    async fn ollama_t0_works_when_bonsai_disabled_and_unit_absent() {
+        let queue = Scheduler::new(Arc::new(EvaluationLedger));
+        let config = Config {
+            bonsai_enabled: false,
+            ..Config::default()
+        };
+
+        let _ollama = Ollama::new(config.clone(), queue.clone());
+        let _permit = queue
+            .acquire("test-actor".into(), uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "not-found".into(),
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+        }));
+        let supervisor = Arc::new(PrismSupervisor::with_runner(runner.clone()));
+        let res = supervisor.stop().await;
+        assert!(res.is_ok());
+        assert_eq!(runner.stop_calls.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
     async fn stale_unit_reuse_rejection() {
         let test_dir = TestDir::new();
         let profile_path = test_dir.path.join("profile");
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
             active_state: "inactive".into(),
             sub_state: "dead".into(),
             main_pid: 0,
@@ -2249,7 +2400,7 @@ InvocationID=
     }
 
     #[tokio::test]
-    async fn cancellation_during_start_triggers_immediate_stop() {
+    async fn cancellation_before_start_skips_start() {
         let test_dir = TestDir::new();
         let profile_path = test_dir.path.join("profile");
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
@@ -2258,6 +2409,7 @@ InvocationID=
             main_pid: 0,
             control_group: String::new(),
             invocation_id: String::new(),
+            ..Default::default()
         }));
         let mut supervisor = PrismSupervisor::with_runner(runner.clone());
         supervisor.skip_hash_for_test = true;
@@ -2273,6 +2425,121 @@ InvocationID=
             .await;
         assert_eq!(res.unwrap_err(), DriverError::Cancelled);
         assert_eq!(runner.start_calls.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_start_triggers_immediate_stop() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+            ..Default::default()
+        }));
+        let (cancel_tx, mut cancel) = watch::channel(false);
+        *runner.after_start_cancel_sender.lock().await = Some(cancel_tx);
+
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert_eq!(res.unwrap_err(), DriverError::Cancelled);
+        assert_eq!(runner.start_calls.lock().await.len(), 1);
+        assert_eq!(runner.stop_calls.lock().await.len(), 1);
+        assert!(supervisor.child.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn show_error_after_start_quiesces_and_cleans_slot() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+            ..Default::default()
+        }));
+        *runner.fail_show_after_start.lock().await = true;
+
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert_eq!(res.unwrap_err(), DriverError::Ollama);
+        assert_eq!(runner.start_calls.lock().await.len(), 1);
+        assert_eq!(runner.stop_calls.lock().await.len(), 1);
+        assert!(supervisor.child.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_error_plus_cleanup_error_fails_closed() {
+        let test_dir = TestDir::new();
+        let profile_path = test_dir.path.join("profile");
+        let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            main_pid: 0,
+            control_group: String::new(),
+            invocation_id: String::new(),
+            ..Default::default()
+        }));
+        *runner.fail_start.lock().await = true;
+        *runner.fail_stop.lock().await = true;
+
+        let mut supervisor = PrismSupervisor::with_runner(runner.clone());
+        supervisor.skip_hash_for_test = true;
+
+        let config = Config {
+            prism_profile_path: profile_path.clone(),
+            ..Config::default()
+        };
+        let (_cancel_tx, mut cancel) = watch::channel(false);
+
+        let res = supervisor
+            .ensure(&config, ModelProfile::Bonsai25Uncensored, &mut cancel)
+            .await;
+        assert_eq!(res.unwrap_err(), DriverError::Ollama);
+        assert_eq!(runner.start_calls.lock().await.len(), 1);
+        assert_eq!(runner.stop_calls.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn systemctl_runner_timeout_reaps_child() {
+        let test_dir = TestDir::new();
+        let script_path = test_dir.path.join("fake-systemctl");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script_content = "#!/bin/sh\nsleep 30\n";
+            std::fs::write(&script_path, script_content).unwrap();
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+        let runner =
+            SystemctlRunner::with_path_and_timeout(script_path, Duration::from_millis(150));
+        let res = runner.start_unit(ALLOWED_UNIT).await;
+        assert_eq!(res.unwrap_err(), DriverError::Ollama);
     }
 
     #[tokio::test]
@@ -2384,6 +2651,7 @@ InvocationID=
         let test_dir = TestDir::new();
         let profile_path = test_dir.path.join("profile");
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
             active_state: "active".into(),
             sub_state: "running".into(),
             main_pid: 9999,
@@ -2429,6 +2697,7 @@ InvocationID=
         let test_dir = TestDir::new();
         let profile_path = test_dir.path.join("profile");
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
             active_state: "activating".into(),
             sub_state: "start-pre".into(),
             main_pid: 0,
@@ -2464,6 +2733,7 @@ InvocationID=
         let test_dir = TestDir::new();
         let profile_path = test_dir.path.join("profile");
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
+            load_state: "loaded".into(),
             active_state: "inactive".into(),
             sub_state: "dead".into(),
             main_pid: 0,

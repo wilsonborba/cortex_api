@@ -1,7 +1,7 @@
 // Polkit rule for unprivileged Prism service control by Cortex service user
 polkit.addRule(function(action, subject) {
     if (action.id === "org.freedesktop.systemd1.manage-units" &&
-        (subject.user === "@CORTEX_USER@" || subject.user === "cortex")) {
+        subject.user === "@CORTEX_USER@") {
         var verb = action.lookup("verb");
         var unit = action.lookup("unit");
         if (unit === "prism.service" && (verb === "start" || verb === "stop")) {

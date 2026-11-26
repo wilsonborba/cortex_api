@@ -47,7 +47,7 @@
       "path": "deploy/prism/49-prism-systemd.rules",
       "target_path": "/etc/polkit-1/rules.d/49-prism-systemd.rules",
       "mode": "0644",
-      "sha256": "eca259e05bd822743abae163333af2966a0b4835e6f8515efb48ad31a79db7b3"
+      "sha256": "7ba26787999fe1a6ced29768bc63052a9e70cf17341c0981a4a678299173241f"
     }
   ]
 }
