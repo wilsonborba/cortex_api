@@ -41,14 +41,16 @@ fn status(process: process_numbers::ProcessNumber) -> StatusCode {
 fn invalid() -> Response {
     response::error(StatusCode::BAD_REQUEST, process_numbers::INVALID_DATA)
 }
-/// Multipart fields: `file`, `app_id` and an optional `temporary=true`.
+/// Multipart fields: `file`, `app_id`, optional `temporary=true`, and an
+/// optional paired `selection_kind` / `selection_spec` for temporary uploads.
 async fn upload(
     State(state): State<FileProxy>,
     context: CallerContext,
     form: Result<Multipart, MultipartRejection>,
 ) -> Result<Response, Response> {
     let mut form = form.map_err(|_| invalid())?;
-    let (mut file, mut app_id, mut temporary) = (None, None, false);
+    let (mut file, mut app_id, mut selection_kind, mut selection_spec, mut temporary) =
+        (None, None, None, None, false);
     while let Some(field) = form.next_field().await.map_err(|e| {
         if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
             response::error(StatusCode::PAYLOAD_TOO_LARGE, process_numbers::FILE_SIZE)
@@ -79,6 +81,12 @@ async fn upload(
             "app_id" if app_id.is_none() => {
                 app_id = Some(field.text().await.map_err(|_| invalid())?)
             }
+            "selection_kind" if selection_kind.is_none() => {
+                selection_kind = Some(field.text().await.map_err(|_| invalid())?)
+            }
+            "selection_spec" if selection_spec.is_none() => {
+                selection_spec = Some(field.text().await.map_err(|_| invalid())?)
+            }
             "temporary" => {
                 temporary = match field.text().await.map_err(|_| invalid())?.as_str() {
                     "true" => true,
@@ -95,7 +103,16 @@ async fn upload(
     let caller = context
         .for_app(&app_id, true)
         .map_err(IntoResponse::into_response)?;
-    match state.upload(&caller, file, temporary).await {
+    match state
+        .upload(
+            &caller,
+            file,
+            temporary,
+            selection_kind.as_deref(),
+            selection_spec.as_deref(),
+        )
+        .await
+    {
         Ok(Upload::Saved(file_id)) => Ok((
             StatusCode::CREATED,
             Envelope::new("File saved", json!({"file_id": file_id})),

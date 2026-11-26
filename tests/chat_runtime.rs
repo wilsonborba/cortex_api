@@ -2677,6 +2677,8 @@ async fn temporary_image_upload_and_followup_reach_vision_without_persistent_wri
                 bytes: Arc::new(bytes),
             },
             true,
+            None,
+            None,
         )
         .await
         .unwrap()

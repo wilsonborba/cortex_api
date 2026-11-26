@@ -61,6 +61,16 @@ fn ffmpeg_decodes_opus_and_mp3_to_16khz_mono() {
     }
     assert!(whisper::decode(&config, b"not audio").is_err());
 }
+#[test]
+fn ffmpeg_decodes_only_selected_audio_intervals() {
+    let config = Config::default();
+    let bytes = std::fs::read("tests/fixtures/audio.opus").unwrap();
+    let samples =
+        whisper::decode_intervals(&config, &bytes, &[(1_000, 2_000), (3_000, 3_500)]).unwrap();
+    let duration = whisper::seconds(&samples);
+    assert!((1.45..=1.55).contains(&duration));
+    assert!(whisper::decode_intervals(&config, &bytes, &[(6_000, 7_000)]).is_err());
+}
 #[tokio::test]
 #[ignore = "GPU: loads large-v3-turbo on the MSI and unloads the Ollama models first; owner GPU window"]
 async fn transcribes_opus_and_mp3_on_the_gpu_in_the_model_queue() {

@@ -107,6 +107,16 @@ pub fn pdf(
     events: &EventSink,
     ocr_worker: Option<&crate::dal::remote::file_worker::FileWorker>,
 ) -> Result<Vec<TextPage>, ProcessNumber> {
+    pdf_selected(config, name, bytes, events, ocr_worker, None)
+}
+pub fn pdf_selected(
+    config: &Config,
+    name: &str,
+    bytes: &[u8],
+    events: &EventSink,
+    ocr_worker: Option<&crate::dal::remote::file_worker::FileWorker>,
+    selected_pages: Option<&[std::ops::RangeInclusive<u32>]>,
+) -> Result<Vec<TextPage>, ProcessNumber> {
     let pdfium = match Pdfium::bind_to_library(&config.pdfium_path) {
         Ok(bindings) => Pdfium::new(bindings),
         Err(PdfiumError::PdfiumLibraryBindingsAlreadyInitialized) => Pdfium::default(),
@@ -116,22 +126,24 @@ pub fn pdf(
         .load_pdf_from_byte_slice(bytes, None)
         .map_err(|_| process_numbers::FILE_EXTRACTION)?;
     let total = doc.pages().len() as u32;
+    if selected_pages.is_some_and(|ranges| ranges.iter().any(|range| *range.end() > total)) {
+        return Err(process_numbers::INVALID_DATA);
+    }
     let mut pages = vec![];
     let mut blank = vec![];
     for (index, page) in doc.pages().iter().enumerate() {
-        progress(
-            events,
-            StepName::FileReadPage,
-            name,
-            index as u32 + 1,
-            total,
-        );
+        let number = index as u32 + 1;
+        if selected_pages.is_some_and(|ranges| !ranges.iter().any(|range| range.contains(&number)))
+        {
+            continue;
+        }
+        progress(events, StepName::FileReadPage, name, number, total);
         let text = page
             .text()
             .map_err(|_| process_numbers::FILE_EXTRACTION)?
             .all();
         if text.trim().is_empty() {
-            blank.push(index);
+            blank.push((index, pages.len()));
         }
         pages.push(TextPage {
             number: index as u32 + 1,
@@ -149,7 +161,7 @@ pub fn pdf(
     let render = PdfRenderConfig::new()
         .set_target_width(config.ocr_render_width)
         .set_maximum_height(config.ocr_render_height);
-    for (ordinal, &index) in blank.iter().enumerate() {
+    for (ordinal, &(index, page_position)) in blank.iter().enumerate() {
         progress(
             events,
             StepName::OcrPage,
@@ -166,8 +178,8 @@ pub fn pdf(
             .and_then(|b| b.as_image())
             .map_err(|_| process_numbers::FILE_OCR)?
             .into_luma8();
-        pages[index].text = ocr_page(config, name, &image, ocr_worker)?;
-        pages[index].ocr = true;
+        pages[page_position].text = ocr_page(config, name, &image, ocr_worker)?;
+        pages[page_position].ocr = true;
     }
     Ok(pages)
 }

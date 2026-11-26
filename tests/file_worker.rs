@@ -153,6 +153,7 @@ async fn transcription_gives_the_same_text_local_and_remote() {
     let remote = RemoteTranscriber {
         worker: FileWorker::new(&config, &url),
         queue,
+        config: config.clone(),
     };
     let bytes = Arc::new(std::fs::read("tests/fixtures/audio.opus").unwrap());
     let (events, _, _) = channel(&config, None);

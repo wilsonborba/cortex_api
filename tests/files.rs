@@ -9,6 +9,7 @@ use axum::{
 use cortex_api::{
     core::config::Config,
     dal::remote::{cache::RedisCache, hippocampus::Hippocampus},
+    domain::models::extraction::AudioRange,
     domain::services::{
         extraction::DocumentExtractor, files::FileProxy, temporary::TemporaryChats,
     },
@@ -114,6 +115,10 @@ async fn server() -> (Double, Config) {
 }
 /// Transcriber double: "spoken text" when the audio bytes start with "ok", failure otherwise.
 struct Speech;
+static SELECTED_INTERVALS: std::sync::OnceLock<Mutex<Vec<(u64, u64)>>> = std::sync::OnceLock::new();
+fn selected_intervals() -> &'static Mutex<Vec<(u64, u64)>> {
+    SELECTED_INTERVALS.get_or_init(|| Mutex::new(Vec::new()))
+}
 impl cortex_api::domain::services::transcription::AudioTranscriber for Speech {
     fn transcribe<'a>(
         &'a self,
@@ -132,6 +137,23 @@ impl cortex_api::domain::services::transcription::AudioTranscriber for Speech {
                 Err(cortex_api::core::process_numbers::AUDIO_FAILED)
             }
         })
+    }
+    fn transcribe_selected<'a>(
+        &'a self,
+        _: &'a cortex_api::domain::models::identity::Caller,
+        _: &'a str,
+        _: Arc<Vec<u8>>,
+        intervals: Vec<AudioRange>,
+        _: &'a cortex_api::domain::services::events::EventSink,
+    ) -> cortex_api::domain::models::usage::Pending<
+        'a,
+        Result<String, cortex_api::core::process_numbers::ProcessNumber>,
+    > {
+        *selected_intervals().lock().unwrap() = intervals
+            .into_iter()
+            .map(|range| (range.start_ms, range.end_ms))
+            .collect();
+        Box::pin(async { Ok("selected spoken text".into()) })
     }
 }
 fn app(config: &Config, cache: RedisCache) -> Router {
@@ -224,6 +246,80 @@ async fn upload_sends_file_scope_and_text_in_one_call() {
     assert_eq!(f["extracted_text"], "hello world");
     assert_eq!(f["file"], "hello world");
     assert_eq!(f["file_name"], "a.txt");
+}
+#[tokio::test]
+async fn selected_upload_is_temporary_only_and_keeps_existing_unselected_contract() {
+    let (double, config) = server().await;
+    let (status, _) = upload(
+        app(&config, no_redis()),
+        Some("alice"),
+        &[
+            ("app_id", None, "cortex"),
+            ("selection_kind", None, "passages"),
+            ("selection_spec", None, "p1:1-3"),
+            ("file", Some("text/plain"), "A😀\r\nB"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(double.calls.lock().unwrap().is_empty());
+
+    let (status, _) = upload(
+        app(&config, no_redis()),
+        Some("alice"),
+        &[
+            ("app_id", None, "cortex"),
+            ("temporary", None, "true"),
+            ("selection_kind", None, "passages"),
+            ("selection_spec", None, "p1:1-3"),
+            ("file", Some("text/plain"), "A😀\r\nB"),
+        ],
+    )
+    .await;
+    // No Redis means no temporary save; selected content never falls back to
+    // the permanent Hippocampus file writer.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(double.calls.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn selected_audio_passes_only_requested_intervals_to_transcriber() {
+    let (double, config) = server().await;
+    selected_intervals().lock().unwrap().clear();
+    let (status, _) = upload(
+        app(&config, no_redis()),
+        Some("alice"),
+        &[
+            ("app_id", None, "cortex"),
+            ("temporary", None, "true"),
+            ("selection_kind", None, "intervals"),
+            ("selection_spec", None, "ms:0-500,1000-1500"),
+            ("file", Some("audio/ogg"), "synthetic audio"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        *selected_intervals().lock().unwrap(),
+        [(0, 500), (1000, 1500)]
+    );
+    assert!(double.calls.lock().unwrap().is_empty());
+
+    selected_intervals().lock().unwrap().clear();
+    let (status, _) = upload(
+        app(&config, no_redis()),
+        Some("alice"),
+        &[
+            ("app_id", None, "cortex"),
+            ("temporary", None, "true"),
+            ("selection_kind", None, "intervals"),
+            ("selection_spec", None, "ms:0-500,ms:1000-1500"),
+            ("file", Some("audio/ogg"), "synthetic audio"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(selected_intervals().lock().unwrap().is_empty());
+    assert!(double.calls.lock().unwrap().is_empty());
 }
 #[tokio::test]
 async fn extraction_failure_still_saves_with_empty_text() {
@@ -370,7 +466,7 @@ async fn temporary_upload_stays_in_redis() {
     let id = body["data"]["file_id"].as_str().unwrap().to_owned();
     assert!(uuid::Uuid::parse_str(&id).is_ok());
     assert!(double.calls.lock().unwrap().is_empty());
-    let mut redis = redis::Client::open(url)
+    let mut redis = redis::Client::open(url.clone())
         .unwrap()
         .get_multiplexed_async_connection()
         .await
@@ -392,6 +488,38 @@ async fn temporary_upload_stays_in_redis() {
     assert!((3_590_000..=3_600_000).contains(&ttl));
     let _: () = redis::cmd("DEL")
         .arg(&key)
+        .query_async(&mut redis)
+        .await
+        .unwrap();
+
+    let selected_user = format!("test-selected-{}", uuid::Uuid::new_v4());
+    let (status, body) = upload(
+        app(&config, RedisCache::new(Some(&url), Duration::from_secs(2))),
+        Some(&selected_user),
+        &[
+            ("app_id", None, "cortex"),
+            ("temporary", None, "true"),
+            ("selection_kind", None, "passages"),
+            ("selection_spec", None, "p1:0-6"),
+            ("file", Some("text/plain"), "KEEP😀\r\nPRIVATE"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let selected_id = body["data"]["file_id"].as_str().unwrap().to_owned();
+    let selected_key =
+        cortex_api::domain::models::cache::CacheKey::TemporaryChat(selected_id).name();
+    let raw: String = redis::cmd("GET")
+        .arg(&selected_key)
+        .query_async(&mut redis)
+        .await
+        .unwrap();
+    let raw: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(raw["file"]["pages"][0]["text"], "KEEP😀");
+    assert!(!raw.to_string().contains("PRIVATE"));
+    assert!(double.calls.lock().unwrap().is_empty());
+    let _: () = redis::cmd("DEL")
+        .arg(&selected_key)
         .query_async(&mut redis)
         .await
         .unwrap();

@@ -136,6 +136,19 @@
 - Restore persisted run metadata in chat history (#119)
 
 
+## Unreleased
+
+
+### Bug Fixes
+
+- Align source selection range grammar (#136)
+
+
+### Features
+
+- Apply bounded selections to temporary uploads
+
+
 ## v2.3.0 - 2026-11-16
 
 
