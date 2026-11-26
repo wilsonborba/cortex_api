@@ -153,6 +153,8 @@ impl PrismSupervisor {
                 "0",
                 "--jinja",
                 "--no-webui",
+                "--verbosity",
+                "3",
                 "--cors-origins",
                 "localhost",
                 "--no-cors-credentials",
@@ -410,6 +412,28 @@ mod tests {
             allow_tools,
             tool_history: vec![],
         }
+    }
+
+    async fn prism_status(
+        client: &reqwest::Client,
+        method: reqwest::Method,
+        url: String,
+        authorization: Option<HeaderValue>,
+    ) -> reqwest::StatusCode {
+        let mut request = client.request(method.clone(), url);
+        if let Some(mut value) = authorization {
+            value.set_sensitive(true);
+            request = request.header(reqwest::header::AUTHORIZATION, value);
+        }
+        if method == reqwest::Method::POST {
+            request = request.json(&serde_json::json!({
+                "model":"bonsai25-uncensored",
+                "messages":[{"role":"user","content":"smoke"}],
+                "max_tokens":1
+            }));
+        }
+        let response = request.send().await.expect("auth smoke HTTP response");
+        response.status()
     }
 
     fn cortex_eval_context(
@@ -1524,6 +1548,239 @@ mod tests {
         }.await;
         stop_result.expect("owned Prism cleanup");
         cleanup_state.expect("verify Ollama is empty or report preserved unexpected models");
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires separate explicit GPU authorization; checks the default Uncensored auth handshake only"]
+    async fn gpu_prism_auth_smoke_uncensored() {
+        use futures_util::FutureExt;
+
+        let (config, _queue, supervisor, router) = evaluation_model_router_setup().await;
+        let profile = ModelProfile::Bonsai25Uncensored;
+        let base = config.prism_url.trim_end_matches('/').to_owned();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("bounded local auth smoke client");
+        let mut child_pid = None;
+        let result = std::panic::AssertUnwindSafe(async {
+            let (_cancel_tx, mut cancel) = watch::channel(false);
+            let context = cortex_eval_context(
+                &config,
+                "According to the synthetic record for KITE-204, what status and retry count are recorded? Answer in one sentence.",
+                vec![synthetic_evidence(
+                    "KITE-204 synthetic record",
+                    "Synthetic record KITE-204: status READY; retry_count 2.",
+                )],
+            );
+            let output = evaluation_output(profile, false);
+            let answer = evaluation_thinking_answer(&router, &config, &output, &context, None).await;
+            assert_measured_answer(&answer);
+            assert!(!answer.text.trim().is_empty());
+            child_pid = supervisor.child.lock().await.as_ref().map(|owned| owned.pid);
+            let pid = child_pid.expect("owned Prism child PID");
+            let authorization = supervisor
+                .authorization_header(profile)
+                .await
+                .expect("live matching child bearer");
+            assert!(authorization.is_sensitive());
+            let secret = authorization
+                .to_str()
+                .expect("ASCII bearer header")
+                .strip_prefix("Bearer ")
+                .expect("bearer scheme")
+                .to_owned();
+            assert!(!format!("{authorization:?}").contains(&secret));
+            let commandline = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .expect("owned runtime command line");
+            assert!(!commandline
+                .windows(secret.len())
+                .any(|window| window == secret.as_bytes()));
+
+            let authenticated_props = client
+                .get(format!("{base}/props"))
+                .header(reqwest::header::AUTHORIZATION, authorization.clone())
+                .send()
+                .await
+                .expect("authenticated props request");
+            assert!(authenticated_props.status().is_success());
+            let props: serde_json::Value = authenticated_props
+                .json()
+                .await
+                .expect("authenticated props JSON");
+            assert!(props["model_path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(profile.artifact_filename().unwrap())));
+            let authenticated_models = client
+                .get(format!("{base}/v1/models"))
+                .header(reqwest::header::AUTHORIZATION, authorization.clone())
+                .send()
+                .await
+                .expect("authenticated models request");
+            assert!(authenticated_models.status().is_success());
+            let models: serde_json::Value = authenticated_models
+                .json()
+                .await
+                .expect("authenticated models JSON");
+            assert!(models["data"].as_array().is_some_and(|data| data
+                .iter()
+                .any(|model| model["id"] == profile.runtime_alias().unwrap())));
+            supervisor
+                .ensure(&config, profile, &mut cancel)
+                .await
+                .expect("same healthy profile remains owned");
+            assert_eq!(
+                supervisor.child.lock().await.as_ref().map(|owned| owned.pid),
+                Some(pid),
+                "managed answer reused the same owned process"
+            );
+            assert_eq!(
+                supervisor.authorization_header(profile).await.unwrap(),
+                authorization,
+                "managed answer reused the same per-child bearer"
+            );
+
+            let mut rejected_statuses = Vec::new();
+            for (method, path) in [
+                (reqwest::Method::GET, "/props"),
+                (reqwest::Method::GET, "/v1/models"),
+                (reqwest::Method::POST, "/v1/chat/completions"),
+            ] {
+                let missing =
+                    prism_status(&client, method.clone(), format!("{base}{path}"), None).await;
+                let mut wrong = HeaderValue::from_static("Bearer invalid-auth-smoke-key");
+                wrong.set_sensitive(true);
+                let invalid = prism_status(
+                    &client,
+                    method,
+                    format!("{base}{path}"),
+                    Some(wrong),
+                )
+                .await;
+                rejected_statuses.push((path, missing.as_u16(), invalid.as_u16()));
+            }
+            eprintln!(
+                "AUTH_SMOKE_REJECTION_STATUSES {}",
+                serde_json::json!({"missing_and_wrong_key":rejected_statuses})
+            );
+            assert!(
+                rejected_statuses
+                    .iter()
+                    .all(|(_, missing, invalid)| *missing == 401 && *invalid == 401),
+                "all three API routes must reject missing and incorrect keys"
+            );
+
+            let evil_preflight = client
+                .request(reqwest::Method::OPTIONS, format!("{base}/v1/chat/completions"))
+                .header(reqwest::header::ORIGIN, "https://untrusted.example")
+                .header(reqwest::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .send()
+                .await
+                .expect("bounded denied-origin CORS preflight");
+            let evil_origin_header = evil_preflight
+                .headers()
+                .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let evil_credentials = evil_preflight
+                .headers()
+                .get(reqwest::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let localhost_preflight = client
+                .request(reqwest::Method::OPTIONS, format!("{base}/v1/chat/completions"))
+                .header(reqwest::header::ORIGIN, "http://localhost:5173")
+                .header(reqwest::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .send()
+                .await
+                .expect("bounded localhost CORS preflight");
+            let localhost_origin_header = localhost_preflight
+                .headers()
+                .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let localhost_credentials = localhost_preflight
+                .headers()
+                .get(reqwest::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            eprintln!(
+                "AUTH_SMOKE_CORS {}",
+                serde_json::json!({
+                    "untrusted_origin_reflected":evil_origin_header.as_deref(),
+                    "untrusted_credentials":evil_credentials.as_deref(),
+                    "localhost_origin":localhost_origin_header.as_deref(),
+                    "localhost_credentials":localhost_credentials.as_deref()
+                })
+            );
+            assert!(evil_origin_header.is_none());
+            assert!(evil_credentials.as_deref().is_none_or(|value| value == "false"));
+            assert_eq!(localhost_origin_header.as_deref(), Some("http://localhost:5173"));
+            assert!(localhost_credentials
+                .as_deref()
+                .is_none_or(|value| value == "false"));
+            eprintln!(
+                "AUTH_SMOKE_RESULT {}",
+                serde_json::json!({
+                    "profile": profile.id(),
+                    "pid_reused": pid,
+                    "child_key_reused": true,
+                    "missing_and_wrong_key_statuses": [401, 401],
+                    "protected_paths": ["/props", "/v1/models", "/v1/chat/completions"],
+                    "allowed_origin": "http://localhost:5173",
+                    "untrusted_origin_reflected": false,
+                    "cors_credentials": false,
+                    "answer_nonempty": true,
+                    "usage_measured": answer.usage_measured,
+                    "output_tokens": answer.usage.output_tokens,
+                    "ttft_ms": answer.usage.time_to_first_token_ms,
+                    "total_ms": answer.usage.total_ms,
+                    "text": answer.text,
+                    "full_secret_logged": false
+                })
+            );
+        })
+        .catch_unwind()
+        .await;
+
+        let stop_result = supervisor.stop().await;
+        let child_absent = supervisor.child.lock().await.is_none();
+        let ollama_state = ollama_loaded(&config).await;
+        stop_result.expect("stop and reap only the owned Prism child");
+        #[cfg(unix)]
+        let owned_process_group_absent = child_pid.map(|pid| !process_group_exists(pid));
+        #[cfg(not(unix))]
+        let owned_process_group_absent = None;
+        eprintln!(
+            "AUTH_SMOKE_CLEANUP {}",
+            serde_json::json!({
+                "child_slot_empty":child_absent,
+                "owned_process_group_absent":owned_process_group_absent,
+                "ollama_models":ollama_state.as_ref().ok()
+            })
+        );
+        assert!(child_absent, "owned Prism child slot is empty after stop");
+        assert!(
+            supervisor.authorization_header(profile).await.is_err(),
+            "stopped child no longer exposes a bearer"
+        );
+        if let Some(pid) = child_pid {
+            #[cfg(unix)]
+            assert!(
+                !process_group_exists(pid),
+                "owned Prism process group is reaped"
+            );
+        }
+        assert!(
+            ollama_state.expect("Ollama postcheck").is_empty(),
+            "auth smoke never loads/unloads T0 or disturbs Ollama"
+        );
         if let Err(panic) = result {
             std::panic::resume_unwind(panic);
         }
