@@ -298,7 +298,7 @@ impl ChatHistory {
 #[cfg(test)]
 mod run_metadata_tests {
     use super::*;
-    use crate::domain::models::run_record::{RunCounts, RunMode, StageRecord, WebMode};
+    use crate::domain::models::run_record::{ModelCall, RunCounts, RunMode, StageRecord, WebMode};
     use chrono::Utc;
 
     fn output(status: &str, output_id: Uuid, session_id: Uuid) -> ChatOutput {
@@ -349,6 +349,52 @@ mod run_metadata_tests {
             notice_number: (status == "notice").then_some(error_number).flatten(),
             time_ms: 1,
         }
+    }
+
+    fn model_call(input_tokens: u64, output_tokens: u64) -> ModelCall {
+        ModelCall {
+            images: None,
+            audio: None,
+            role: "answer".into(),
+            model: "test-model".into(),
+            input_tokens,
+            output_tokens,
+            time_to_first_token_ms: Some(5),
+            total_ms: 10,
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn aggregates_model_call_tokens_and_omits_overflow_without_losing_duration() {
+        let output_id = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let scope = AppUser {
+            app_id: "cortex".into(),
+            user_id: "owner".into(),
+        };
+
+        let mut multiple = record(output_id, session, vec![stage("ok", None)]);
+        multiple.calls = vec![model_call(7, 3), model_call(5, 2)];
+        let metadata =
+            ChatHistory::run_metadata(&scope, &output("done", output_id, session), &multiple)
+                .unwrap();
+        assert_eq!(metadata.total_ms, 42);
+        let tokens = metadata.tokens.unwrap();
+        assert_eq!(tokens.input, 12);
+        assert_eq!(tokens.output, 5);
+        assert_eq!(tokens.total, 17);
+        assert_eq!(metadata.error_number, None);
+
+        let mut overflow = record(output_id, session, vec![stage("ok", None)]);
+        overflow.calls = vec![model_call(u64::MAX, 1), model_call(1, 1)];
+        let metadata =
+            ChatHistory::run_metadata(&scope, &output("done", output_id, session), &overflow)
+                .unwrap();
+        assert_eq!(metadata.total_ms, 42);
+        assert!(metadata.tokens.is_none());
+        assert_eq!(metadata.error_number, None);
     }
 
     #[test]
