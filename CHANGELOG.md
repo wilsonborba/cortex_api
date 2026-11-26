@@ -6,6 +6,8 @@
 
 ### Bug Fixes
 
+- Align source selection range grammar (#136)
+
 - Wire remote CLI router and persist state in PostgreSQL and Valkey (#132)
 
 - Wire Valkey limits, robots rules, conditional cache, and politeness into web research (#128)
@@ -18,28 +20,32 @@
 
 - Rebudget tool continuations and gate child cancellation
 
-- Canonicalize output action digest
-
-- Preserve approval action description
-
-- Unify phone and local action decisions
-
-- Restore persisted run metadata after reload
-
 - Wait for owned Prism process group teardown
 
 - Keep Prism transitions serialized through cleanup
 
 - Retain process ownership during cancelled teardown
 
+- Canonicalize output action digest
+
+- Preserve approval action description
+
+- Unify phone and local action decisions
+
 - Wait for Ollama unload before Prism transition
 
 - Authenticate owned Prism requests
 
+- Restore persisted run metadata after reload
+
 
 ### Chores
 
+- Refresh unreleased changelog
+
 - Merge v2.3.0 back to feature/main
+
+- Record persisted history run metadata
 
 
 ### Documentation
@@ -48,6 +54,8 @@
 
 
 ### Features
+
+- Apply bounded selections to temporary uploads
 
 - Add normalized 200-site source catalog and cached configuration (#126)
 
@@ -71,13 +79,13 @@
 
 - Bind and meter provider child runs
 
-- Integrate reviewed child runs and action decisions
-
 - Add gated Bonsai model profiles and Prism adapter
 
 - Supervise serialized Bonsai runtime transitions
 
 - Route T1 image inputs through T0 vision prepass
+
+- Integrate reviewed child runs and action decisions
 
 
 ### Tests
@@ -124,29 +132,20 @@
 
 - Cover restored run token totals
 
+- Cover selection count boundaries
+
 
 ### merge
-
-- Review history run metadata on accepted backend base
 
 - Accept tested Bonsai T1 runtime and managed authentication
 
 - Verify public Bonsai T1 contracts (#138)
 
+- Review history run metadata on accepted backend base
+
 - Restore persisted run metadata in chat history (#119)
 
-
-## Unreleased
-
-
-### Bug Fixes
-
-- Align source selection range grammar (#136)
-
-
-### Features
-
-- Apply bounded selections to temporary uploads
+- Restrict temporary file context to approved source selections (#136)
 
 
 ## v2.3.0 - 2026-11-16
