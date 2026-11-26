@@ -105,6 +105,9 @@ impl<T> StageResult<T> {
 }
 pub trait PipelineData: Clone + Send + Sync {
     fn thinking(&self) -> bool;
+    fn files_before_other_gather(&self) -> bool {
+        false
+    }
     fn merge_gather(previous: &Self, files: Self, memory: Self, web: Self) -> Self;
 }
 /// Services return new calls and notices for that stage. The engine carries

@@ -111,9 +111,15 @@ async fn routes_order_page_rename_pin_and_refuse_other_users_even_admins() {
     for index in 1..3 {
         let body: NextInput =
             serde_json::from_value(json!({"text":format!("question{index}")})).unwrap();
-        let input =
-            continue_permanent(&a, &chat, body, &[], now + chrono::Duration::seconds(index))
-                .unwrap_or_else(|_| panic!("prepare failed"));
+        let input = continue_permanent(
+            &config,
+            &a,
+            &chat,
+            body,
+            &[],
+            now + chrono::Duration::seconds(index),
+        )
+        .unwrap_or_else(|_| panic!("prepare failed"));
         repo.save_accepted(&input).await.unwrap();
         inputs.push(input);
     }

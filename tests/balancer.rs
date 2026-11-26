@@ -207,6 +207,139 @@ async fn cancelled_waiter_cannot_hold_the_slot() {
 }
 
 #[tokio::test]
+async fn t1_token_then_queued_t0_waits_for_cancel_teardown() {
+    use tokio::sync::{oneshot, watch};
+
+    // CPU-only Scheduler contract fixture: the token and teardown handshakes
+    // are simulated, so this does not replace the ModelRouter/runtime test.
+    let scheduler = Scheduler::new(ledger(false));
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let (token_tx, token_rx) = oneshot::channel();
+    let (teardown_started_tx, teardown_started_rx) = oneshot::channel();
+    let (teardown_done_tx, teardown_done_rx) = oneshot::channel();
+    let t1_scheduler = scheduler.clone();
+    let t1 = tokio::spawn(async move {
+        let permit = t1_scheduler
+            .acquire("bonsai-t1".into(), Uuid::new_v4())
+            .await
+            .expect("T1 obtains the shared permit");
+        token_tx.send(()).expect("test observes the first T1 token");
+        let mut cancel = cancel_rx;
+        cancel.changed().await.expect("T1 cancellation signal");
+        teardown_started_tx
+            .send(())
+            .expect("test observes teardown while T1 still owns the permit");
+        teardown_done_rx
+            .await
+            .expect("test explicitly releases the completed teardown");
+        drop(permit);
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), token_rx)
+        .await
+        .expect("bounded first-token handshake")
+        .expect("T1 token handshake sender");
+    let t0_scheduler = scheduler.clone();
+    let t0 = tokio::spawn(async move {
+        t0_scheduler
+            .acquire("ollama-t0".into(), Uuid::new_v4())
+            .await
+    });
+    queued(&scheduler, 1).await;
+    assert!(
+        !t0.is_finished(),
+        "T0 remains queued while T1 owns the permit"
+    );
+
+    cancel_tx.send(true).expect("send T1 cancellation");
+    tokio::time::timeout(std::time::Duration::from_secs(1), teardown_started_rx)
+        .await
+        .expect("bounded T1 teardown handshake")
+        .expect("T1 teardown started");
+    assert!(
+        !t0.is_finished(),
+        "T0 cannot start while the cancelled T1 is still tearing down"
+    );
+
+    teardown_done_tx.send(()).expect("complete T1 teardown");
+    let t0_permit = tokio::time::timeout(std::time::Duration::from_secs(1), t0)
+        .await
+        .expect("T0 starts after T1 releases its permit")
+        .expect("T0 task")
+        .expect("T0 queue permit");
+    drop(t0_permit);
+    tokio::time::timeout(std::time::Duration::from_secs(1), t1)
+        .await
+        .expect("T1 teardown task settles")
+        .expect("T1 teardown task");
+}
+
+#[tokio::test]
+async fn polling_t0_before_created_t1_controls_scheduler_arrival_order() {
+    use std::{future::Future, task::Poll, time::Duration};
+
+    let data = ledger(false);
+    let scheduler = Scheduler::new(data.clone());
+    let active = scheduler
+        .acquire("holder".into(), Uuid::new_v4())
+        .await
+        .expect("reserve the scheduler slot");
+
+    // Construct T1 first, then T0, but do not poll either future yet. Merely
+    // creating the intended T1 future does not put it in the scheduler queue.
+    let mut t1 = Box::pin(scheduler.acquire("bonsai-t1".into(), Uuid::new_v4()));
+    let mut t0 = Box::pin(scheduler.acquire("ollama-t0".into(), Uuid::new_v4()));
+
+    std::future::poll_fn(|cx| {
+        assert!(t0.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    queued(&scheduler, 1).await;
+    std::future::poll_fn(|cx| {
+        assert!(t1.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    queued(&scheduler, 2).await;
+
+    drop(active);
+    let t0_permit = tokio::time::timeout(Duration::from_secs(1), t0.as_mut())
+        .await
+        .expect("first-poll T0 gets the first ticket")
+        .expect("T0 permit");
+    t0_permit
+        .finish(
+            Usage {
+                input: 1,
+                ..Usage::default()
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("record T0 completion");
+    let t1_permit = tokio::time::timeout(Duration::from_secs(1), t1.as_mut())
+        .await
+        .expect("T1 proceeds after T0 releases the slot")
+        .expect("T1 permit");
+    t1_permit
+        .finish(
+            Usage {
+                input: 1,
+                ..Usage::default()
+            },
+            Utc::now(),
+        )
+        .await
+        .expect("record T1 completion");
+
+    let records = data.records.lock().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].actor, "ollama-t0");
+    assert_eq!(records[1].actor, "bonsai-t1");
+}
+
+#[tokio::test]
 async fn a_long_output_rejoins_the_queue_between_calls() {
     let data = ledger(false);
     let scheduler = Scheduler::new(data);

@@ -1,4 +1,5 @@
 use crate::domain::models::{
+    model_profile::ModelProfile,
     run_record::WebMode,
     storage::{AppUser, Chat, ChatInput, ChatOutput, InputFile},
 };
@@ -12,6 +13,8 @@ fn fast() -> WebMode {
 #[serde(deny_unknown_fields)]
 pub struct NewChat {
     pub app_id: String,
+    #[serde(default)]
+    pub model_id: Option<ModelProfile>,
     #[serde(default)]
     pub text: String,
     #[serde(default)]
@@ -39,6 +42,8 @@ pub struct NextInput {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
+    pub model_id: Option<ModelProfile>,
+    #[serde(default)]
     pub file_ids: Vec<String>,
     #[serde(default)]
     pub stream: bool,
@@ -63,6 +68,7 @@ impl NewChat {
     pub fn input(&self) -> NextInput {
         NextInput {
             text: self.text.clone(),
+            model_id: self.model_id,
             file_ids: self.file_ids.clone(),
             stream: self.stream,
             needs_web: self.needs_web,

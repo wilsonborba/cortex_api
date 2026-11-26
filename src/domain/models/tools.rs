@@ -9,6 +9,17 @@ const MAX_ARGUMENT_BYTES: usize = 16 * 1024;
 const MAX_VIEW_FILE_LINES: u32 = 500;
 pub const MAX_RESULT_BYTES: usize = 32 * 1024;
 
+/// Provider-neutral tool schemas shared by every model adapter.
+pub fn provider_definitions() -> Value {
+    serde_json::json!([
+        {"type":"function","function":{"name":"invoke_subagent","description":"Delegate a bounded task to a mapped child agent.","parameters":{"type":"object","properties":{"role":{"type":"string"},"task":{"type":"string"},"context":{"type":"string"}},"required":["role","task"],"additionalProperties":false}}},
+        {"type":"function","function":{"name":"view_file","description":"Read a bounded section of a workspace file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}}},
+        {"type":"function","function":{"name":"grep_search","description":"Search selected workspace paths.","parameters":{"type":"object","properties":{"query":{"type":"string"},"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":32},"max_results":{"type":"integer","minimum":1,"maximum":100}},"required":["query","paths"],"additionalProperties":false}}},
+        {"type":"function","function":{"name":"replace_file_content","description":"Request an exact workspace file edit; the CLI must obtain approval first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"find":{"type":"string"},"replace":{"type":"string"}},"required":["path","find","replace"],"additionalProperties":false}}},
+        {"type":"function","function":{"name":"run_command","description":"Request a workspace command; the CLI must obtain approval first.","parameters":{"type":"object","properties":{"cwd":{"type":"string"},"argv":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":64}},"required":["cwd","argv"],"additionalProperties":false}}}
+    ])
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolError {
     InvalidRequest,

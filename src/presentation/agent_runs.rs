@@ -544,6 +544,8 @@ fn start_bound_child(
         }
         let body = crate::domain::models::chat_session::NewChat {
             app_id: "cortex".into(),
+            // Inherited from the trusted active parent output, never the child request.
+            model_id: parent_control.model_profile(),
             text: task,
             file_ids: vec![],
             stream: true,

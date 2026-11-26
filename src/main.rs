@@ -110,9 +110,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| "The shield config is not valid")?,
         );
         let queue = Scheduler::new(ledger.clone());
-        let ollama = std::sync::Arc::new(Ollama::new(config.clone(), queue.clone()));
+        let prism_supervisor =
+            std::sync::Arc::new(cortex_api::dal::remote::prism_supervisor::PrismSupervisor::new());
+        let ollama = std::sync::Arc::new(
+            Ollama::new(config.clone(), queue.clone())
+                .with_prism_supervisor(prism_supervisor.clone()),
+        );
+        let prism = std::sync::Arc::new(cortex_api::dal::remote::prism::Prism::managed(
+            config.clone(),
+            queue.clone(),
+            prism_supervisor,
+        ));
         let driver: std::sync::Arc<dyn cortex_api::domain::models::driver::ModelDriver> =
-            ollama.clone();
+            std::sync::Arc::new(cortex_api::dal::remote::model_router::ModelRouter::new(
+                ollama.clone(),
+                prism,
+                queue.clone(),
+            ));
         let chats = Chats {
             pool: chat_pool.clone(),
         };

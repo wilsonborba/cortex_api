@@ -37,6 +37,7 @@ use cortex_api::{
 };
 use serde_json::{Value, json};
 use std::{
+    sync::atomic::{AtomicBool, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -69,6 +70,10 @@ struct Model {
     /// (image count, model name) per call.
     images: Mutex<Vec<(usize, String)>>,
     image_payloads: Mutex<Vec<Vec<String>>>,
+    profiles: Mutex<Vec<cortex_api::domain::models::model_profile::ModelProfile>>,
+    roles: Mutex<Vec<String>>,
+    pause_vision: AtomicBool,
+    vision_started: tokio::sync::Notify,
     /// Continuation prefix per call (cortex_api#125).
     prefixes: Mutex<Vec<Option<String>>>,
 }
@@ -89,6 +94,8 @@ impl ModelDriver for Model {
                 .lock()
                 .unwrap()
                 .push(input.images.clone());
+            self.profiles.lock().unwrap().push(output.profile());
+            self.roles.lock().unwrap().push(input.role.clone());
             self.prefixes.lock().unwrap().push(input.prefix.clone());
             self.images.lock().unwrap().push((
                 input.images.len(),
@@ -98,7 +105,15 @@ impl ModelDriver for Model {
             let slow = input.prompt.contains("slow");
             let mut error = None;
             let mut text = String::new();
-            if slow && input.role != "answer" {
+            if input.role == "vision_description" && self.pause_vision.load(Ordering::Acquire) {
+                self.vision_started.notify_one();
+                while !*cancel.borrow() {
+                    if cancel.changed().await.is_err() {
+                        break;
+                    }
+                }
+                error = Some(DriverError::Cancelled);
+            } else if slow && input.role != "answer" {
                 // A thinking role runs until thinking is stopped.
                 while !*cancel.borrow() {
                     if cancel.changed().await.is_err() {
@@ -280,10 +295,24 @@ fn runtime(
     address: &str,
     model: Arc<Model>,
 ) -> Arc<ChatRuntime> {
-    let config = Config {
-        hippocampus_url: address.into(),
-        ..Default::default()
-    };
+    runtime_with_config(
+        pool,
+        cache,
+        address,
+        model,
+        Config {
+            hippocampus_url: address.into(),
+            ..Default::default()
+        },
+    )
+}
+fn runtime_with_config(
+    pool: sqlx::PgPool,
+    cache: RedisCache,
+    address: &str,
+    model: Arc<Model>,
+    config: Config,
+) -> Arc<ChatRuntime> {
     let hippocampus = Hippocampus::new(&config).unwrap();
     let shield = Arc::new(SecurityShield::new(&config, Arc::new(Clean)).unwrap());
     let chats = Chats { pool };
@@ -409,7 +438,7 @@ async fn lan_call(rt: &Arc<ChatRuntime>, path: &str, body: Value) -> (StatusCode
         .header("content-type", "application/json")
         .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
             std::net::Ipv4Addr::LOCALHOST,
-            0,
+            1234,
         ))));
     let response = app(rt)
         .oneshot(req.body(Body::from(body.to_string())).unwrap())
@@ -478,7 +507,7 @@ async fn mapped_tools_require_user_auth_and_streaming_before_start() {
         .header("content-type", "application/json")
         .header("x-cortex-tools", "mapped-v1")
         .extension(axum::extract::ConnectInfo(
-            "203.0.113.50:1234".parse::<std::net::SocketAddr>().unwrap(),
+            "127.0.0.1:1234".parse::<std::net::SocketAddr>().unwrap(),
         ))
         .body(Body::from(
             json!({"app_id":"cortex","text":"hello","stream":true}).to_string(),
@@ -748,6 +777,69 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         let _ = base64::engine::general_purpose::STANDARD.encode("png bytes");
     }
 
+    // T1 uses one T0 vision description before its text-only answer. The logical
+    // T1 profile remains selected and a text-only follow-up does not resend an image.
+    let t1_config = Config {
+        hippocampus_url: address.clone(),
+        bonsai_enabled: true,
+        ..Config::default()
+    };
+    let t1_rt = runtime_with_config(
+        pool.clone(),
+        cache.clone(),
+        &address,
+        model.clone(),
+        t1_config,
+    );
+    let call_start = model.profiles.lock().unwrap().len();
+    let (status, text) = call(
+        &t1_rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"Describe the photo.","file_ids":["r-img"],"model_id":"bonsai25-uncensored","thinking":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    let t1_session: Uuid = serde_json::from_str::<Value>(&text).unwrap()["data"]["session_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    {
+        use cortex_api::domain::models::model_profile::ModelProfile;
+        let profiles = model.profiles.lock().unwrap();
+        assert_eq!(
+            &profiles[call_start..],
+            &[ModelProfile::CortexT0, ModelProfile::Bonsai25Uncensored]
+        );
+        let payloads = model.image_payloads.lock().unwrap();
+        use base64::Engine;
+        assert_eq!(
+            payloads[call_start][0],
+            base64::engine::general_purpose::STANDARD.encode("png bytes")
+        );
+        assert!(payloads[call_start + 1].is_empty());
+        let prompts = model.prompts.lock().unwrap();
+        assert!(prompts[call_start + 1].contains("The code is 42."));
+    }
+    let call_start = model.profiles.lock().unwrap().len();
+    let (status, text) = call(
+        &t1_rt,
+        &format!("/chats/{t1_session}/inputs"),
+        Some("alice"),
+        json!({"text":"What did you see?","thinking":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{text}");
+    {
+        use cortex_api::domain::models::model_profile::ModelProfile;
+        assert_eq!(
+            &model.profiles.lock().unwrap()[call_start..],
+            &[ModelProfile::Bonsai25Uncensored]
+        );
+        assert!(model.image_payloads.lock().unwrap()[call_start].is_empty());
+    }
+
     // 3. Another user cannot continue the chat.
     let (status, text) = call(
         &rt,
@@ -765,6 +857,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .iter()
         .filter(|l| l.0 == "memory")
         .count();
+    let temporary_prompt_start = model.prompts.lock().unwrap().len();
     let (status, text) = call(
         &rt,
         "/chats",
@@ -803,7 +896,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(rows, 4);
+    assert_eq!(rows, 5);
     let (status, _) = call(
         &rt,
         &format!("/chats/{temp_session}/inputs"),
@@ -812,7 +905,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert!(model.prompts.lock().unwrap()[6].contains("Temporary question"));
+    assert!(model.prompts.lock().unwrap()[temporary_prompt_start].contains("Temporary question"));
     assert_eq!(
         log.lock()
             .unwrap()
@@ -885,8 +978,8 @@ async fn permanent_and_temporary_chats_run_every_stage() {
         .filter(|l| l.0.starts_with("run "))
         .map(|l| l.1.clone())
         .collect();
-    assert_eq!(runs.len(), 9);
-    assert_eq!(runs.iter().filter(|r| r["user_id"] == "alice").count(), 7);
+    assert_eq!(runs.len(), 11);
+    assert_eq!(runs.iter().filter(|r| r["user_id"] == "alice").count(), 9);
     assert_eq!(
         runs.iter()
             .filter(|r| r["user_id"] == "" && r["app_id"] == "certifications")
@@ -1572,14 +1665,33 @@ async fn temporary_image_upload_and_followup_reach_vision_without_persistent_wri
         );
         return;
     };
-    let pool = database::connect(Target::Test).await.unwrap();
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_t1_temp_image_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
     let before: i64 = sqlx::query_scalar("SELECT count(*) FROM chats WHERE user_id='alice'")
         .fetch_one(&pool)
         .await
         .unwrap();
     let (log, address) = remote().await;
     let model = Arc::new(Model::default());
-    let rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
+    let config = Config {
+        hippocampus_url: address.clone(),
+        bonsai_enabled: true,
+        ..Config::default()
+    };
+    let rt = runtime_with_config(pool.clone(), cache.clone(), &address, model.clone(), config);
     let caller = Caller {
         app_id: "cortex".into(),
         user_id: Some("alice".into()),
@@ -1622,28 +1734,97 @@ async fn temporary_image_upload_and_followup_reach_vision_without_persistent_wri
         &rt,
         "/chats",
         Some("alice"),
-        json!({"app_id":"cortex","text":"Read the image.","temporary":true,"file_ids":[file]}),
+        json!({"app_id":"cortex","text":"Read the image.","temporary":true,"file_ids":[file],"model_id":"bonsai25-uncensored","thinking":true}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let body: Value = serde_json::from_str(&body).unwrap();
     let session = body["data"]["session_id"].as_str().unwrap();
+    let temporary_session = session.to_owned();
     let (status, body) = call(
         &rt,
         &format!("/chats/{session}/inputs"),
         Some("alice"),
-        json!({"text":"Read it again."}),
+        json!({"text":"Read it again.","thinking":false}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    assert_eq!(
-        *model.images.lock().unwrap(),
-        vec![(1, Config::default().vision_model.clone()); 2]
-    );
-    assert_eq!(
-        *model.image_payloads.lock().unwrap(),
-        vec![vec![expected]; 2]
-    );
+    {
+        use cortex_api::domain::models::model_profile::ModelProfile;
+        let profiles = model.profiles.lock().unwrap();
+        assert_eq!(profiles[0], ModelProfile::CortexT0);
+        assert!(
+            profiles[1..7]
+                .iter()
+                .all(|profile| *profile == ModelProfile::Bonsai25Uncensored)
+        );
+        assert_eq!(profiles[7], ModelProfile::CortexT0);
+        assert_eq!(profiles[8], ModelProfile::Bonsai25Uncensored);
+        let payloads = model.image_payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 9);
+        assert_eq!(payloads[0], vec![expected]);
+        assert!(payloads[1..7].iter().all(Vec::is_empty));
+        assert_eq!(payloads[7], vec![payloads[0][0].clone()]);
+        assert!(payloads[8].is_empty());
+        let prompts = model.prompts.lock().unwrap();
+        assert!(
+            prompts[1..7]
+                .iter()
+                .all(|prompt| prompt.contains("The code is 42."))
+        );
+    }
+    model.pause_vision.store(true, Ordering::Release);
+    let profile_start = model.profiles.lock().unwrap().len();
+    let response = send(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({"app_id":"cortex","text":"slow image question","temporary":true,"file_ids":[file_id.to_string()],"model_id":"bonsai25-uncensored","needs_web":true,"web_mode":"medium","stream":true})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let first = frames(response.into_body(), Some(1)).await.pop().unwrap();
+    let cancel_session = first.2["data"]["session_id"].as_str().unwrap();
+    let output = first.2["data"]["output_id"].as_str().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), model.vision_started.notified())
+        .await
+        .expect("T0 vision prepass reached the controlled driver");
+    let cancel = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{cancel_session}/outputs/{output}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(cancel.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if rt
+                .temporary
+                .get(&caller, cancel_session.parse().unwrap())
+                .await
+                .is_ok_and(|chat| {
+                    chat.outputs
+                        .last()
+                        .is_some_and(|o| o.output.status == "cancelled")
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled output persisted");
+    {
+        use cortex_api::domain::models::model_profile::ModelProfile;
+        assert_eq!(
+            &model.profiles.lock().unwrap()[profile_start..],
+            &[ModelProfile::CortexT0]
+        );
+    }
     let after: i64 = sqlx::query_scalar("SELECT count(*) FROM chats WHERE user_id='alice'")
         .fetch_one(&pool)
         .await
@@ -1651,11 +1832,19 @@ async fn temporary_image_upload_and_followup_reach_vision_without_persistent_wri
     assert_eq!(before, after);
     assert!(!log.lock().unwrap().iter().any(|(kind, _)| kind == "memory"));
     cache
-        .remove(&CacheKey::TemporaryChat(session.into()))
+        .remove(&CacheKey::TemporaryChat(temporary_session))
+        .await
+        .unwrap();
+    cache
+        .remove(&CacheKey::TemporaryChat(cancel_session.into()))
         .await
         .unwrap();
     cache
         .remove(&CacheKey::TemporaryChat(file_id.to_string()))
+        .await
+        .unwrap();
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
         .await
         .unwrap();
 }
@@ -1804,6 +1993,130 @@ async fn continue_a_saved_answer_from_a_recorded_alternative() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires cortex_api_test and approved Valkey; unique temporary schema"]
+async fn cancelled_stream_persists_partial_answer_text() {
+    dotenvy::dotenv().ok();
+    let Some((_, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping cancelled_stream_persists_partial_answer_text: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_partial_answer_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+    let (_log, address) = remote().await;
+    let model = Arc::new(Model::default());
+    let rt = runtime(pool.clone(), cache, &address, model);
+
+    use futures_util::StreamExt;
+    async fn read_partial_frame(
+        stream: &mut (impl StreamExt<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+        buf: &mut String,
+    ) -> Option<(u64, String, Value)> {
+        loop {
+            if let Some(end) = buf.find("\n\n") {
+                let block: String = buf.drain(..end + 2).collect();
+                let field = |name: &str| {
+                    block
+                        .lines()
+                        .find_map(|line| line.strip_prefix(name).map(str::to_owned))
+                };
+                if let (Some(id), Some(event), Some(data)) =
+                    (field("id: "), field("event: "), field("data: "))
+                {
+                    return Some((
+                        id.parse().unwrap(),
+                        event,
+                        serde_json::from_str(&data).unwrap(),
+                    ));
+                }
+            }
+            let chunk = stream.next().await?.ok()?;
+            buf.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+    }
+
+    let response = send(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({"app_id":"cortex","text":"slow answer for partial persistence","stream":true})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let mut buffer = String::new();
+    let mut session_id = None;
+    let mut output_id = None;
+    let mut saw_answer_token = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some((_, event, value)) = read_partial_frame(&mut stream, &mut buffer).await {
+            if let Some(data) = value.get("data") {
+                if let Some(id) = data.get("session_id").and_then(Value::as_str) {
+                    session_id = Some(id.parse::<Uuid>().unwrap());
+                }
+                if let Some(id) = data.get("output_id").and_then(Value::as_str) {
+                    output_id = Some(id.parse::<Uuid>().unwrap());
+                }
+            }
+            if event == "token" {
+                saw_answer_token = true;
+                break;
+            }
+        }
+    })
+    .await
+    .expect("model emitted an answer token before cancellation");
+    assert!(saw_answer_token);
+    let session_id = session_id.expect("stream identified the session");
+    let output_id = output_id.expect("stream identified the output");
+    let cancel = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{session_id}/outputs/{output_id}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(cancel.status(), StatusCode::OK);
+    while read_partial_frame(&mut stream, &mut buffer).await.is_some() {}
+
+    let (status, text): (String, String) =
+        sqlx::query_as("SELECT status, text FROM chat_outputs WHERE output_id=$1")
+            .bind(output_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "cancelled");
+    assert!(
+        !text.trim().is_empty(),
+        "partial answer text remains attached to the cancelled output"
+    );
+    assert!(
+        text.starts_with("w0 "),
+        "persisted text is the streamed partial answer: {text}"
+    );
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await

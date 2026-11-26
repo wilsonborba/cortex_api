@@ -10,6 +10,7 @@ use crate::{
             chat_session::{NewChat, NextInput, SessionFile},
             history::FinishedOutput,
             identity::Caller,
+            model_profile::ModelProfile,
             temporary::*,
         },
         services::chat_session,
@@ -142,14 +143,17 @@ impl TemporaryChats {
         let metadata = metadata(&files);
         let session_id = Uuid::now_v7();
         let prepared = chat_session::prepare(
+            &self.config,
             caller.storage_scope(),
             session_id,
             body.input(),
             &metadata,
             now,
         )?;
+        let model_id = prepared.input.model_id.clone();
         let chat = TemporaryChat {
             session_id,
+            model_id,
             title: chat_session::title(&self.config, &body.text, &metadata),
             persona_id: body.persona_id,
             inputs: vec![prepared.input],
@@ -220,9 +224,23 @@ impl TemporaryChats {
     ) -> Result<TemporaryChat, ProcessNumber> {
         let previous = self.get(caller, id).await?;
         let files = self.files(caller, &body, &previous.files).await?;
-        let prepared =
-            chat_session::prepare(caller.storage_scope(), id, body, &metadata(&files), now)?;
+        let selected_model = match body.model_id {
+            Some(profile) => profile,
+            None => ModelProfile::from_id(&previous.model_id)
+                .ok_or(process_numbers::MODEL_UNAVAILABLE)?,
+        };
+        let mut body = body;
+        body.model_id = Some(selected_model);
+        let prepared = chat_session::prepare(
+            &self.config,
+            caller.storage_scope(),
+            id,
+            body,
+            &metadata(&files),
+            now,
+        )?;
         self.update(caller, id, true, |chat| {
+            chat.model_id = selected_model.id().into();
             chat.inputs.push(prepared.input.clone());
             chat.outputs.push(TemporaryOutput {
                 output: prepared.output.clone(),

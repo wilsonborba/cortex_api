@@ -543,6 +543,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "image",
+ "libc",
  "ort",
  "pdfium-render",
  "redis",

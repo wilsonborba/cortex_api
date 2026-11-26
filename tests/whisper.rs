@@ -1,9 +1,18 @@
 use cortex_api::{
     core::config::Config,
-    dal::{local::whisper, remote::ollama::Ollama},
+    dal::{
+        local::whisper,
+        remote::{
+            model_router::ModelRouter, ollama::Ollama, prism::Prism,
+            prism_supervisor::PrismSupervisor,
+        },
+    },
     domain::{
         models::{
+            driver::{CallInput, ModelDriver, OutputModel},
+            events::{NativeEvent, StepName},
             identity::Caller,
+            model_profile::ModelProfile,
             usage::{CallUsage, LedgerUnavailable, Pending, Share, Usage, WaitingCall},
         },
         services::{
@@ -13,7 +22,9 @@ use cortex_api::{
         },
     },
 };
+use futures_util::StreamExt;
 use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, watch};
 #[derive(Default)]
 struct Ledger {
     records: Mutex<Vec<CallUsage>>,
@@ -96,4 +107,446 @@ async fn transcribes_opus_and_mp3_on_the_gpu_in_the_model_queue() {
     assert_eq!(recorded.len(), 2);
     assert_eq!(recorded[0].usage.audio, 7);
     assert_eq!(recorded[1].usage.audio, 23);
+}
+
+async fn ollama_loaded(config: &Config) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .get(format!(
+            "{}/api/ps",
+            config.ollama_url.trim_end_matches('/')
+        ))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Ollama /api/ps status {}", response.status()));
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
+            return Err("Ollama /api/ps exceeded the 64 KiB test bound".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    Ok(value["models"]
+        .as_array()
+        .ok_or("Ollama /api/ps models missing")?
+        .iter()
+        .filter_map(|model| model["name"].as_str().map(str::to_owned))
+        .collect())
+}
+
+async fn unload_test_t0(config: &Config) -> Result<(), String> {
+    let loaded = ollama_loaded(config).await?;
+    if loaded.is_empty() {
+        return Ok(());
+    }
+    if loaded.len() != 1 || loaded[0] != config.text_model {
+        return Err(format!(
+            "preserving unexpected Ollama models during Whisper cleanup: {loaded:?}"
+        ));
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(format!(
+            "{}/api/generate",
+            config.ollama_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({"model":config.text_model,"keep_alive":0,"stream":false,"prompt":""}))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("test-owned T0 unload status {}", response.status()));
+    }
+    for _ in 0..30 {
+        if ollama_loaded(config).await?.is_empty() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Err("test-owned T0 did not unload within 30 seconds".into())
+}
+
+fn whisper_test_resources_ok(min_gpu_free_mib: u64) -> Result<(), String> {
+    let mem = std::fs::read_to_string("/proc/meminfo").map_err(|error| error.to_string())?;
+    let available_kib = mem
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("MemAvailable:")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .ok_or("MemAvailable missing")?;
+    if available_kib < 4 * 1024 * 1024 {
+        return Err(format!("MemAvailable below 4 GiB: {available_kib} KiB"));
+    }
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .map_err(|error| error.to_string())?
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<f64>().ok())
+        .ok_or("load average missing")?;
+    if load > 24.0 {
+        return Err(format!("load average too high: {load}"));
+    }
+    let output = std::process::Command::new("timeout")
+        .args([
+            "5s",
+            "nvidia-smi",
+            "--query-gpu=memory.free",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "nvidia-smi failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let gpu_free_mib = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| error.to_string())?;
+    if gpu_free_mib < min_gpu_free_mib {
+        return Err(format!(
+            "GPU free memory below {min_gpu_free_mib} MiB: {gpu_free_mib} MiB"
+        ));
+    }
+    Ok(())
+}
+
+async fn whisper_test_router_call(
+    router: &Arc<ModelRouter>,
+    output: &OutputModel,
+    input: CallInput,
+    label: &str,
+) -> Result<cortex_api::domain::models::driver::CallOutcome, String> {
+    let (events, _receiver) = mpsc::unbounded_channel();
+    let (cancel_tx, cancel) = watch::channel(false);
+    let call = router.call(output, input, events, cancel);
+    tokio::pin!(call);
+    let mut pressure = None;
+    let mut monitor = tokio::time::interval(std::time::Duration::from_secs(5));
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        loop {
+            tokio::select! {
+                result = &mut call => break Some(result),
+                _ = monitor.tick() => {
+                    if let Err(reason) = whisper_test_resources_ok(700) {
+                        pressure = Some(reason);
+                        let _ = cancel_tx.send(true);
+                        break None;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    let result = match observed {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            let settled = tokio::time::timeout(std::time::Duration::from_secs(60), &mut call)
+                .await
+                .map_err(|_| format!("{label} did not settle after resource cancellation"))?;
+            if let Some(reason) = pressure.as_ref() {
+                return Err(format!("{label} cancelled for resource pressure: {reason}"));
+            }
+            settled
+        }
+        Err(_) => {
+            let _ = cancel_tx.send(true);
+            let _settled = tokio::time::timeout(std::time::Duration::from_secs(60), &mut call)
+                .await
+                .map_err(|_| format!("{label} did not settle after the 300 second deadline"))?
+                .map_err(|error| {
+                    format!("{label} failed while settling after its deadline: {error:?}")
+                })?;
+            return Err(format!(
+                "{label} exceeded the 300 second deadline and settled safely"
+            ));
+        }
+    };
+    if let Some(reason) = pressure.as_ref() {
+        return Err(format!("{label} cancelled for resource pressure: {reason}"));
+    }
+    result.map_err(|error| format!("{label} provider error: {error:?}"))
+}
+
+#[tokio::test]
+#[ignore = "requires a separate explicit GPU authorization; real Bonsai to Whisper transition"]
+async fn transitions_bonsai_to_whisper_and_recovers_t0_on_the_shared_queue() {
+    use futures_util::FutureExt;
+
+    let available = std::net::TcpListener::bind("127.0.0.1:0").expect("free loopback port");
+    let port = available.local_addr().unwrap().port();
+    drop(available);
+    let config = Config {
+        bonsai_enabled: true,
+        prism_server_path: std::env::var("CORTEX_TEST_PRISM_SERVER")
+            .expect("runner pins CORTEX_TEST_PRISM_SERVER")
+            .into(),
+        bonsai_model_directory: std::env::var("CORTEX_TEST_BONSAI_DIR")
+            .expect("runner pins CORTEX_TEST_BONSAI_DIR")
+            .into(),
+        ollama_url: std::env::var("CORTEX_TEST_OLLAMA_URL")
+            .expect("runner pins CORTEX_TEST_OLLAMA_URL"),
+        prism_url: format!("http://127.0.0.1:{port}"),
+        whisper_model_path: std::env::var("CORTEX_TEST_WHISPER_MODEL")
+            .expect("runner pins CORTEX_TEST_WHISPER_MODEL")
+            .into(),
+        ..Config::default()
+    };
+    assert!(config.prism_url_is_loopback());
+    whisper_test_resources_ok(7600).expect("safe resources before loading T1 or Whisper");
+    assert!(
+        config.whisper_model_path.is_file(),
+        "reuse the installed Whisper artifact"
+    );
+    assert!(
+        ollama_loaded(&config)
+            .await
+            .expect("Ollama preflight")
+            .is_empty(),
+        "do not disturb pre-existing Ollama models"
+    );
+
+    let ledger = Arc::new(Ledger::default());
+    let queue = Scheduler::new(ledger.clone());
+    let supervisor = Arc::new(PrismSupervisor::new());
+    let ollama = Arc::new(
+        Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()),
+    );
+    let prism = Arc::new(Prism::managed(
+        config.clone(),
+        queue.clone(),
+        supervisor.clone(),
+    ));
+    let router = Arc::new(ModelRouter::new(ollama.clone(), prism, queue.clone()));
+    let transcriber = LocalTranscriber {
+        queue: queue.clone(),
+        ollama,
+        config: config.clone(),
+    };
+    let caller = Caller {
+        app_id: "bonsai-eval".into(),
+        user_id: Some("local-eval".into()),
+        is_admin: false,
+    };
+    let mut owned_t0 = false;
+    let result = std::panic::AssertUnwindSafe(async {
+        let profile = ModelProfile::Bonsai25Uncensored;
+        let t1_output = OutputModel::for_profile(&caller, uuid::Uuid::now_v7(), profile, false);
+        let t1_input = CallInput {
+            role: "answer".into(),
+            system: "Answer accurately in one concise sentence.".into(),
+            prompt: "Define Rust ownership in one sentence.".into(),
+            images: vec![],
+            temperature: 0.0,
+            max_tokens: 128,
+            context_tokens: 8192,
+            prefix: None,
+            allow_tools: false,
+            tool_history: vec![],
+        };
+        let t1_call = whisper_test_router_call(&router, &t1_output, t1_input, "T1 setup").await;
+        eprintln!(
+            "EVAL {}",
+            serde_json::json!({"case":"whisper-t1-load","profile":profile.id(),"text":t1_call.as_ref().ok().map(|outcome|outcome.text.as_str()),"error":t1_call.as_ref().err(),"total_ms":t1_call.as_ref().ok().map(|outcome|outcome.usage.total_ms),"ttft_ms":t1_call.as_ref().ok().and_then(|outcome|outcome.usage.time_to_first_token_ms)})
+        );
+        let t1_result = t1_call.expect("bounded real T1 answer");
+        assert!(t1_result.error.is_none(), "T1 error: {:?}", t1_result.error);
+        assert!(!t1_result.text.trim().is_empty());
+        assert!(
+            supervisor
+                .is_running(profile)
+                .await
+                .expect("owned Prism status"),
+            "T1 child is resident before the Whisper transition"
+        );
+        let (events, mut event_rx, event_task) = channel(&config, None);
+        let bytes =
+            Arc::new(std::fs::read("tests/fixtures/audio.opus").expect("existing Opus fixture"));
+        let transcription_started = std::time::Instant::now();
+        let mut transcribe_pressure = None;
+        let mut transcribe_deadline_hit = false;
+        let mut event_stream_open = true;
+        let mut saw_transcribe_step = false;
+        let mut transcribe_step_observed_inflight = false;
+        let mut transcribe_step_prism_stopped: Option<Result<bool, String>> = None;
+        let mut transcribe_step_observed_ms = None;
+        let text_result = async {
+            let transcription = transcriber.transcribe(&caller, "audio.opus", bytes, &events);
+            tokio::pin!(transcription);
+            let transcribe_deadline = tokio::time::sleep(std::time::Duration::from_secs(300));
+            tokio::pin!(transcribe_deadline);
+            let mut transcribe_monitor = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    biased;
+                    event = event_rx.recv(), if event_stream_open && !saw_transcribe_step => {
+                        match event {
+                            Some(event) => {
+                                if let NativeEvent::Step(step) = event.event
+                                    && step.step == StepName::Transcribe
+                                    && !saw_transcribe_step
+                                {
+                                    saw_transcribe_step = true;
+                                    transcribe_step_observed_inflight = true;
+                                    transcribe_step_observed_ms = Some(transcription_started.elapsed().as_millis());
+                                    transcribe_step_prism_stopped = Some(
+                                        supervisor.is_running(profile).await
+                                            .map(|running| !running)
+                                            .map_err(|error| format!("Prism status query failed: {error:?}"))
+                                    );
+                                }
+                            }
+                            None => event_stream_open = false,
+                        }
+                    }
+                    result = &mut transcription => break result,
+                    _ = transcribe_monitor.tick() => {
+                        if transcribe_pressure.is_none()
+                            && let Err(reason) = whisper_test_resources_ok(700)
+                        {
+                            transcribe_pressure = Some(reason);
+                        }
+                    }
+                    _ = &mut transcribe_deadline, if !transcribe_deadline_hit => {
+                        transcribe_deadline_hit = true;
+                    }
+                }
+            }
+        }
+        .await;
+        drop(events);
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while let Some(event) = event_rx.recv().await {
+                if let NativeEvent::Step(step) = event.event
+                    && step.step == StepName::Transcribe
+                {
+                    saw_transcribe_step = true;
+                }
+            }
+        })
+        .await
+        .expect("bounded Whisper progress drain");
+        tokio::time::timeout(std::time::Duration::from_secs(5), event_task)
+            .await
+            .expect("bounded Whisper event task completion")
+            .expect("Whisper event task");
+        eprintln!(
+            "EVAL {}",
+            serde_json::json!({"case":"whisper-transcription","text":text_result.as_ref().ok(),"error":text_result.as_ref().err().map(|error|format!("{error:?}")),"wall_ms":transcription_started.elapsed().as_millis(),"soft_deadline_300s_exceeded":transcribe_deadline_hit,"transcribe_steps":saw_transcribe_step,"transcribe_step_observed_inflight":transcribe_step_observed_inflight,"transcribe_step_observed_ms":transcribe_step_observed_ms,"prism_stopped_at_first_transcribe_step":transcribe_step_prism_stopped,"resource_pressure":transcribe_pressure})
+        );
+        assert!(
+            !transcribe_deadline_hit,
+            "Whisper exceeded its 300 second soft deadline; native inference was allowed to finish safely"
+        );
+        assert!(
+            transcribe_pressure.is_none(),
+            "Whisper crossed a resource guard: {transcribe_pressure:?}"
+        );
+        assert!(
+            saw_transcribe_step,
+            "Whisper must emit a Transcribe progress step"
+        );
+        assert!(
+            transcribe_step_observed_inflight,
+            "the first Transcribe progress event was not observed while inference remained in flight"
+        );
+        assert_eq!(
+            transcribe_step_prism_stopped,
+            Some(Ok(true)),
+            "Prism must be stopped when the first Transcribe progress event is observed"
+        );
+        let text = text_result.expect("existing Opus fixture transcribes");
+        assert!(!text.trim().is_empty());
+        assert!(
+            !supervisor
+                .is_running(profile)
+                .await
+                .expect("Prism status after Whisper"),
+            "Prism remains unloaded after local transcription"
+        );
+
+        owned_t0 = true;
+        let t0_output =
+            OutputModel::for_profile(&caller, uuid::Uuid::now_v7(), ModelProfile::CortexT0, false);
+        let t0_call = whisper_test_router_call(
+            &router,
+            &t0_output,
+            CallInput {
+                role: "answer".into(),
+                system: "Answer concisely.".into(),
+                prompt: "Reply with the word RECOVERED.".into(),
+                images: vec![],
+                temperature: 0.0,
+                max_tokens: 32,
+                context_tokens: 8192,
+                prefix: None,
+                allow_tools: false,
+                tool_history: vec![],
+            },
+            "T0 recovery",
+        )
+        .await;
+        eprintln!(
+            "EVAL {}",
+            serde_json::json!({"case":"whisper-t0-recovery","text":t0_call.as_ref().ok().map(|outcome|outcome.text.as_str()),"error":t0_call.as_ref().err(),"total_ms":t0_call.as_ref().ok().map(|outcome|outcome.usage.total_ms),"ttft_ms":t0_call.as_ref().ok().and_then(|outcome|outcome.usage.time_to_first_token_ms)})
+        );
+        let t0_result = t0_call.expect("bounded T0 recovery answer");
+        assert!(t0_result.error.is_none(), "T0 error: {:?}", t0_result.error);
+        assert!(!t0_result.text.trim().is_empty());
+        assert!(t0_result.text.to_lowercase().contains("recovered"));
+
+        let recorded = ledger.records.lock().unwrap();
+        let audio: Vec<_> = recorded
+            .iter()
+            .filter(|record| record.usage.audio > 0)
+            .collect();
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].usage.audio, 7);
+        assert_eq!(recorded.len(), 3, "T1, audio, and T0 usage are recorded");
+    })
+    .catch_unwind()
+    .await;
+
+    let stop_result = supervisor.stop().await;
+    let cleanup = async {
+        if owned_t0 {
+            unload_test_t0(&config).await?;
+        }
+        let remaining = ollama_loaded(&config).await?;
+        if !remaining.is_empty() {
+            return Err(format!(
+                "preserving unexpected Ollama models: {remaining:?}"
+            ));
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+    stop_result.expect("stop only the owned Prism child");
+    cleanup.expect("verify test-owned Ollama cleanup");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

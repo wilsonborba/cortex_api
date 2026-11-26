@@ -3,7 +3,10 @@ use crate::{
         config::Config,
         process_numbers::{self, ProcessNumber},
     },
-    domain::models::{chat_session::*, identity::Caller, run_record::WebMode, storage::*},
+    domain::models::{
+        chat_session::*, identity::Caller, model_profile::ModelProfile, run_record::WebMode,
+        storage::*,
+    },
 };
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -29,12 +32,23 @@ pub fn title(config: &Config, text: &str, files: &[SessionFile]) -> String {
     prefix.into()
 }
 pub(crate) fn prepare(
+    config: &Config,
     scope: AppUser,
     session: Uuid,
     input: NextInput,
     files: &[SessionFile],
     now: DateTime<Utc>,
 ) -> Result<PreparedInput, ProcessNumber> {
+    let profile = input.model_id.unwrap_or_else(|| {
+        if config.bonsai_enabled {
+            ModelProfile::default()
+        } else {
+            ModelProfile::legacy_default()
+        }
+    });
+    if profile.uses_prism() && !config.bonsai_enabled {
+        return Err(process_numbers::MODEL_UNAVAILABLE);
+    }
     if (input.text.trim().is_empty() && input.file_ids.is_empty())
         || input.file_ids.len() != files.len()
         || input
@@ -75,6 +89,7 @@ pub(crate) fn prepare(
             use_memory: input.use_memory,
             memory_topic: input.memory_topic,
             thinking: input.thinking,
+            model_id: profile.id().into(),
             created_at: now,
         },
         output: ChatOutput {
@@ -107,13 +122,22 @@ pub fn new_permanent(
     }
     let session = Uuid::now_v7();
     let title = title(config, &body.text, files);
-    let mut prepared = prepare(caller.storage_scope(), session, body.input(), files, now)?;
+    let mut prepared = prepare(
+        config,
+        caller.storage_scope(),
+        session,
+        body.input(),
+        files,
+        now,
+    )?;
+    let model_id = prepared.input.model_id.clone();
     prepared.new_chat = Some(Chat {
         session_id: session,
         app_id: caller.app_id.clone(),
         user_id: caller.user_id.clone().unwrap_or_default(),
         title,
         persona_id: body.persona_id,
+        model_id,
         is_pinned: false,
         created_at: now,
         updated_at: now,
@@ -121,6 +145,7 @@ pub fn new_permanent(
     Ok(prepared)
 }
 pub fn continue_permanent(
+    config: &Config,
     caller: &Caller,
     chat: &Chat,
     body: NextInput,
@@ -131,5 +156,87 @@ pub fn continue_permanent(
     {
         return Err(process_numbers::NOT_FOUND);
     }
-    prepare(caller.storage_scope(), chat.session_id, body, files, now)
+    let mut body = body;
+    let persisted_model =
+        ModelProfile::from_id(&chat.model_id).ok_or(process_numbers::MODEL_UNAVAILABLE)?;
+    body.model_id = Some(body.model_id.unwrap_or(persisted_model));
+    prepare(
+        config,
+        caller.storage_scope(),
+        chat.session_id,
+        body,
+        files,
+        now,
+    )
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::prepare;
+    use crate::{
+        core::config::Config,
+        domain::models::{
+            chat_session::NextInput, model_profile::ModelProfile, run_record::WebMode,
+            storage::AppUser,
+        },
+    };
+    use chrono::Utc;
+
+    fn input(model_id: Option<ModelProfile>) -> NextInput {
+        NextInput {
+            text: "hello".into(),
+            model_id,
+            file_ids: vec![],
+            stream: false,
+            needs_web: false,
+            web_mode: WebMode::Fast,
+            use_memory: false,
+            memory_topic: None,
+            thinking: false,
+            continue_from: None,
+            continuation: None,
+        }
+    }
+
+    #[test]
+    fn omitted_profile_is_t0_when_disabled_and_uncensored_when_enabled() {
+        let scope = AppUser {
+            app_id: "test".into(),
+            user_id: "user".into(),
+        };
+        let mut config = Config::default();
+        let disabled = prepare(
+            &config,
+            scope.clone(),
+            uuid::Uuid::now_v7(),
+            input(None),
+            &[],
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(disabled.input.model_id, "cortex-t0");
+        let denied = prepare(
+            &config,
+            scope.clone(),
+            uuid::Uuid::now_v7(),
+            input(Some(ModelProfile::Bonsai25Uncensored)),
+            &[],
+            Utc::now(),
+        );
+        assert_eq!(
+            denied.err().unwrap().number,
+            crate::core::process_numbers::MODEL_UNAVAILABLE.number
+        );
+        config.bonsai_enabled = true;
+        let enabled = prepare(
+            &config,
+            scope,
+            uuid::Uuid::now_v7(),
+            input(None),
+            &[],
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(enabled.input.model_id, "bonsai25-uncensored");
+    }
 }
