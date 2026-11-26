@@ -1558,7 +1558,11 @@ mod tests {
     async fn gpu_prism_auth_smoke_uncensored() {
         use futures_util::FutureExt;
 
-        let (config, _queue, supervisor, router) = evaluation_model_router_setup().await;
+        let (config, queue, supervisor, _router) = evaluation_model_router_setup().await;
+        // Exercise the actual managed Prism driver and Scheduler, but avoid a
+        // ModelRouter transition here: its Ollama unload path must not touch
+        // models that could appear after the initial empty-state preflight.
+        let prism = Prism::managed(config.clone(), queue, supervisor.clone());
         let profile = ModelProfile::Bonsai25Uncensored;
         let base = config.prism_url.trim_end_matches('/').to_owned();
         let client = reqwest::Client::builder()
@@ -1580,7 +1584,34 @@ mod tests {
                 )],
             );
             let output = evaluation_output(profile, false);
-            let answer = evaluation_thinking_answer(&router, &config, &output, &context, None).await;
+            let (events, _event_rx) = mpsc::unbounded_channel();
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            let input = CallInput {
+                role: "answer".into(),
+                system: context.system.clone(),
+                prompt: context.prompt.clone(),
+                images: vec![],
+                temperature: 0.0,
+                max_tokens: 128,
+                context_tokens: 8192,
+                prefix: None,
+                allow_tools: false,
+                tool_history: vec![],
+            };
+            let answer_call = prism.call(&output, input, events, cancel_rx);
+            tokio::pin!(answer_call);
+            let mut monitor = tokio::time::interval(Duration::from_secs(5));
+            let answer = loop {
+                tokio::select! {
+                    biased;
+                    outcome = &mut answer_call => break outcome.expect("managed Prism answer"),
+                    _ = monitor.tick() => {
+                        if evaluation_resources_ok(700).is_err() {
+                            let _ = cancel_tx.send(true);
+                        }
+                    }
+                }
+            };
             assert_measured_answer(&answer);
             assert!(!answer.text.trim().is_empty());
             child_pid = supervisor.child.lock().await.as_ref().map(|owned| owned.pid);
