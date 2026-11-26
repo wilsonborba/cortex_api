@@ -437,17 +437,6 @@ impl PrismProcessControl for CountingPrismProcess {
         Box::pin(async { Ok(()) })
     }
 
-    fn authorization_header<'a>(
-        &'a self,
-        _: ModelProfile,
-    ) -> Pending<'a, Result<reqwest::header::HeaderValue, DriverError>> {
-        Box::pin(async {
-            let mut header = reqwest::header::HeaderValue::from_static("Bearer test-prism-key");
-            header.set_sensitive(true);
-            Ok(header)
-        })
-    }
-
     fn is_running<'a>(&'a self, _: ModelProfile) -> Pending<'a, Result<bool, DriverError>> {
         Box::pin(async { Ok(false) })
     }

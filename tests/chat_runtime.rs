@@ -212,19 +212,6 @@ impl PrismProcessControl for FixturePrismControl {
             Ok(())
         })
     }
-    fn authorization_header<'a>(
-        &'a self,
-        profile: ModelProfile,
-    ) -> Pending<'a, Result<reqwest::header::HeaderValue, DriverError>> {
-        Box::pin(async move {
-            if *self.active.lock().unwrap() != Some(profile) {
-                return Err(DriverError::Ollama);
-            }
-            let mut value = reqwest::header::HeaderValue::from_static("Bearer fixture-prism-key");
-            value.set_sensitive(true);
-            Ok(value)
-        })
-    }
     fn stop<'a>(&'a self) -> Pending<'a, Result<(), DriverError>> {
         Box::pin(async move {
             self.active.lock().unwrap().take();
