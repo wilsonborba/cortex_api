@@ -2285,8 +2285,46 @@ InvocationID=
         );
     }
 
+    #[derive(Clone, Default)]
+    struct LocalOllamaDouble {
+        ps_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        generate_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn run_mock_ollama(listener: tokio::net::TcpListener, state: LocalOllamaDouble) {
+        use std::sync::atomic::Ordering;
+        let app = axum::Router::new()
+            .route(
+                "/api/ps",
+                axum::routing::get({
+                    let state = state.clone();
+                    move || {
+                        state.ps_calls.fetch_add(1, Ordering::SeqCst);
+                        async { axum::Json(serde_json::json!({ "models": [] })) }
+                    }
+                }),
+            )
+            .route(
+                "/api/generate",
+                axum::routing::post({
+                    let state = state.clone();
+                    move || {
+                        state.generate_calls.fetch_add(1, Ordering::SeqCst);
+                        async { axum::Json(serde_json::json!({ "done": true, "response": "ok" })) }
+                    }
+                }),
+            );
+        let _ = axum::serve(listener, app).await;
+    }
+
     #[tokio::test]
     async fn scheduler_blocks_next_provider_while_prism_unconfirmed_or_stopping() {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = LocalOllamaDouble::default();
+        let _server = tokio::spawn(run_mock_ollama(listener, mock.clone()));
+
         let queue = Scheduler::new(Arc::new(EvaluationLedger));
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
             load_state: "loaded".into(),
@@ -2312,6 +2350,7 @@ InvocationID=
 
         let config = Config {
             bonsai_enabled: true,
+            ollama_url: format!("http://{addr}"),
             ..Config::default()
         };
         let ollama = Arc::new(
@@ -2322,28 +2361,43 @@ InvocationID=
             .acquire("test-actor".into(), uuid::Uuid::new_v4())
             .await
             .unwrap();
+
+        // 1. Attempt provider while Prism stop is unconfirmed/failing.
         let res = ollama.release_models_for_local_job(&permit).await;
         assert_eq!(res.unwrap_err(), DriverError::Ollama);
+        // Confirm ZERO provider requests reached the local fake provider while Prism stop is unconfirmed.
+        assert_eq!(
+            mock.ps_calls.load(Ordering::SeqCst),
+            0,
+            "provider must receive zero requests while Prism stop is unconfirmed"
+        );
 
+        // 2. Repair stop in runner; retry reaches local fake provider.
         *runner.fail_stop.lock().await = false;
-        let res_ok = supervisor.stop().await;
+        let res_ok = ollama.release_models_for_local_job(&permit).await;
         assert!(res_ok.is_ok());
+        assert!(
+            mock.ps_calls.load(Ordering::SeqCst) > 0,
+            "retry after confirmed stop must reach the local provider"
+        );
     }
 
     #[tokio::test]
     async fn ollama_t0_works_when_bonsai_disabled_and_unit_absent() {
+        use std::sync::atomic::Ordering;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mock = LocalOllamaDouble::default();
+        let _server = tokio::spawn(run_mock_ollama(listener, mock.clone()));
+
         let queue = Scheduler::new(Arc::new(EvaluationLedger));
         let config = Config {
             bonsai_enabled: false,
+            ollama_url: format!("http://{addr}"),
             ..Config::default()
         };
 
-        let _ollama = Ollama::new(config.clone(), queue.clone());
-        let _permit = queue
-            .acquire("test-actor".into(), uuid::Uuid::new_v4())
-            .await
-            .unwrap();
-
+        // Missing-unit SystemctlRunner response shape (not-found / inactive / dead).
         let runner = Arc::new(MockSystemdRunner::new(UnitStatus {
             load_state: "not-found".into(),
             active_state: "inactive".into(),
@@ -2353,9 +2407,24 @@ InvocationID=
             invocation_id: String::new(),
         }));
         let supervisor = Arc::new(PrismSupervisor::with_runner(runner.clone()));
-        let res = supervisor.stop().await;
+        let ollama = Arc::new(
+            Ollama::new(config.clone(), queue.clone()).with_prism_supervisor(supervisor.clone()),
+        );
+        let permit = queue
+            .acquire("test-actor".into(), uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+
+        // Release models / prepare local job for T0 or Whisper:
+        let res = ollama.release_models_for_local_job(&permit).await;
         assert!(res.is_ok());
+        // Confirm zero systemctl stop commands were issued when unit is absent and Bonsai disabled.
         assert_eq!(runner.stop_calls.lock().await.len(), 0);
+        // Confirm preparation/provider boundary reaches local fake Ollama provider without systemctl.
+        assert!(
+            mock.ps_calls.load(Ordering::SeqCst) > 0,
+            "T0/Whisper path must reach local provider when unit is absent"
+        );
     }
 
     #[tokio::test]
