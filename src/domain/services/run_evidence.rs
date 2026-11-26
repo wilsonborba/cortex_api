@@ -39,4 +39,7 @@ impl RunEvidence {
         };
         self.store.put(&record).await
     }
+    pub async fn get_many(&self, ids: &[uuid::Uuid]) -> Result<Vec<RunRecord>, RunStoreError> {
+        self.store.get_many(ids).await
+    }
 }
