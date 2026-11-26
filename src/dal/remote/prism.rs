@@ -13,7 +13,6 @@ use crate::{
 };
 use chrono::Utc;
 use futures_util::StreamExt;
-use reqwest::header::{AUTHORIZATION, HeaderValue};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Instant};
 use tokio::sync::{mpsc, watch};
@@ -27,10 +26,6 @@ pub trait PrismProcessControl: Send + Sync {
         profile: crate::domain::models::model_profile::ModelProfile,
         cancel: &'a mut watch::Receiver<bool>,
     ) -> Pending<'a, Result<(), DriverError>>;
-    fn authorization_header<'a>(
-        &'a self,
-        profile: crate::domain::models::model_profile::ModelProfile,
-    ) -> Pending<'a, Result<HeaderValue, DriverError>>;
     fn stop<'a>(&'a self) -> Pending<'a, Result<(), DriverError>>;
     fn is_running<'a>(
         &'a self,
@@ -210,10 +205,6 @@ impl Prism {
                     .ensure(&self.config, profile, &mut cancel)
                     .await?;
             }
-            let authorization = match &self.supervisor {
-                Some(supervisor) => Some(supervisor.authorization_header(profile).await?),
-                None => None,
-            };
             let expected_alias = profile.runtime_alias().ok_or(DriverError::InvalidInput)?;
             let expected_file = profile
                 .artifact_filename()
@@ -228,7 +219,6 @@ impl Prism {
                     expected_alias,
                     expected_file,
                     input.context_tokens,
-                    authorization.as_ref(),
                     &mut cancel,
                 ),
             )
@@ -251,7 +241,7 @@ impl Prism {
                 let mut response = tokio::select! {
                     biased;
                     _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                    response = authorized(self.client.post(format!("{}/v1/chat/completions", self.config.prism_url.trim_end_matches('/'))), authorization.as_ref()).json(&body).send() => response.map_err(|_| DriverError::Ollama)?,
+                    response = self.client.post(format!("{}/v1/chat/completions", self.config.prism_url.trim_end_matches('/'))).json(&body).send() => response.map_err(|_| DriverError::Ollama)?,
                 };
                 if !response.status().is_success() {
                     let status = response.status();
@@ -291,7 +281,7 @@ impl Prism {
                     response = tokio::select! {
                         biased;
                         _ = cancelled(&mut cancel) => return Err(DriverError::Cancelled),
-                        response = authorized(self.client.post(format!("{}/v1/chat/completions", self.config.prism_url.trim_end_matches('/'))), authorization.as_ref()).json(&body).send() => response.map_err(|_| DriverError::Ollama)?,
+                        response = self.client.post(format!("{}/v1/chat/completions", self.config.prism_url.trim_end_matches('/'))).json(&body).send() => response.map_err(|_| DriverError::Ollama)?,
                     };
                     if !response.status().is_success() {
                         return Err(DriverError::Ollama);
@@ -637,26 +627,15 @@ async fn read_limited_json(
     serde_json::from_slice(&body).map_err(|_| DriverError::Ollama)
 }
 
-fn authorized(
-    request: reqwest::RequestBuilder,
-    authorization: Option<&HeaderValue>,
-) -> reqwest::RequestBuilder {
-    match authorization {
-        Some(value) => request.header(AUTHORIZATION, value.clone()),
-        None => request,
-    }
-}
-
 async fn readiness_json(
     client: &reqwest::Client,
     url: String,
-    authorization: Option<&HeaderValue>,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<Option<Value>, DriverError> {
     let response = tokio::select! {
         biased;
         _ = cancelled(cancel) => return Err(DriverError::Cancelled),
-        response = authorized(client.get(url), authorization).send() => match response {
+        response = client.get(url).send() => match response {
             Ok(response) => response,
             Err(error) if error.is_connect() || error.is_timeout() => return Ok(None),
             Err(_) => return Err(DriverError::Ollama),
@@ -682,7 +661,6 @@ async fn wait_for_ready(
     expected_alias: &str,
     expected_file: &str,
     context_tokens: u32,
-    authorization: Option<&HeaderValue>,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), DriverError> {
     let base = base.trim_end_matches('/');
@@ -692,9 +670,7 @@ async fn wait_for_ready(
         {
             return Err(DriverError::Ollama);
         }
-        let Some(props) =
-            readiness_json(client, format!("{base}/props"), authorization, cancel).await?
-        else {
+        let Some(props) = readiness_json(client, format!("{base}/props"), cancel).await? else {
             tokio::select! {
                 biased;
                 _ = cancelled(cancel) => return Err(DriverError::Cancelled),
@@ -716,8 +692,7 @@ async fn wait_for_ready(
                 _ = tokio::time::sleep(std::time::Duration::from_millis(150)) => continue,
             }
         }
-        let Some(models) =
-            readiness_json(client, format!("{base}/v1/models"), authorization, cancel).await?
+        let Some(models) = readiness_json(client, format!("{base}/v1/models"), cancel).await?
         else {
             tokio::select! {
                 biased;
@@ -809,16 +784,6 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
-            })
-        }
-        fn authorization_header<'a>(
-            &'a self,
-            _: ModelProfile,
-        ) -> Pending<'a, Result<HeaderValue, DriverError>> {
-            Box::pin(async {
-                let mut header = HeaderValue::from_static("Bearer test-prism-key");
-                header.set_sensitive(true);
-                Ok(header)
             })
         }
         fn is_running<'a>(&'a self, _: ModelProfile) -> Pending<'a, Result<bool, DriverError>> {
@@ -974,11 +939,7 @@ mod tests {
                 for request_index in 0..3 {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     let (headers, request_body) = request(&mut stream).await;
-                    assert!(
-                        headers
-                            .to_ascii_lowercase()
-                            .contains("authorization: bearer test-prism-key")
-                    );
+                    assert!(!headers.to_ascii_lowercase().contains("authorization:"));
                     let path = headers.lines().next().unwrap().to_string();
                     if request_index == 0 {
                         assert!(path.contains("/props"));
@@ -1153,7 +1114,6 @@ mod tests {
                 "bonsai25-official",
                 "bonsai25-official-PTQ1_0-mtp.gguf",
                 8192,
-                None,
                 &mut cancel,
             ),
         )
@@ -1164,7 +1124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unauthenticated_readiness_is_rejected_by_a_protected_server() {
+    async fn loopback_readiness_is_unauthenticated() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -1173,9 +1133,9 @@ mod tests {
             assert!(!headers.to_ascii_lowercase().contains("authorization:"));
             reply(
                 &mut stream,
-                "401 Unauthorized",
+                "200 OK",
                 "application/json",
-                br#"{"error":{"message":"Invalid API Key"}}"#,
+                br#"{"model_path":"/weights/bonsai25-official-PTQ1_0-mtp.gguf"}"#,
             )
             .await;
         });
@@ -1185,8 +1145,11 @@ mod tests {
             .build()
             .unwrap();
         let (_cancel_tx, mut cancel) = watch::channel(false);
-        let result = readiness_json(&client, format!("{base}/props"), None, &mut cancel).await;
-        assert!(matches!(result, Err(DriverError::Ollama)));
+        let result = readiness_json(&client, format!("{base}/props"), &mut cancel).await;
+        assert_eq!(
+            result.unwrap().unwrap()["model_path"],
+            "/weights/bonsai25-official-PTQ1_0-mtp.gguf"
+        );
         server.await.unwrap();
     }
 

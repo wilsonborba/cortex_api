@@ -4,7 +4,6 @@ use crate::{
     core::config::Config,
     domain::models::{driver::DriverError, model_profile::ModelProfile},
 };
-use reqwest::header::HeaderValue;
 use sha2::{Digest, Sha256};
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
@@ -15,13 +14,14 @@ use tokio::{
 
 const SERVER_SHA256: &str = "89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c";
 
-fn new_api_key() -> String {
-    uuid::Uuid::new_v4().to_string()
+fn clear_runtime_api_auth_env(command: &mut Command) {
+    command
+        .env_remove("LLAMA_API_KEY")
+        .env_remove("LLAMA_ARG_API_KEY_FILE");
 }
 
 struct OwnedServer {
     profile: ModelProfile,
-    api_key: String,
     pid: u32,
     stopping: bool,
     child: Child,
@@ -98,9 +98,6 @@ impl PrismSupervisor {
         if *cancel.borrow() {
             return Err(DriverError::Cancelled);
         }
-        // The pinned server reads LLAMA_API_KEY. Generate a distinct bearer key
-        // for every owned child; it never enters Config, argv, or logs.
-        let api_key = new_api_key();
         let endpoint = url::Url::parse(&config.prism_url).map_err(|_| DriverError::InvalidInput)?;
         let port = endpoint
             .port_or_known_default()
@@ -116,7 +113,11 @@ impl PrismSupervisor {
             library_path.push(existing);
         }
         command.env("LD_LIBRARY_PATH", library_path);
-        command.env("LLAMA_API_KEY", &api_key);
+        // The pinned runtime enables API authentication from either of these
+        // inherited environment variables. The internal endpoint is loopback-only
+        // and intentionally unauthenticated, so prevent ambient service settings
+        // from silently turning authentication back on.
+        clear_runtime_api_auth_env(&mut command);
         command
             .args([
                 "--host",
@@ -181,35 +182,11 @@ impl PrismSupervisor {
         let pid = child.id().ok_or(DriverError::Ollama)?;
         *slot = Some(OwnedServer {
             profile,
-            api_key,
             pid,
             stopping: false,
             child,
         });
         Ok(())
-    }
-
-    async fn authorization_header(
-        &self,
-        profile: ModelProfile,
-    ) -> Result<HeaderValue, DriverError> {
-        let mut slot = self.child.lock().await;
-        let owned = slot.as_mut().ok_or(DriverError::Ollama)?;
-        if owned.profile != profile || owned.stopping {
-            return Err(DriverError::Ollama);
-        }
-        if owned
-            .child
-            .try_wait()
-            .map_err(|_| DriverError::Ollama)?
-            .is_some()
-        {
-            return Err(DriverError::Ollama);
-        }
-        let mut header = HeaderValue::from_str(&format!("Bearer {}", owned.api_key))
-            .map_err(|_| DriverError::Ollama)?;
-        header.set_sensitive(true);
-        Ok(header)
     }
 }
 
@@ -225,13 +202,6 @@ impl super::prism::PrismProcessControl for PrismSupervisor {
 
     fn stop<'a>(&'a self) -> crate::domain::models::usage::Pending<'a, Result<(), DriverError>> {
         Box::pin(async move { PrismSupervisor::stop(self).await })
-    }
-
-    fn authorization_header<'a>(
-        &'a self,
-        profile: ModelProfile,
-    ) -> crate::domain::models::usage::Pending<'a, Result<HeaderValue, DriverError>> {
-        Box::pin(async move { PrismSupervisor::authorization_header(self, profile).await })
     }
 
     fn is_running<'a>(
@@ -338,14 +308,6 @@ fn process_group_exists(pid: u32) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn each_prism_child_gets_a_fresh_api_key() {
-        let first = new_api_key();
-        let restarted = new_api_key();
-        assert_ne!(first, restarted);
-        assert_eq!(first.len(), 36);
-        assert_eq!(restarted.len(), 36);
-    }
     use crate::{
         dal::remote::{model_router::ModelRouter, ollama::Ollama, prism::Prism},
         domain::{
@@ -412,28 +374,6 @@ mod tests {
             allow_tools,
             tool_history: vec![],
         }
-    }
-
-    async fn prism_status(
-        client: &reqwest::Client,
-        method: reqwest::Method,
-        url: String,
-        authorization: Option<HeaderValue>,
-    ) -> reqwest::StatusCode {
-        let mut request = client.request(method.clone(), url);
-        if let Some(mut value) = authorization {
-            value.set_sensitive(true);
-            request = request.header(reqwest::header::AUTHORIZATION, value);
-        }
-        if method == reqwest::Method::POST {
-            request = request.json(&serde_json::json!({
-                "model":"bonsai25-uncensored",
-                "messages":[{"role":"user","content":"smoke"}],
-                "max_tokens":1
-            }));
-        }
-        let response = request.send().await.expect("auth smoke HTTP response");
-        response.status()
     }
 
     fn cortex_eval_context(
@@ -1554,270 +1494,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires separate explicit GPU authorization; checks the default Uncensored auth handshake only"]
-    async fn gpu_prism_auth_smoke_uncensored() {
-        use futures_util::FutureExt;
-
-        let (config, queue, supervisor, _router) = evaluation_model_router_setup().await;
-        // Exercise the actual managed Prism driver and Scheduler, but avoid a
-        // ModelRouter transition here: its Ollama unload path must not touch
-        // models that could appear after the initial empty-state preflight.
-        let prism = Prism::managed(config.clone(), queue, supervisor.clone());
-        let profile = ModelProfile::Bonsai25Uncensored;
-        let base = config.prism_url.trim_end_matches('/').to_owned();
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("bounded local auth smoke client");
-        let mut child_pid = None;
-        let result = std::panic::AssertUnwindSafe(async {
-            let (_cancel_tx, mut cancel) = watch::channel(false);
-            let context = cortex_eval_context(
-                &config,
-                "According to the synthetic record for KITE-204, what status and retry count are recorded? Answer in one sentence.",
-                vec![synthetic_evidence(
-                    "KITE-204 synthetic record",
-                    "Synthetic record KITE-204: status READY; retry_count 2.",
-                )],
-            );
-            let output = evaluation_output(profile, false);
-            let (events, _event_rx) = mpsc::unbounded_channel();
-            let (cancel_tx, cancel_rx) = watch::channel(false);
-            let input = CallInput {
-                role: "answer".into(),
-                system: context.system.clone(),
-                prompt: context.prompt.clone(),
-                images: vec![],
-                temperature: 0.0,
-                max_tokens: 128,
-                context_tokens: 8192,
-                prefix: None,
-                allow_tools: false,
-                tool_history: vec![],
-            };
-            let answer_call = prism.call(&output, input, events, cancel_rx);
-            tokio::pin!(answer_call);
-            let mut monitor = tokio::time::interval(Duration::from_secs(5));
-            let answer = loop {
-                tokio::select! {
-                    biased;
-                    outcome = &mut answer_call => break outcome.expect("managed Prism answer"),
-                    _ = monitor.tick() => {
-                        if evaluation_resources_ok(700).is_err() {
-                            let _ = cancel_tx.send(true);
-                        }
-                    }
-                }
-            };
-            assert_measured_answer(&answer);
-            assert!(!answer.text.trim().is_empty());
-            child_pid = supervisor.child.lock().await.as_ref().map(|owned| owned.pid);
-            let pid = child_pid.expect("owned Prism child PID");
-            let authorization = supervisor
-                .authorization_header(profile)
-                .await
-                .expect("live matching child bearer");
-            assert!(authorization.is_sensitive());
-            let secret = authorization
-                .to_str()
-                .expect("ASCII bearer header")
-                .strip_prefix("Bearer ")
-                .expect("bearer scheme")
-                .to_owned();
-            assert!(!format!("{authorization:?}").contains(&secret));
-            let commandline = std::fs::read(format!("/proc/{pid}/cmdline"))
-                .expect("owned runtime command line");
-            assert!(!commandline
-                .windows(secret.len())
-                .any(|window| window == secret.as_bytes()));
-
-            let authenticated_props = client
-                .get(format!("{base}/props"))
-                .header(reqwest::header::AUTHORIZATION, authorization.clone())
-                .send()
-                .await
-                .expect("authenticated props request");
-            assert!(authenticated_props.status().is_success());
-            let props: serde_json::Value = authenticated_props
-                .json()
-                .await
-                .expect("authenticated props JSON");
-            assert!(props["model_path"]
-                .as_str()
-                .is_some_and(|path| path.ends_with(profile.artifact_filename().unwrap())));
-            let authenticated_models = client
-                .get(format!("{base}/v1/models"))
-                .header(reqwest::header::AUTHORIZATION, authorization.clone())
-                .send()
-                .await
-                .expect("authenticated models request");
-            assert!(authenticated_models.status().is_success());
-            let models: serde_json::Value = authenticated_models
-                .json()
-                .await
-                .expect("authenticated models JSON");
-            assert!(models["data"].as_array().is_some_and(|data| data
-                .iter()
-                .any(|model| model["id"] == profile.runtime_alias().unwrap())));
-            supervisor
-                .ensure(&config, profile, &mut cancel)
-                .await
-                .expect("same healthy profile remains owned");
-            assert_eq!(
-                supervisor.child.lock().await.as_ref().map(|owned| owned.pid),
-                Some(pid),
-                "managed answer reused the same owned process"
-            );
-            assert_eq!(
-                supervisor.authorization_header(profile).await.unwrap(),
-                authorization,
-                "managed answer reused the same per-child bearer"
-            );
-
-            let mut rejected_statuses = Vec::new();
-            for (method, path) in [
-                (reqwest::Method::GET, "/props"),
-                (reqwest::Method::GET, "/v1/models"),
-                (reqwest::Method::POST, "/v1/chat/completions"),
-            ] {
-                let missing =
-                    prism_status(&client, method.clone(), format!("{base}{path}"), None).await;
-                let mut wrong = HeaderValue::from_static("Bearer invalid-auth-smoke-key");
-                wrong.set_sensitive(true);
-                let invalid = prism_status(
-                    &client,
-                    method,
-                    format!("{base}{path}"),
-                    Some(wrong),
-                )
-                .await;
-                rejected_statuses.push((path, missing.as_u16(), invalid.as_u16()));
-            }
-            eprintln!(
-                "AUTH_SMOKE_REJECTION_STATUSES {}",
-                serde_json::json!({"missing_and_wrong_key":rejected_statuses})
-            );
-            assert!(
-                rejected_statuses
-                    .iter()
-                    .all(|(_, missing, invalid)| *missing == 401 && *invalid == 401),
-                "all three API routes must reject missing and incorrect keys"
-            );
-
-            let evil_preflight = client
-                .request(reqwest::Method::OPTIONS, format!("{base}/v1/chat/completions"))
-                .header(reqwest::header::ORIGIN, "https://untrusted.example")
-                .header(reqwest::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                .send()
-                .await
-                .expect("bounded denied-origin CORS preflight");
-            let evil_origin_header = evil_preflight
-                .headers()
-                .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let evil_credentials = evil_preflight
-                .headers()
-                .get(reqwest::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let localhost_preflight = client
-                .request(reqwest::Method::OPTIONS, format!("{base}/v1/chat/completions"))
-                .header(reqwest::header::ORIGIN, "http://localhost:5173")
-                .header(reqwest::header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                .send()
-                .await
-                .expect("bounded localhost CORS preflight");
-            let localhost_origin_header = localhost_preflight
-                .headers()
-                .get(reqwest::header::ACCESS_CONTROL_ALLOW_ORIGIN)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let localhost_credentials = localhost_preflight
-                .headers()
-                .get(reqwest::header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            eprintln!(
-                "AUTH_SMOKE_CORS {}",
-                serde_json::json!({
-                    "untrusted_origin_reflected":evil_origin_header.as_deref(),
-                    "untrusted_credentials":evil_credentials.as_deref(),
-                    "localhost_origin":localhost_origin_header.as_deref(),
-                    "localhost_credentials":localhost_credentials.as_deref()
-                })
-            );
-            assert!(evil_origin_header.is_none());
-            assert!(evil_credentials.as_deref().is_none_or(|value| value == "false"));
-            assert_eq!(localhost_origin_header.as_deref(), Some("http://localhost:5173"));
-            assert!(localhost_credentials
-                .as_deref()
-                .is_none_or(|value| value == "false"));
-            eprintln!(
-                "AUTH_SMOKE_RESULT {}",
-                serde_json::json!({
-                    "profile": profile.id(),
-                    "pid_reused": pid,
-                    "child_key_reused": true,
-                    "missing_and_wrong_key_statuses": [401, 401],
-                    "protected_paths": ["/props", "/v1/models", "/v1/chat/completions"],
-                    "allowed_origin": "http://localhost:5173",
-                    "untrusted_origin_reflected": false,
-                    "cors_credentials": false,
-                    "answer_nonempty": true,
-                    "usage_measured": answer.usage_measured,
-                    "output_tokens": answer.usage.output_tokens,
-                    "ttft_ms": answer.usage.time_to_first_token_ms,
-                    "total_ms": answer.usage.total_ms,
-                    "text": answer.text,
-                    "full_secret_logged": false
-                })
-            );
-        })
-        .catch_unwind()
-        .await;
-
-        let stop_result = supervisor.stop().await;
-        let child_absent = supervisor.child.lock().await.is_none();
-        let ollama_state = ollama_loaded(&config).await;
-        stop_result.expect("stop and reap only the owned Prism child");
-        #[cfg(unix)]
-        let owned_process_group_absent = child_pid.map(|pid| !process_group_exists(pid));
-        #[cfg(not(unix))]
-        let owned_process_group_absent = None;
-        eprintln!(
-            "AUTH_SMOKE_CLEANUP {}",
-            serde_json::json!({
-                "child_slot_empty":child_absent,
-                "owned_process_group_absent":owned_process_group_absent,
-                "ollama_models":ollama_state.as_ref().ok()
-            })
-        );
-        assert!(child_absent, "owned Prism child slot is empty after stop");
-        assert!(
-            supervisor.authorization_header(profile).await.is_err(),
-            "stopped child no longer exposes a bearer"
-        );
-        if let Some(pid) = child_pid {
-            #[cfg(unix)]
-            assert!(
-                !process_group_exists(pid),
-                "owned Prism process group is reaped"
-            );
-        }
-        assert!(
-            ollama_state.expect("Ollama postcheck").is_empty(),
-            "auth smoke never loads/unloads T0 or disturbs Ollama"
-        );
-        if let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
-    }
-
-    #[tokio::test]
     #[ignore = "requires separate explicit GPU authorization; runs only Official cancellation/queue case"]
     async fn gpu_official_cancellation_queue_acceptance() {
         use futures_util::FutureExt;
@@ -2063,7 +1739,6 @@ mod tests {
         let supervisor = PrismSupervisor {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
-                api_key: new_api_key(),
                 pid,
                 stopping: false,
                 child,
@@ -2091,7 +1766,6 @@ mod tests {
         let supervisor = PrismSupervisor {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
-                api_key: new_api_key(),
                 pid,
                 stopping: false,
                 child,
@@ -2108,27 +1782,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(supervisor.child.lock().await.as_ref().unwrap().pid, pid);
-        let first_header = supervisor
-            .authorization_header(ModelProfile::Bonsai25Official)
-            .await
-            .unwrap();
-        assert!(first_header.is_sensitive());
-        let first_secret = std::str::from_utf8(first_header.as_bytes()).unwrap();
-        assert!(!format!("{first_header:?}").contains(first_secret));
-        assert_eq!(
-            supervisor
-                .authorization_header(ModelProfile::Bonsai25Official)
-                .await
-                .unwrap(),
-            first_header,
-            "a healthy same-profile child keeps its key"
-        );
-        assert!(
-            supervisor
-                .authorization_header(ModelProfile::Bonsai25Uncensored)
-                .await
-                .is_err()
-        );
 
         assert!(
             supervisor
@@ -2137,81 +1790,31 @@ mod tests {
                 .is_err()
         );
         assert!(supervisor.child.lock().await.is_none());
-        assert!(
-            supervisor
-                .authorization_header(ModelProfile::Bonsai25Official)
-                .await
-                .is_err()
-        );
         #[cfg(unix)]
         assert!(!process_group_exists(pid));
-
-        let mut replacement = Command::new("/usr/bin/sleep");
-        replacement
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        replacement.process_group(0);
-        let child = replacement.spawn().expect("replacement test child");
-        let replacement_pid = child.id().unwrap();
-        let replacement_key = new_api_key();
-        *supervisor.child.lock().await = Some(OwnedServer {
-            profile: ModelProfile::Bonsai25Uncensored,
-            api_key: replacement_key.clone(),
-            pid: replacement_pid,
-            stopping: false,
-            child,
-        });
-        let replacement_header = supervisor
-            .authorization_header(ModelProfile::Bonsai25Uncensored)
-            .await
-            .unwrap();
-        assert_ne!(replacement_header, first_header);
-        assert_eq!(
-            std::str::from_utf8(replacement_header.as_bytes()).unwrap(),
-            format!("Bearer {replacement_key}")
-        );
-        supervisor.stop().await.unwrap();
-        assert!(
-            supervisor
-                .authorization_header(ModelProfile::Bonsai25Uncensored)
-                .await
-                .is_err()
-        );
     }
 
     #[tokio::test]
-    async fn authorization_rejects_missing_or_exited_owned_child() {
-        let supervisor = PrismSupervisor::new();
+    async fn prism_child_environment_clears_pinned_runtime_auth_inputs() {
+        // llama-server --help identifies exactly these auth environment inputs.
+        let mut command = Command::new("/usr/bin/env");
+        command
+            .env("LLAMA_API_KEY", "must-not-inherit")
+            .env("LLAMA_ARG_API_KEY_FILE", "/private/test/key-file");
+        clear_runtime_api_auth_env(&mut command);
+        let output = command.output().await.expect("read child environment");
+        assert!(output.status.success());
+        let environment = String::from_utf8(output.stdout).unwrap();
         assert!(
-            supervisor
-                .authorization_header(ModelProfile::Bonsai25Official)
-                .await
-                .is_err()
+            !environment
+                .lines()
+                .any(|line| line.starts_with("LLAMA_API_KEY="))
         );
-
-        let mut command = Command::new("/usr/bin/true");
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = command.spawn().expect("short-lived test child");
-        let pid = child.id().unwrap();
-        child.wait().await.unwrap();
-        *supervisor.child.lock().await = Some(OwnedServer {
-            profile: ModelProfile::Bonsai25Official,
-            api_key: new_api_key(),
-            pid,
-            stopping: false,
-            child,
-        });
         assert!(
-            supervisor
-                .authorization_header(ModelProfile::Bonsai25Official)
-                .await
-                .is_err()
+            !environment
+                .lines()
+                .any(|line| line.starts_with("LLAMA_ARG_API_KEY_FILE="))
         );
-        supervisor.child.lock().await.take();
     }
 
     #[tokio::test]
@@ -2243,7 +1846,6 @@ mod tests {
         let supervisor = std::sync::Arc::new(PrismSupervisor {
             child: Mutex::new(Some(OwnedServer {
                 profile: ModelProfile::Bonsai25Official,
-                api_key: new_api_key(),
                 pid,
                 stopping: false,
                 child,
@@ -2262,12 +1864,6 @@ mod tests {
                 .await
                 .as_ref()
                 .is_some_and(|owned| owned.stopping)
-        );
-        assert!(
-            supervisor
-                .authorization_header(ModelProfile::Bonsai25Official)
-                .await
-                .is_err()
         );
         assert!(
             !supervisor
