@@ -528,6 +528,11 @@ async fn remote() -> (Log, String) {
             "/api/v1/graph/nodes/{id}",
             get(|State(log): State<Log>, Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
                 log.lock().unwrap().push((format!("node {id}"), json!(q)));
+                if log.lock().unwrap().iter().any(|(kind, value)| {
+                    kind == "file-unavailable" && value.as_str() == Some(&id)
+                }) {
+                    return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({}))).into_response();
+                }
                 if id == "resource:r-img" && q["user_id"] == "alice" {
                     return Json(json!({"data":{"nodes":[
                         {"id":"m-img","node_type":"memory","label":"photo.png","metadata":{"workspace_id":"cortex","app_id":"cortex","user_id":"alice","content":""}},
@@ -1473,6 +1478,276 @@ async fn permanent_and_temporary_chats_run_every_stage() {
                 .unwrap();
             assert!(key.starts_with("cortex:") && ttl > 0, "{key} {ttl}");
             let _: () = redis::cmd("DEL")
+                .arg(key)
+                .query_async(&mut redis)
+                .await
+                .unwrap();
+        }
+    }
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires cortex_api_test and approved Valkey; isolated schema and synthetic temporary files"]
+async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
+    use cortex_api::domain::models::{
+        cache::CacheKey, context::ContextText, identity::Caller, temporary::TemporaryFile,
+    };
+
+    dotenvy::dotenv().ok();
+    let Some((test_redis_url, cache)) = RedisCache::from_test_environment() else {
+        eprintln!(
+            "Skipping selected temporary source route fixture: CORTEX_TEST_REDIS_URL is not set"
+        );
+        return;
+    };
+    let admin = database::connect(Target::Test).await.unwrap();
+    let schema = format!("test_temp_context_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let options = database::options(Target::Test)
+        .unwrap()
+        .options([("search_path", schema.as_str())]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    let (log, address) = remote().await;
+    let model = Arc::new(Model::default());
+    let rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
+    let owner = Caller {
+        app_id: "cortex".into(),
+        user_id: Some("alice".into()),
+        is_admin: false,
+    };
+    let save = |name: &str, text: &str| TemporaryFile {
+        file_id: Uuid::nil(),
+        name: name.into(),
+        image: None,
+        pages: vec![ContextText {
+            label: name.into(),
+            source: None,
+            text: text.into(),
+        }],
+    };
+    let first_file = rt
+        .temporary
+        .save_file(
+            &owner,
+            save("note-one.txt", "Selected marker Blue Orchid 7731."),
+        )
+        .await
+        .unwrap();
+    let second_file = rt
+        .temporary
+        .save_file(
+            &owner,
+            save("note-two.txt", "Selected marker Silver Willow 8842."),
+        )
+        .await
+        .unwrap();
+    let expired_file = rt
+        .temporary
+        .save_file(&owner, save("expired.txt", "Expired selected source."))
+        .await
+        .unwrap();
+    let outage_file = rt
+        .temporary
+        .save_file(
+            &owner,
+            save("outage.txt", "Must not bypass permanent lookup outage."),
+        )
+        .await
+        .unwrap();
+
+    let baseline_chats: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let baseline_prompts = model.prompts.lock().unwrap().len();
+
+    // The file identity is scoped by both owner and app at the existing route.
+    for (app_id, user_id) in [("cortex", "bob"), ("annotations", "alice")] {
+        let (status, body) = call(
+            &rt,
+            "/chats",
+            Some(user_id),
+            json!({"app_id":app_id,"text":"Read selected source","file_ids":[first_file.to_string()]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{app_id}/{user_id}: {body}");
+    }
+    let (status, body) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"Malformed selected source","file_ids":["not-a-uuid"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    // An unavailable permanent lookup must not fall back to a valid temp ID.
+    let outage_resource = format!("resource:{outage_file}");
+    log.lock()
+        .unwrap()
+        .push(("file-unavailable".into(), json!(outage_resource)));
+    let (status, body) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"Must fail on file lookup outage","file_ids":[outage_file.to_string()]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    log.lock()
+        .unwrap()
+        .retain(|(kind, _)| kind != "file-unavailable");
+
+    // A genuine FILE_NOT_FOUND falls back to caller/app/TTL scoped pages.
+    let (status, body) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"What does the selected source say about Blue Orchid?","file_ids":[first_file.to_string()]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let first: Value = serde_json::from_str(&body).unwrap();
+    let session: Uuid = first["data"]["session_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        model
+            .prompts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains("Selected marker Blue Orchid 7731.")
+    );
+    let saved_question: String =
+        sqlx::query_scalar("SELECT text FROM chat_inputs WHERE session_id=$1")
+            .bind(session)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        saved_question,
+        "What does the selected source say about Blue Orchid?"
+    );
+
+    let (status, body) = call(
+        &rt,
+        &format!("/chats/{session}/inputs"),
+        Some("alice"),
+        json!({"text":"Use the selected Silver Willow source","file_ids":[second_file.to_string()]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(
+        model
+            .prompts
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains("Selected marker Silver Willow 8842.")
+    );
+    let (status, body) = call(
+        &rt,
+        &format!("/chats/{session}/inputs"),
+        Some("alice"),
+        json!({"text":"Now answer without another selected source"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let last_prompt = model.prompts.lock().unwrap().last().unwrap().clone();
+    assert!(!last_prompt.contains("Selected marker Blue Orchid 7731."));
+    assert!(!last_prompt.contains("Selected marker Silver Willow 8842."));
+    assert!(!last_prompt.contains("Expired selected source."));
+    let persistent_links: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_input_files WHERE input_id IN (SELECT input_id FROM chat_inputs WHERE session_id=$1)")
+        .bind(session)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        persistent_links, 0,
+        "temporary IDs must not become durable attachments"
+    );
+
+    // Mixed IDs preflight atomically before any SQL write or provider call.
+    cache
+        .remove(&CacheKey::TemporaryChat(expired_file.to_string()))
+        .await
+        .unwrap();
+    let before_mixed_chats: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let before_mixed_prompts = model.prompts.lock().unwrap().len();
+    let (status, body) = call(
+        &rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"Must not partially attach","file_ids":["r-a",expired_file.to_string()]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let after_mixed_chats: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after_mixed_chats, before_mixed_chats);
+    assert_eq!(model.prompts.lock().unwrap().len(), before_mixed_prompts);
+
+    // A temporary-store outage remains unavailable, not a permanent-file miss.
+    let mut unavailable_rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
+    Arc::get_mut(&mut unavailable_rt).unwrap().temporary = TemporaryChats::new(
+        &Config::default(),
+        RedisCache::new(None, Duration::from_millis(20)),
+    );
+    let (status, body) = call(
+        &unavailable_rt,
+        "/chats",
+        Some("alice"),
+        json!({"app_id":"cortex","text":"Temporary store is unavailable","file_ids":[first_file.to_string()]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(model.prompts.lock().unwrap().len(), baseline_prompts + 3);
+    let final_chats: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(final_chats, baseline_chats + 1);
+
+    let output_ids: Vec<Uuid> = sqlx::query_scalar("SELECT output_id FROM chat_outputs")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let redis = redis::Client::open(test_redis_url).unwrap();
+    let mut redis = redis.get_multiplexed_async_connection().await.unwrap();
+    for id in [first_file, second_file, expired_file, outage_file, session]
+        .into_iter()
+        .chain(output_ids)
+    {
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg(format!("cortex:*{id}*"))
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        for key in keys {
+            let _: i64 = redis::cmd("DEL")
                 .arg(key)
                 .query_async(&mut redis)
                 .await
