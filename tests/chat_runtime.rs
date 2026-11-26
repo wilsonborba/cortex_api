@@ -1494,7 +1494,7 @@ async fn permanent_and_temporary_chats_run_every_stage() {
 #[ignore = "requires cortex_api_test and approved Valkey; isolated schema and synthetic temporary files"]
 async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
     use cortex_api::domain::models::{
-        cache::CacheKey, context::ContextText, identity::Caller, temporary::TemporaryFile,
+        context::ContextText, identity::Caller, temporary::TemporaryFile,
     };
 
     dotenvy::dotenv().ok();
@@ -1531,6 +1531,7 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
     let save = |name: &str, text: &str| TemporaryFile {
         file_id: Uuid::nil(),
         name: name.into(),
+        content_type: "text/plain".into(),
         image: None,
         pages: vec![ContextText {
             label: name.into(),
@@ -1554,11 +1555,19 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
         )
         .await
         .unwrap();
-    let expired_file = rt
+    let expiry_config = Config {
+        temporary_ttl: Duration::from_millis(20),
+        ..Config::default()
+    };
+    let mut expiry_rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
+    Arc::get_mut(&mut expiry_rt).unwrap().temporary =
+        TemporaryChats::new(&expiry_config, cache.clone());
+    let expired_file = expiry_rt
         .temporary
         .save_file(&owner, save("expired.txt", "Expired selected source."))
         .await
         .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let outage_file = rt
         .temporary
         .save_file(
@@ -1567,6 +1576,101 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
         )
         .await
         .unwrap();
+
+    // Exercise the existing upload and content routes with the same temporary image.
+    use base64::Engine;
+    use std::io::Write as _;
+    let file_app = cortex_api::presentation::files::router(rt.files.clone());
+    let png = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC")
+        .unwrap();
+    let boundary = "asodya-temporary-image-test";
+    let mut form = Vec::new();
+    write!(
+        form,
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"app_id\"\r\n\r\ncortex\r\n"
+    )
+    .unwrap();
+    write!(
+        form,
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"temporary\"\r\n\r\ntrue\r\n"
+    )
+    .unwrap();
+    write!(form, "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"preview.png\"\r\nContent-Type: image/png\r\n\r\n").unwrap();
+    form.extend_from_slice(&png);
+    write!(form, "\r\n--{boundary}--\r\n").unwrap();
+    let upload_request = Request::builder()
+        .method("POST")
+        .uri("/files")
+        .header("x-uuid", "alice")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ))
+        .body(Body::from(form))
+        .unwrap();
+    let upload_response = file_app.clone().oneshot(upload_request).await.unwrap();
+    assert_eq!(upload_response.status(), StatusCode::CREATED);
+    let upload_value: Value = serde_json::from_slice(
+        &to_bytes(upload_response.into_body(), 1 << 20)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let image_id = upload_value["data"]["file_id"].as_str().unwrap().to_owned();
+    let content_request = |user: &str, app_id: &str, file_id: &str| {
+        Request::builder()
+            .method("GET")
+            .uri(format!("/files/{file_id}/content?app_id={app_id}"))
+            .header("x-uuid", user)
+            .extension(axum::extract::ConnectInfo(
+                "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+            ))
+            .body(Body::empty())
+            .unwrap()
+    };
+    let content = file_app
+        .clone()
+        .oneshot(content_request("alice", "cortex", &image_id))
+        .await
+        .unwrap();
+    assert_eq!(content.status(), StatusCode::OK);
+    assert_eq!(
+        content.headers()[axum::http::header::CONTENT_TYPE],
+        "image/png"
+    );
+    assert_eq!(
+        to_bytes(content.into_body(), 1 << 20)
+            .await
+            .unwrap()
+            .as_ref(),
+        png
+    );
+    let foreign = file_app
+        .clone()
+        .oneshot(content_request("bob", "cortex", &image_id))
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    let wrong_app = file_app
+        .clone()
+        .oneshot(content_request("alice", "annotations", &image_id))
+        .await
+        .unwrap();
+    assert_eq!(wrong_app.status(), StatusCode::NOT_FOUND);
+    let expired = file_app
+        .clone()
+        .oneshot(content_request(
+            "alice",
+            "cortex",
+            &expired_file.to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(expired.status(), StatusCode::NOT_FOUND);
 
     let baseline_chats: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
         .fetch_one(&pool)
@@ -1607,6 +1711,17 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let outage_request = Request::builder()
+        .method("GET")
+        .uri(format!("/files/{outage_file}/content?app_id=cortex"))
+        .header("x-uuid", "alice")
+        .extension(axum::extract::ConnectInfo(
+            "203.0.113.1:1234".parse::<std::net::SocketAddr>().unwrap(),
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let outage = file_app.clone().oneshot(outage_request).await.unwrap();
+    assert_eq!(outage.status(), StatusCode::SERVICE_UNAVAILABLE);
     log.lock()
         .unwrap()
         .retain(|(kind, _)| kind != "file-unavailable");
@@ -1686,10 +1801,6 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
     );
 
     // Mixed IDs preflight atomically before any SQL write or provider call.
-    cache
-        .remove(&CacheKey::TemporaryChat(expired_file.to_string()))
-        .await
-        .unwrap();
     let before_mixed_chats: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
         .fetch_one(&pool)
         .await
@@ -1710,6 +1821,55 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
     assert_eq!(after_mixed_chats, before_mixed_chats);
     assert_eq!(model.prompts.lock().unwrap().len(), before_mixed_prompts);
 
+    // Cancellation of a selected-source turn cannot persist its temporary file ID.
+    let response = send(
+        &rt,
+        "POST",
+        "/chats",
+        "alice",
+        Some(json!({"app_id":"cortex","text":"slow selected cancellation","stream":true,"file_ids":[second_file.to_string()]})),
+    ).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let cancel_events = tokio::spawn(frames(response.into_body(), None));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let cancel_output: Uuid =
+        sqlx::query_scalar("SELECT output_id FROM chat_outputs WHERE status='running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let cancel_session: Uuid =
+        sqlx::query_scalar("SELECT session_id FROM chat_outputs WHERE output_id=$1")
+            .bind(cancel_output)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let cancel = send(
+        &rt,
+        "PATCH",
+        &format!("/chats/{cancel_session}/outputs/{cancel_output}"),
+        "alice",
+        Some(json!({"status":"cancelled"})),
+    )
+    .await;
+    assert_eq!(cancel.status(), StatusCode::OK);
+    let events = tokio::time::timeout(Duration::from_secs(5), cancel_events)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(events.last().unwrap().1, "done");
+    let status: String = sqlx::query_scalar("SELECT status FROM chat_outputs WHERE output_id=$1")
+        .bind(cancel_output)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled");
+    let cancelled_links: i64 = sqlx::query_scalar("SELECT count(*) FROM chat_input_files WHERE input_id IN (SELECT input_id FROM chat_inputs WHERE session_id=$1)")
+        .bind(cancel_session).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        cancelled_links, 0,
+        "cancelled turns must not persist temporary source IDs"
+    );
+
     // A temporary-store outage remains unavailable, not a permanent-file miss.
     let mut unavailable_rt = runtime(pool.clone(), cache.clone(), &address, model.clone());
     Arc::get_mut(&mut unavailable_rt).unwrap().temporary = TemporaryChats::new(
@@ -1724,12 +1884,12 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(model.prompts.lock().unwrap().len(), baseline_prompts + 3);
+    assert_eq!(model.prompts.lock().unwrap().len(), baseline_prompts + 4);
     let final_chats: i64 = sqlx::query_scalar("SELECT count(*) FROM chats")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(final_chats, baseline_chats + 1);
+    assert_eq!(final_chats, baseline_chats + 2);
 
     let output_ids: Vec<Uuid> = sqlx::query_scalar("SELECT output_id FROM chat_outputs")
         .fetch_all(&pool)
@@ -1737,9 +1897,16 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
         .unwrap();
     let redis = redis::Client::open(test_redis_url).unwrap();
     let mut redis = redis.get_multiplexed_async_connection().await.unwrap();
-    for id in [first_file, second_file, expired_file, outage_file, session]
-        .into_iter()
-        .chain(output_ids)
+    for id in [
+        first_file,
+        second_file,
+        expired_file,
+        outage_file,
+        session,
+        cancel_session,
+    ]
+    .into_iter()
+    .chain(output_ids)
     {
         let keys: Vec<String> = redis::cmd("KEYS")
             .arg(format!("cortex:*{id}*"))

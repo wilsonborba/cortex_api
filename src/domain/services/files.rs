@@ -16,6 +16,7 @@ use crate::{
         services::{events::channel, extraction::DocumentExtractor, temporary::TemporaryChats},
     },
 };
+use base64::Engine;
 #[derive(Clone)]
 pub struct FileProxy {
     pub hippocampus: Hippocampus,
@@ -219,6 +220,33 @@ fn select_text_passages(bytes: &[u8], ranges: &[TextRange]) -> Result<Vec<String
         })
         .collect()
 }
+
+fn temporary_image_content(
+    file: TemporaryFile,
+    max_bytes: usize,
+) -> Result<FileContent, ProcessNumber> {
+    let content_type = file.content_type.trim();
+    if !content_type.to_ascii_lowercase().starts_with("image/") {
+        return Err(process_numbers::FILE_NOT_FOUND);
+    }
+    let encoded = file.image.ok_or(process_numbers::FILE_NOT_FOUND)?;
+    let max_encoded = max_bytes.div_ceil(3).saturating_mul(4);
+    if encoded.len() > max_encoded {
+        return Err(process_numbers::TEMPORARY_UNAVAILABLE);
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| process_numbers::TEMPORARY_UNAVAILABLE)?;
+    if bytes.len() > max_bytes {
+        return Err(process_numbers::TEMPORARY_UNAVAILABLE);
+    }
+    Ok(FileContent {
+        content_type: content_type.to_owned(),
+        disposition: None,
+        bytes,
+    })
+}
+
 impl FileProxy {
     /// Extract the text once, then save the file and text in one Hippocampus
     /// call. A temporary chat file stays in Redis only (17.4).
@@ -337,7 +365,6 @@ impl FileProxy {
             }
         }
         if temporary {
-            use base64::Engine;
             let image = is_image
                 .then(|| base64::engine::general_purpose::STANDARD.encode(file.bytes.as_slice()));
             let id = self
@@ -347,6 +374,7 @@ impl FileProxy {
                     TemporaryFile {
                         file_id: uuid::Uuid::nil(),
                         name: file.name,
+                        content_type: file.content_type,
                         pages,
                         image,
                     },
@@ -378,11 +406,23 @@ impl FileProxy {
         caller: &Caller,
         file_id: &str,
     ) -> Result<FileContent, ProcessNumber> {
-        self.file(caller, file_id).await?;
-        self.hippocampus
-            .file_content(&caller.storage_scope(), file_id)
-            .await
-            .map_err(lookup_error)
+        match self.file(caller, file_id).await {
+            Ok(_) => {
+                // Keep the existing permanent-file byte path unchanged. A failure
+                // reading permanent bytes must never fall through to Redis.
+                self.hippocampus
+                    .file_content(&caller.storage_scope(), file_id)
+                    .await
+                    .map_err(lookup_error)
+            }
+            Err(process) if process.number == process_numbers::FILE_NOT_FOUND.number => {
+                let id =
+                    uuid::Uuid::parse_str(file_id).map_err(|_| process_numbers::FILE_NOT_FOUND)?;
+                let file = self.temporary.file(caller, id).await?;
+                temporary_image_content(file, self.config.file_bytes)
+            }
+            Err(process) => Err(process),
+        }
     }
 }
 
@@ -561,6 +601,78 @@ mod selection_tests {
                 ],
             )
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod temporary_image_content_tests {
+    use super::*;
+    use crate::domain::models::{context::ContextText, temporary::TemporaryFile};
+
+    fn file(content_type: &str, image: Option<String>) -> TemporaryFile {
+        TemporaryFile {
+            file_id: uuid::Uuid::nil(),
+            name: "selected-image.png".into(),
+            content_type: content_type.into(),
+            pages: vec![ContextText {
+                label: "selected-image.png".into(),
+                source: None,
+                text: String::new(),
+            }],
+            image,
+        }
+    }
+
+    #[test]
+    fn temporary_image_content_preserves_uploaded_mime_and_exact_bytes() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC")
+            .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let content =
+            temporary_image_content(file("image/png", Some(encoded)), bytes.len()).unwrap();
+        assert_eq!(content.content_type, "image/png");
+        assert_eq!(content.bytes, bytes);
+        assert!(content.disposition.is_none());
+        let one_byte = temporary_image_content(file("image/gif", Some("AQ==".into())), 1).unwrap();
+        assert_eq!(one_byte.bytes, [1]);
+    }
+
+    #[test]
+    fn legacy_temporary_file_without_mime_remains_readable_as_unknown() {
+        let legacy: TemporaryFile = serde_json::from_value(serde_json::json!({
+            "file_id": uuid::Uuid::nil(),
+            "name": "old-image.png",
+            "pages": [],
+            "image": "AQ=="
+        }))
+        .unwrap();
+        assert_eq!(legacy.content_type, "application/octet-stream");
+    }
+
+    #[test]
+    fn temporary_image_content_rejects_non_image_corrupt_and_oversized_values() {
+        assert_eq!(
+            temporary_image_content(file("text/plain", Some("YWJj".into())), 16)
+                .err()
+                .unwrap()
+                .number,
+            process_numbers::FILE_NOT_FOUND.number
+        );
+        assert_eq!(
+            temporary_image_content(file("image/png", Some("not-base64".into())), 64)
+                .err()
+                .unwrap()
+                .number,
+            process_numbers::TEMPORARY_UNAVAILABLE.number
+        );
+        assert_eq!(
+            temporary_image_content(file("image/png", Some("YWJj".into())), 2)
+                .err()
+                .unwrap()
+                .number,
+            process_numbers::TEMPORARY_UNAVAILABLE.number
         );
     }
 }

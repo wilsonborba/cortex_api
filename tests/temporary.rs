@@ -78,6 +78,7 @@ async fn redis_down_refuses_start_file_and_continue() {
     let file = TemporaryFile {
         file_id: Uuid::nil(),
         name: "sample.txt".into(),
+        content_type: "text/plain".into(),
         image: None,
         pages: vec![],
     };
@@ -117,6 +118,7 @@ async fn scoped_temporary_files_inputs_outputs_ttl_expiry_and_concurrent_updates
             TemporaryFile {
                 file_id: Uuid::nil(),
                 name: "sample.txt".into(),
+                content_type: "text/plain".into(),
                 image: None,
                 pages: vec![ContextText {
                     label: "sample.txt".into(),

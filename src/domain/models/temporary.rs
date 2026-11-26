@@ -12,6 +12,8 @@ use uuid::Uuid;
 pub struct TemporaryFile {
     pub file_id: Uuid,
     pub name: String,
+    #[serde(default = "unknown_content_type")]
+    pub content_type: String,
     pub pages: Vec<ContextText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
@@ -32,6 +34,10 @@ pub struct TemporaryChat {
     pub inputs: Vec<ChatInput>,
     pub outputs: Vec<TemporaryOutput>,
     pub files: Vec<TemporaryFile>,
+}
+
+fn unknown_content_type() -> String {
+    "application/octet-stream".into()
 }
 
 fn legacy_model_id() -> String {
