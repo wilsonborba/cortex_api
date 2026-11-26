@@ -1829,7 +1829,7 @@ async fn selected_temporary_files_are_preflighted_and_context_is_turn_scoped() {
         "alice",
         Some(json!({"app_id":"cortex","text":"slow selected cancellation","stream":true,"file_ids":[second_file.to_string()]})),
     ).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.status(), StatusCode::OK);
     let cancel_events = tokio::spawn(frames(response.into_body(), None));
     tokio::time::sleep(Duration::from_millis(150)).await;
     let cancel_output: Uuid =
