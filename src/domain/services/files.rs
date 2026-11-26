@@ -433,10 +433,33 @@ mod selection_tests {
         assert!(parse_selection(&audio, Some("intervals"), Some("ms:0-100,50-150")).is_err());
         assert!(parse_selection(&audio, Some("intervals"), Some("ms:100-100")).is_err());
         assert!(parse_selection(&audio, Some("intervals"), Some("ms:200-300,0-100")).is_err());
+        let max_audio_ranges = (0..MAX_SELECTION_RANGES)
+            .map(|index| {
+                if index == 0 {
+                    format!("ms:{}-{}", index * 2, index * 2 + 1)
+                } else {
+                    format!("{}-{}", index * 2, index * 2 + 1)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_selection(&audio, Some("intervals"), Some(&max_audio_ranges)).is_ok());
+        let over_audio_ranges = (0..=MAX_SELECTION_RANGES)
+            .map(|index| {
+                if index == 0 {
+                    format!("ms:{}-{}", index * 2, index * 2 + 1)
+                } else {
+                    format!("{}-{}", index * 2, index * 2 + 1)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(parse_selection(&audio, Some("intervals"), Some(&over_audio_ranges)).is_err());
         assert!(parse_selection(&audio, Some("passages"), Some("p1:0-1")).is_err());
 
         let pdf = file("a.pdf", "application/pdf", b"pdf");
         assert!(parse_selection(&pdf, Some("pages"), Some("1-3,5")).is_ok());
+        assert!(parse_selection(&pdf, Some("pages"), Some("1-100")).is_ok());
         assert!(parse_selection(&pdf, Some("pages"), Some("0,2")).is_err());
         assert!(parse_selection(&pdf, Some("pages"), Some("1-101")).is_err());
         assert!(parse_selection(&pdf, Some("pages"), Some("3,1-2")).is_err());
