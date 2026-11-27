@@ -43,7 +43,9 @@ class InstallerTests(unittest.TestCase):
                         TEST_REPO=str(self.repo), TEST_BUILD=str(self.build), TEST_ADMIN='1')
         self.helper('cargo', '''import json,os,sys
 from pathlib import Path
-if sys.argv[1]=='metadata': print(json.dumps({'target_directory':os.environ['TEST_BUILD']}))
+args=sys.argv[1:]
+if args and args[0]=='build': (Path(os.environ['TEST_REPO'])/'cargo.log').write_text(json.dumps(args))
+if args[0]=='metadata': print(json.dumps({'target_directory':os.environ['TEST_BUILD']}))
 elif os.environ.get('TEST_BUILD_FAIL')=='1': sys.exit(1)
 elif os.environ.get('TEST_CHANGE_SOURCE')=='1': (Path(os.environ['TEST_REPO'])/'src/main.rs').write_text('changed during build')
 ''')
@@ -122,12 +124,33 @@ elif args[0]=='is-active':sys.exit(0 if args[-1] in pids else 1)
             self.assertEqual((self.repo / 'var/deploy' / name).read_bytes(),
                              (self.build / 'release' / name).read_bytes())
 
+    def test_prepare_respects_cargo_build_jobs_environment(self):
+        self.env['CARGO_BUILD_JOBS'] = '1'
+        self.run_script('--prepare')
+        args = json.loads((self.repo / 'cargo.log').read_text())
+        jobs_index = args.index('-j')
+        self.assertEqual(args[jobs_index + 1], '1')
+
     def test_enabled_prism_requires_explicit_asset_directories_before_build(self):
         self.env['CORTEX_BONSAI_ENABLED'] = 'true'
         result = self.run_script('--prepare', success=False)
         self.assertIn('CORTEX_PRISM_RUNTIME_SOURCE', result.stderr)
         self.assertFalse((self.repo / 'service.log').exists())
         self.assertFalse((self.repo / 'var/deploy').exists())
+
+    def test_explicit_false_overrides_dotenv_prism_enablement(self):
+        (self.repo / '.env').write_text('CORTEX_BONSAI_ENABLED=true\n')
+        self.env['CORTEX_BONSAI_ENABLED'] = 'false'
+        self.run_script('--prepare')
+        self.assertFalse((self.repo / 'var/deploy/prism').exists())
+        self.assertNotIn('SupplementaryGroups=prism', (self.repo / 'var/deploy/cortex-api.service').read_text())
+
+    def test_explicit_empty_overrides_dotenv_prism_enablement(self):
+        (self.repo / '.env').write_text('CORTEX_BONSAI_ENABLED=true\n')
+        self.env['CORTEX_BONSAI_ENABLED'] = ''
+        self.run_script('--prepare')
+        self.assertFalse((self.repo / 'var/deploy/prism').exists())
+        self.assertNotIn('SupplementaryGroups=prism', (self.repo / 'var/deploy/cortex-api.service').read_text())
 
     def test_prism_group_is_rendered_and_assets_install_before_cortex_restart(self):
         self.env['CORTEX_BONSAI_ENABLED'] = 'true'

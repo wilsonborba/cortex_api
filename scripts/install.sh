@@ -15,8 +15,8 @@ flock -n 9 || { printf 'Another deployment is in progress.\n' >&2; exit 1; }
 binaries=(cortex-api)
 units=(cortex-api)
 prism_enabled=false
-if [ "${CORTEX_BONSAI_ENABLED:-}" ] && [ "${CORTEX_BONSAI_ENABLED,,}" = true ]; then
-  prism_enabled=true
+if [ "${CORTEX_BONSAI_ENABLED+x}" = x ]; then
+  if [ "${CORTEX_BONSAI_ENABLED,,}" = true ]; then prism_enabled=true; fi
 elif [ -f .env ] && python3 -c 'import pathlib,sys; sys.exit(0 if any((p:=line.partition("="))[0].strip()=="CORTEX_BONSAI_ENABLED" and p[2].strip().strip(chr(34)+chr(39)).lower()=="true" for line in pathlib.Path(sys.argv[1]).read_text().splitlines()) else 1)' .env; then
   prism_enabled=true
 fi
@@ -36,7 +36,7 @@ if [ "$mode" = --prepare ]; then
     [ -d "$CORTEX_BONSAI_MODEL_SOURCE" ] || { printf 'Bonsai model source directory is missing.\n' >&2; exit 1; }
   fi
   before=$(source_hash)
-  cargo build --release --locked --bins -j2
+  cargo build --release --locked --bins -j "${CARGO_BUILD_JOBS:-2}"
   [ "$before" = "$(source_hash)" ] || {
     printf 'Source changed during the build. Prepare again.\n' >&2; exit 1;
   }

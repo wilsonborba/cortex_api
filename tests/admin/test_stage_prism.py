@@ -292,7 +292,13 @@ class PrismActivationTests(unittest.TestCase):
                 status = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n"
                 result = subprocess.CompletedProcess(args, 0, stdout=status, stderr="")
             elif args[0] == "systemd-tmpfiles":
-                result = subprocess.CompletedProcess(args, 1, stdout="", stderr="simulated failure")
+                runtime = self.host / "run/prism"
+                runtime.mkdir(parents=True, exist_ok=True)
+                os.chmod(runtime, 0o700)
+                selector = runtime / "profile"
+                selector.write_text("partial profile\n")
+                os.chmod(selector, 0o600)
+                result = subprocess.CompletedProcess(args, 1, stdout="", stderr="simulated partial failure")
             else:
                 result = subprocess.CompletedProcess(args, 0, stdout="", stderr="")
             if check and result.returncode:
