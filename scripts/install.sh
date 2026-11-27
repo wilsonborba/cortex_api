@@ -14,51 +14,25 @@ exec 9>var/deploy.lock
 flock -n 9 || { printf 'Another deployment is in progress.\n' >&2; exit 1; }
 binaries=(cortex-api)
 units=(cortex-api)
-verify_bonsai_assets() {
-  local enabled=false
-  local enabled_value=${CORTEX_BONSAI_ENABLED:-}
-  if [ "${enabled_value,,}" = true ]; then enabled=true; fi
-  if [ -f .env ] && python3 -c 'import pathlib,sys; sys.exit(0 if any((p:=line.partition("="))[0].strip()=="CORTEX_BONSAI_ENABLED" and p[2].strip().strip(chr(34)+chr(39)).lower()=="true" for line in pathlib.Path(sys.argv[1]).read_text().splitlines()) else 1)' .env; then
-    enabled=true
-  fi
-  local paths=(
-    models/prism/llama-server
-    models/bonsai/bonsai25-atomicchat-uncensored-PTQ1_0.gguf
-    models/bonsai/bonsai25-official-PTQ1_0-mtp.gguf
-  )
-  local hashes=(
-    89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c
-    f6b5f856c3981ff5ba1db1ce13cdf1ca85f2f701d26ce287e03983b659b681b4
-    e0fc5f3d47b9c926d52677d303b19df356a2376614b3e1cb9973865fc04ca431
-  )
-  for index in "${!paths[@]}"; do
-    path=${paths[$index]}
-    if [ ! -f "$path" ]; then
-      if [ "$enabled" = true ]; then
-        printf 'Bonsai is enabled, but required artifact is missing: %s\n' "$path" >&2
-        return 1
-      fi
-      continue
-    fi
-    actual=$(sha256sum "$path" | cut -d ' ' -f1)
-    if [ "$actual" != "${hashes[$index]}" ]; then
-      printf 'Bonsai artifact hash mismatch: %s\n' "$path" >&2
-      return 1
-    fi
-    if [ "$index" = 0 ] && [ ! -x "$path" ]; then
-      printf 'Prism server is not executable: %s\n' "$path" >&2
-      return 1
-    fi
-  done
-}
-verify_bonsai_assets
+prism_enabled=false
+if [ "${CORTEX_BONSAI_ENABLED:-}" ] && [ "${CORTEX_BONSAI_ENABLED,,}" = true ]; then
+  prism_enabled=true
+elif [ -f .env ] && python3 -c 'import pathlib,sys; sys.exit(0 if any((p:=line.partition("="))[0].strip()=="CORTEX_BONSAI_ENABLED" and p[2].strip().strip(chr(34)+chr(39)).lower()=="true" for line in pathlib.Path(sys.argv[1]).read_text().splitlines()) else 1)' .env; then
+  prism_enabled=true
+fi
 source_hash() {
-  git ls-files -z -- Cargo.toml Cargo.lock build.rs src migrations .cargo "scripts/install.sh" |
+  git ls-files -z -- Cargo.toml Cargo.lock build.rs src migrations .cargo scripts/install.sh scripts/stage_prism.py scripts/activate_prism.py deploy/prism |
     LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f1
 }
 if [ "$mode" = --prepare ]; then
   service_user=$(stat -c %U "$root")
   service_group=$(id -gn "$service_user")
+  if [ "$prism_enabled" = true ]; then
+    : "${CORTEX_PRISM_RUNTIME_SOURCE:?Set CORTEX_PRISM_RUNTIME_SOURCE to the verified Prism runtime directory}"
+    : "${CORTEX_BONSAI_MODEL_SOURCE:?Set CORTEX_BONSAI_MODEL_SOURCE to the directory containing the two pinned Bonsai models}"
+    [ -d "$CORTEX_PRISM_RUNTIME_SOURCE" ] || { printf 'Prism runtime source directory is missing.\n' >&2; exit 1; }
+    [ -d "$CORTEX_BONSAI_MODEL_SOURCE" ] || { printf 'Bonsai model source directory is missing.\n' >&2; exit 1; }
+  fi
   before=$(source_hash)
   cargo build --release --locked --bins -j2
   [ "$before" = "$(source_hash)" ] || {
@@ -93,6 +67,12 @@ UMask=027
 [Install]
 WantedBy=multi-user.target
 UNIT
+  if [ "$prism_enabled" = true ]; then
+    python3 scripts/stage_prism.py stage "$stage/prism" \
+      --runtime "$CORTEX_PRISM_RUNTIME_SOURCE" \
+      --models "$CORTEX_BONSAI_MODEL_SOURCE" \
+      --cortex-user "$service_user"
+  fi
   source_hash > "$stage/source.sha256"
   (cd "$stage"; sha256sum "${binaries[@]}" *.service > artifacts.sha256)
   rm -rf var/deploy
@@ -111,6 +91,14 @@ fi
 (cd var/deploy; sha256sum --check --status artifacts.sha256) || {
   printf 'Prepared artifacts changed. Run install.sh --prepare again.\n' >&2; exit 1;
 }
+if [ -d var/deploy/prism ]; then
+  python3 scripts/stage_prism.py check var/deploy/prism || {
+    printf 'Prepared Prism assets changed or failed verification. Run install.sh --prepare again.\n' >&2; exit 1;
+  }
+elif [ "$prism_enabled" = true ]; then
+  printf 'Prism is enabled, but the prepared release has no Prism artifacts. Run install.sh --prepare.\n' >&2
+  exit 1
+fi
 for unit in "${units[@]}"; do
   grep -Fxq "WorkingDirectory=$root" "var/deploy/$unit.service" || {
     printf 'Prepared units belong to another checkout. Prepare in this checkout.\n' >&2; exit 1;
@@ -119,6 +107,10 @@ done
 if [ "$mode" = --check ]; then
   printf 'Prepared release verified. No service changed.\n'
   exit 0
+fi
+if [ -d var/deploy/prism ] && systemctl is-active --quiet prism.service; then
+  printf 'Prism is active. Wait for its shared GPU permit to be released before Cortex service activation.\n' >&2
+  exit 1
 fi
 mkdir -p target/release
 for binary in "${binaries[@]}"; do
@@ -148,4 +140,7 @@ for index in "${!units[@]}"; do
     printf 'Running binary verification failed for %s.\n' "$unit.service" >&2; exit 1
   fi
 done
+if [ -d var/deploy/prism ]; then
+  python3 scripts/activate_prism.py var/deploy/prism
+fi
 printf 'Services are active and run the prepared release binaries.\n'

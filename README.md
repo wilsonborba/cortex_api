@@ -7,7 +7,9 @@ Hippocampus for memory and files, and CouchDB for run records. Ollama runs local
 ## Run
 
 Private credentials belong in `.env`. Non-secret settings belong in
-`src/core/config.rs`. Keep model files under the ignored `models/` directory.
+`src/core/config.rs`. Development model files belong under the ignored `models/`
+directory; the production Prism runtime and Bonsai weights are supplied as
+explicit verified installer inputs and are not stored in the repository.
 
 - `cargo run`: development listener and test stores.
 - `cargo run -- --production`: port 8003, production stores and Hippo port 8001.
@@ -15,9 +17,17 @@ Private credentials belong in `.env`. Non-secret settings belong in
 - `cargo run --bin migrate -- cortex`: explicit production Cortex migrations.
 - `./scripts/install.sh --prepare`: locked release build, staged binaries and units.
   `CARGO_TARGET_DIR` is supported. Run this step in the production checkout.
+  When `CORTEX_BONSAI_ENABLED=true`, also set `CORTEX_PRISM_RUNTIME_SOURCE` to
+  the pinned, extracted Prism runtime bundle and `CORTEX_BONSAI_MODEL_SOURCE`
+  to the directory containing the two pinned model files. The runtime file list,
+  symlink targets, lengths and SHA-256 values are recorded in
+  `deploy/prism/runtime-manifest.json`; invalid or incomplete bundles fail closed.
 - `./scripts/install.sh --check`: verify staged artifact hashes and source files.
 - `./scripts/install.sh --activate`: administrator step. Installs the staged
   binaries before restart, then verifies each running executable hash.
+  If Prism artifacts are staged, this installs its dedicated service account,
+  versioned runtime, persistent weights and fixed service/control files. It
+  leaves `prism.service` disabled and stopped; Prism remains on-demand.
   Missing, changed or stale prepared artifacts are rejected before service changes.
   Run only in the coordinated deployment window.
 
@@ -51,19 +61,26 @@ calls. On T1 image requests, one bounded call through the existing T0 vision
 route adds a description before context assembly; every T1 call receives no
 image payload. T0 image requests keep their existing route.
 
-Provision the pinned local files before enabling T1:
+The production installer receives the verified runtime bundle and both pinned
+model files as explicit inputs before T1 is enabled. Their destinations are the
+versioned `/opt/prism/releases/` runtime (with `/opt/prism/current` as the stable
+alias), `/var/lib/prism/models/bonsai/` for model weights, and `/etc/prism/` for
+the pinned manifests. The service binds only to `127.0.0.1:49100`; no Prism API
+key is configured. `--prepare` and `--check` only stage and verify files; they do
+not install system users, change host paths, start the service, or load a model.
+
+The accepted model pins are:
 
 | Path | SHA-256 |
 | --- | --- |
-| `models/prism/llama-server` | `89e7f20b23b97bf77b91a0143a168763f7835fd6e0a7a7a23bb70951d991c02c` |
-| `models/bonsai/bonsai25-atomicchat-uncensored-PTQ1_0.gguf` | `f6b5f856c3981ff5ba1db1ce13cdf1ca85f2f701d26ce287e03983b659b681b4` |
-| `models/bonsai/bonsai25-official-PTQ1_0-mtp.gguf` | `e0fc5f3d47b9c926d52677d303b19df356a2376614b3e1cb9973865fc04ca431` |
+| `bonsai25-atomicchat-uncensored-PTQ1_0.gguf` | `f6b5f856c3981ff5ba1db1ce13cdf1ca85f2f701d26ce287e03983b659b681b4` |
+| `bonsai25-official-PTQ1_0-mtp.gguf` | `e0fc5f3d47b9c926d52677d303b19df356a2376614b3e1cb9973865fc04ca431` |
 
 The official profile uses the measured MTP export. The loader checks each
 artifact hash before spawning the single fixed Prism command. Unknown profile
 IDs, mismatched artifacts, failed readiness checks, and disabled T1 selection
-fail closed. `install.sh --prepare` and `--check` verify these files when T1 is
-enabled; neither command starts the model or changes a service.
+fail closed. The accepted runtime server hash and complete bundled dependency
+inventory are pinned in `deploy/prism/runtime-manifest.json`.
 
 Plain labelled context is the default selected by the fixed real-model experiment.
 JSON and TOON remain configurable for model context. Service traffic stays JSON.

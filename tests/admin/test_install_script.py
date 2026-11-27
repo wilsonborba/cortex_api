@@ -22,6 +22,9 @@ class InstallerTests(unittest.TestCase):
         self.names = ['cortex-api'] if self.script == 'install.sh' else ['hippocampus-api', 'hippocampus']
         (self.repo / 'scripts').mkdir()
         shutil.copy2(source / 'scripts' / self.script, self.repo / 'scripts' / self.script)
+        for helper in ['stage_prism.py', 'activate_prism.py']:
+            shutil.copy2(source / 'scripts' / helper, self.repo / 'scripts' / helper)
+        shutil.copytree(source / 'deploy' / 'prism', self.repo / 'deploy' / 'prism')
         (self.repo / 'src').mkdir()
         (self.repo / 'src/main.rs').write_text('fn main() {}\n')
         (self.repo / 'Cargo.toml').write_text('[package]\nname="synthetic"\n')
@@ -103,6 +106,13 @@ elif args[0]=='is-active':sys.exit(0 if args[-1] in pids else 1)
             self.assertEqual((self.repo / 'var/deploy' / name).read_bytes(),
                              (self.build / 'release' / name).read_bytes())
 
+    def test_enabled_prism_requires_explicit_asset_directories_before_build(self):
+        self.env['CORTEX_BONSAI_ENABLED'] = 'true'
+        result = self.run_script('--prepare', success=False)
+        self.assertIn('CORTEX_PRISM_RUNTIME_SOURCE', result.stderr)
+        self.assertFalse((self.repo / 'service.log').exists())
+        self.assertFalse((self.repo / 'var/deploy').exists())
+
     def test_activation_replaces_old_binaries_and_checks_running_artifacts(self):
         (self.repo / 'target/release').mkdir(parents=True)
         for name in self.names:
@@ -156,6 +166,12 @@ elif args[0]=='is-active':sys.exit(0 if args[-1] in pids else 1)
         subprocess.run(['git', '-C', str(self.repo), 'add', 'migrations'], check=True)
         self.run_script('--prepare')
         migration.write_text('SELECT 2;')
+        self.run_script('--activate', success=False)
+
+    def test_changed_prism_deployment_input_is_rejected(self):
+        self.run_script('--prepare')
+        unit = self.repo / 'deploy/prism/prism.service'
+        unit.write_text(unit.read_text() + '\n# changed after prepare\n')
         self.run_script('--activate', success=False)
 
     def test_activation_requires_administrator(self):
