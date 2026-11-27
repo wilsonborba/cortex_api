@@ -27,7 +27,9 @@ source_hash() {
 if [ "$mode" = --prepare ]; then
   service_user=$(stat -c %U "$root")
   service_group=$(id -gn "$service_user")
+  supplementary_groups=""
   if [ "$prism_enabled" = true ]; then
+    supplementary_groups="SupplementaryGroups=prism"
     : "${CORTEX_PRISM_RUNTIME_SOURCE:?Set CORTEX_PRISM_RUNTIME_SOURCE to the verified Prism runtime directory}"
     : "${CORTEX_BONSAI_MODEL_SOURCE:?Set CORTEX_BONSAI_MODEL_SOURCE to the directory containing the two pinned Bonsai models}"
     [ -d "$CORTEX_PRISM_RUNTIME_SOURCE" ] || { printf 'Prism runtime source directory is missing.\n' >&2; exit 1; }
@@ -55,6 +57,7 @@ Wants=network-online.target
 Type=simple
 User=$service_user
 Group=$service_group
+$supplementary_groups
 WorkingDirectory=$root
 EnvironmentFile=$root/.env
 ExecStart=$root/target/release/cortex-api --production
@@ -108,9 +111,9 @@ if [ "$mode" = --check ]; then
   printf 'Prepared release verified. No service changed.\n'
   exit 0
 fi
-if [ -d var/deploy/prism ] && systemctl is-active --quiet prism.service; then
-  printf 'Prism is active. Wait for its shared GPU permit to be released before Cortex service activation.\n' >&2
-  exit 1
+if [ -d var/deploy/prism ]; then
+  python3 scripts/activate_prism.py --preflight
+  python3 scripts/activate_prism.py var/deploy/prism
 fi
 mkdir -p target/release
 for binary in "${binaries[@]}"; do
@@ -140,7 +143,4 @@ for index in "${!units[@]}"; do
     printf 'Running binary verification failed for %s.\n' "$unit.service" >&2; exit 1
   fi
 done
-if [ -d var/deploy/prism ]; then
-  python3 scripts/activate_prism.py var/deploy/prism
-fi
 printf 'Services are active and run the prepared release binaries.\n'

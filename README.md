@@ -27,7 +27,8 @@ explicit verified installer inputs and are not stored in the repository.
   binaries before restart, then verifies each running executable hash.
   If Prism artifacts are staged, this installs its dedicated service account,
   versioned runtime, persistent weights and fixed service/control files. It
-  leaves `prism.service` disabled and stopped; Prism remains on-demand.
+  adds the `prism` read group to the Cortex unit before restart, leaves
+  `prism.service` disabled and stopped, and keeps Prism on-demand.
   Missing, changed or stale prepared artifacts are rejected before service changes.
   Run only in the coordinated deployment window.
 

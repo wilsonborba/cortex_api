@@ -15,6 +15,98 @@ STAGER_PATH = ROOT / "scripts/stage_prism.py"
 SPEC = importlib.util.spec_from_file_location("stage_prism", STAGER_PATH)
 stager = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(stager)
+
+
+def parse_unit_status(output):
+    fields = {}
+    for line in output.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            fields[key.strip()] = value.strip()
+    required = {"LoadState", "ActiveState", "SubState", "MainPID"}
+    if not required.issubset(fields):
+        raise RuntimeError("systemd Prism status is incomplete")
+    try:
+        main_pid = int(fields["MainPID"])
+    except ValueError as error:
+        raise RuntimeError("systemd Prism MainPID is invalid") from error
+    return fields, main_pid
+
+
+def assert_prism_quiescent(run=subprocess.run):
+    result = run([
+        "systemctl", "--no-ask-password", "show", "prism.service",
+        "--property=LoadState,ActiveState,SubState,MainPID,ControlGroup,InvocationID",
+    ], check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError("could not query Prism service quiescence")
+    fields, main_pid = parse_unit_status(result.stdout)
+    inactive = fields["ActiveState"] in {"inactive", "failed"} or fields["LoadState"] == "not-found"
+    if not inactive or main_pid != 0:
+        raise RuntimeError(f"Prism service is not quiescent: {fields['ActiveState']}/{fields['SubState']} MainPID={main_pid}")
+
+
+class RuntimePathSnapshot:
+    """Reversible state for the two fixed tmpfiles-managed runtime paths."""
+
+    def __init__(self, directory, selector):
+        self.directory = Path(directory)
+        self.selector = Path(selector)
+        self.directory_state = self._capture(self.directory)
+        self.selector_state = self._capture(self.selector)
+
+    @staticmethod
+    def _capture(path):
+        if path.is_symlink():
+            raise RuntimeError(f"tmpfiles-managed path cannot be a symlink: {path}")
+        if not path.exists():
+            return None
+        info = path.lstat()
+        if path.is_file():
+            kind, content = "file", path.read_bytes()
+        elif path.is_dir():
+            kind, content = "directory", None
+        else:
+            raise RuntimeError(f"unsupported tmpfiles-managed path type: {path}")
+        return kind, content, info.st_mode & 0o7777, info.st_uid, info.st_gid
+
+    @staticmethod
+    def _remove_if_created(path):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            path.unlink()
+        elif path.is_dir():
+            path.rmdir()
+
+    @staticmethod
+    def _restore(path, state):
+        if state is None:
+            RuntimePathSnapshot._remove_if_created(path)
+            return
+        kind, content, mode, uid, gid = state
+        if kind == "directory":
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                path.unlink()
+            path.mkdir(parents=True, exist_ok=True)
+            os.chmod(path, mode)
+            os.chown(path, uid, gid)
+            return
+        if path.is_dir() and not path.is_symlink():
+            path.rmdir()
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+        tmp = path.with_name(f".{path.name}.restore-{uuid.uuid4().hex}")
+        try:
+            tmp.write_bytes(content)
+            os.chmod(tmp, mode)
+            os.chown(tmp, uid, gid)
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists() or tmp.is_symlink():
+                tmp.unlink()
+
+    def restore(self):
+        self._restore(self.selector, self.selector_state)
+        self._restore(self.directory, self.directory_state)
 class Transaction:
     def __init__(self, check_output=subprocess.check_output):
         self.backups = {}
@@ -178,9 +270,7 @@ def activate(staged, filesystem_root=Path("/"), run=subprocess.run, check_output
     staged = staged.resolve(strict=True)
     if os.geteuid() != 0 and filesystem_root == Path("/"):
         raise PermissionError("Prism activation requires administrator rights")
-    active = run(["systemctl", "is-active", "--quiet", "prism.service"], check=False)
-    if active.returncode == 0:
-        raise RuntimeError("prism.service is active; activation will not replace a running runtime")
+    assert_prism_quiescent(run)
     tx = Transaction(check_output)
     host = lambda path: filesystem_root / path.lstrip("/")
     stage_manifest = stager.load_manifest()
@@ -198,11 +288,13 @@ def activate(staged, filesystem_root=Path("/"), run=subprocess.run, check_output
         (host("/usr/local/bin/prism-launch"), False),
         (host("/etc/tmpfiles.d/prism.conf"), False),
         (host("/etc/polkit-1/rules.d/49-prism-systemd.rules"), False),
+        (host("/run/prism"), False), (host("/run/prism/profile"), False),
         (host("/var/lib/prism/models/bonsai") / next(iter(stager.MODELS)), False),
         (host("/var/lib/prism/models/bonsai") / list(stager.MODELS)[1], False),
     ]
     for destination, allow_symlink in destinations:
         assert_safe_destination(destination, filesystem_root, allow_symlink)
+    runtime_paths = RuntimePathSnapshot(host("/run/prism"), host("/run/prism/profile"))
     created_group, created_user = ensure_prism_account(run)
     try:
         for directory, mode, group in ((host("/opt/prism/releases"), 0o755, "prism"), (host("/var/lib/prism/models/bonsai"), 0o750, "prism"), (host("/etc/prism"), 0o750, "prism")):
@@ -258,20 +350,36 @@ def activate(staged, filesystem_root=Path("/"), run=subprocess.run, check_output
         run(["systemd-tmpfiles", "--create", str(host("/etc/tmpfiles.d/prism.conf"))], check=True)
         tx.commit()
     except Exception:
-        tx.rollback()
+        rollback_errors = []
+        for rollback in (tx.rollback, runtime_paths.restore):
+            try:
+                rollback()
+            except Exception as rollback_error:
+                rollback_errors.append(str(rollback_error))
         run(["systemctl", "daemon-reload"], check=False)
         if created_user:
             run(["userdel", "prism"], check=False)
         if created_group:
             run(["groupdel", "prism"], check=False)
+        if rollback_errors:
+            raise RuntimeError("activation rollback was incomplete: " + "; ".join(rollback_errors))
         raise
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("staged", type=Path)
+    parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("staged", type=Path, nargs="?")
     args = parser.parse_args()
     try:
+        if args.preflight:
+            if args.staged is not None:
+                parser.error("--preflight does not accept a staged directory")
+            assert_prism_quiescent()
+            print("Prism service is quiescent (inactive/failed/not-found with MainPID=0).")
+            return 0
+        if args.staged is None:
+            parser.error("a verified staged Prism directory is required")
         activate(args.staged)
     except Exception as error:
         print(f"Prism activation failed and installed files were rolled back: {error}", file=sys.stderr)

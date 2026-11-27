@@ -54,15 +54,30 @@ else: os.execv('/usr/bin/id',['id']+sys.argv[1:])
         self.helper('install', '''import os,sys
 from pathlib import Path
 args=sys.argv[1:]
+with (Path(os.environ['TEST_REPO'])/'order.log').open('a') as f:f.write('install:'+args[-1]+'\\n')
 if args[-1].startswith('/etc/systemd/system/'):
  p=Path(os.environ['TEST_REPO'])/'units'/Path(args[-1]).name;p.parent.mkdir(exist_ok=True);args[-1]=str(p)
 os.execv('/usr/bin/install',['install']+args)
+''')
+        self.helper('python3', '''import os,sys
+from pathlib import Path
+root=Path(os.environ['TEST_REPO']);args=sys.argv[1:]
+if len(args)>=3 and args[0].endswith('stage_prism.py') and args[1]=='stage':
+ p=Path(args[2]);p.mkdir(parents=True,exist_ok=True)
+ with (root/'order.log').open('a') as f:f.write('stage-prism\\n')
+elif len(args)>=3 and args[0].endswith('stage_prism.py') and args[1]=='check':
+ with (root/'order.log').open('a') as f:f.write('check-prism\\n')
+elif args and args[0].endswith('activate_prism.py'):
+ event='preflight-prism' if len(args)>1 and args[1]=='--preflight' else 'activate-prism'
+ with (root/'order.log').open('a') as f:f.write(event+'\\n')
+else: os.execv('/usr/bin/python3',['python3']+args)
 ''')
         self.helper('systemctl', '''import json,os,subprocess,sys
 from pathlib import Path
 root=Path(os.environ['TEST_REPO']);args=sys.argv[1:];state=root/'pids.json'
 pids=json.loads(state.read_text()) if state.exists() else {}
 with (root/'service.log').open('a') as f:f.write(' '.join(args)+'\\n')
+with (root/'order.log').open('a') as f:f.write('systemctl:'+' '.join(args)+'\\n')
 if args[0]=='restart':
  for unit in args[1:]:
   name='hippocampus' if unit=='hippocampus-scheduler.service' else unit.removesuffix('.service')
@@ -102,6 +117,7 @@ elif args[0]=='is-active':sys.exit(0 if args[-1] in pids else 1)
         self.run_script('--prepare')
         self.run_script('--check')
         self.assertFalse((self.repo / 'target').exists())
+        self.assertNotIn('SupplementaryGroups=prism', (self.repo / 'var/deploy/cortex-api.service').read_text())
         for name in self.names:
             self.assertEqual((self.repo / 'var/deploy' / name).read_bytes(),
                              (self.build / 'release' / name).read_bytes())
@@ -112,6 +128,27 @@ elif args[0]=='is-active':sys.exit(0 if args[-1] in pids else 1)
         self.assertIn('CORTEX_PRISM_RUNTIME_SOURCE', result.stderr)
         self.assertFalse((self.repo / 'service.log').exists())
         self.assertFalse((self.repo / 'var/deploy').exists())
+
+    def test_prism_group_is_rendered_and_assets_install_before_cortex_restart(self):
+        self.env['CORTEX_BONSAI_ENABLED'] = 'true'
+        self.env['CORTEX_PRISM_RUNTIME_SOURCE'] = str(self.base / 'runtime-input')
+        self.env['CORTEX_BONSAI_MODEL_SOURCE'] = str(self.base / 'model-input')
+        (self.base / 'runtime-input').mkdir()
+        (self.base / 'model-input').mkdir()
+        self.run_script('--prepare')
+        unit = self.repo / 'var/deploy/cortex-api.service'
+        self.assertIn('SupplementaryGroups=prism', unit.read_text())
+        self.assertTrue((self.repo / 'var/deploy/prism').is_dir())
+
+        self.run_script('--activate')
+        events = (self.repo / 'order.log').read_text().splitlines()
+        prism_install = events.index('activate-prism')
+        prism_preflight = events.index('preflight-prism')
+        cortex_unit_install = events.index('install:/etc/systemd/system/cortex-api.service')
+        cortex_restart = events.index('systemctl:restart cortex-api.service')
+        self.assertLess(prism_preflight, prism_install)
+        self.assertLess(prism_install, cortex_unit_install)
+        self.assertLess(cortex_unit_install, cortex_restart)
 
     def test_activation_replaces_old_binaries_and_checks_running_artifacts(self):
         (self.repo / 'target/release').mkdir(parents=True)

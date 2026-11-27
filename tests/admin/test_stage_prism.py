@@ -190,11 +190,27 @@ class PrismActivationTests(unittest.TestCase):
         self.host = self.root / "host"
         self.commands = []
 
-    def command_runner(self, fail_on=None):
+    def command_runner(self, fail_on=None, active_state="inactive", main_pid=0, load_state="loaded", query_status=0):
         def run(args, check=False, **kwargs):
             self.commands.append(list(args))
-            output = "prism:x:123:123:Prism:/nonexistent:/usr/sbin/nologin\n" if args[:2] == ["getent", "passwd"] else "prism:x:123\n"
-            rc = 3 if args[:3] == ["systemctl", "is-active", "--quiet"] else (1 if fail_on == args[0] else 0)
+            if args[:2] == ["getent", "passwd"]:
+                output = "prism:x:123:123:Prism:/nonexistent:/usr/sbin/nologin\n"
+            elif args[:2] == ["getent", "group"]:
+                output = "prism:x:123\n"
+            elif args[:3] == ["systemctl", "--no-ask-password", "show"]:
+                output = f"LoadState={load_state}\nActiveState={active_state}\nSubState=dead\nMainPID={main_pid}\n"
+            else:
+                output = ""
+            rc = query_status if args[:3] == ["systemctl", "--no-ask-password", "show"] else (1 if fail_on == args[0] else 0)
+            if args[0] == "systemd-tmpfiles" and fail_on == args[0]:
+                runtime = self.host / "run/prism"
+                runtime.mkdir(parents=True, exist_ok=True)
+                os.chmod(runtime, 0o700)
+                selector = runtime / "profile"
+                if not selector.is_dir():
+                    selector.write_text("partial profile\n")
+                    os.chmod(selector, 0o600)
+                rc = 1
             result = subprocess.CompletedProcess(args, rc,
                                                  stdout=output, stderr="")
             if check and result.returncode:
@@ -215,7 +231,21 @@ class PrismActivationTests(unittest.TestCase):
         flat = [arg for command in self.commands for arg in command]
         self.assertNotIn("start", flat)
         self.assertNotIn("enable", flat)
-        self.assertTrue(all(command[:3] == ["systemctl", "is-active", "--quiet"] or "prism.service" not in command for command in self.commands))
+        self.assertTrue(all(command[:3] == ["systemctl", "--no-ask-password", "show"] or "prism.service" not in command for command in self.commands))
+
+    def test_group_readable_runtime_and_model_fixtures_support_supervisor_hash_reads(self):
+        with unittest.mock.patch.object(activator.os, "chown"):
+            activator.activate(self.stage, self.host, self.command_runner(), self.group_output)
+        runtime = self.host / "opt/prism/releases" / stager.RUNTIME_RELEASE
+        model_dir = self.host / "var/lib/prism/models/bonsai"
+        self.assertEqual((runtime.stat().st_mode & 0o777), 0o755)
+        self.assertEqual((runtime / "llama-server").stat().st_mode & 0o777, 0o750)
+        self.assertEqual(model_dir.stat().st_mode & 0o777, 0o750)
+        for path in [runtime / "llama-server", runtime / "libllama.so.1", *model_dir.iterdir()]:
+            permissions = path.stat().st_mode & 0o777
+            self.assertTrue(permissions & 0o040, f"group read is required: {path.name}")
+            self.assertEqual(permissions & 0o007, 0, f"other users must have no access: {path.name}")
+            self.assertEqual(stager.digest(path), stager.digest(self.stage / "releases" / stager.RUNTIME_RELEASE / path.name) if path.name in {"llama-server", "libllama.so.1"} else stager.digest(self.stage / "models/bonsai" / path.name))
 
     def test_failed_tmpfiles_activation_restores_previous_alias_and_files(self):
         (self.host / "opt/prism/releases").mkdir(parents=True)
@@ -224,11 +254,20 @@ class PrismActivationTests(unittest.TestCase):
         target = self.host / "etc/systemd/system/prism.service"
         target.parent.mkdir(parents=True)
         target.write_text("previous unit\n")
+        runtime = self.host / "run/prism"
+        runtime.mkdir(parents=True)
+        os.chmod(runtime, 0o710)
+        selector = runtime / "profile"
+        selector.write_text("bonsai25-official\n")
+        os.chmod(selector, 0o640)
         with unittest.mock.patch.object(activator.os, "chown"):
             with self.assertRaises(subprocess.CalledProcessError):
                 activator.activate(self.stage, self.host, self.command_runner("systemd-tmpfiles"), self.group_output)
         self.assertEqual(os.readlink(self.host / "opt/prism/current"), "releases/previous")
         self.assertEqual(target.read_text(), "previous unit\n")
+        self.assertEqual(selector.read_text(), "bonsai25-official\n")
+        self.assertEqual(selector.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(runtime.stat().st_mode & 0o777, 0o710)
         self.assertFalse((self.host / "opt/prism/releases" / stager.RUNTIME_RELEASE).exists())
         self.assertFalse((self.host / "var/lib/prism/models/bonsai/uncensored.gguf").exists())
         self.assertTrue(any(command[:2] == ["systemctl", "daemon-reload"] for command in self.commands))
@@ -241,7 +280,7 @@ class PrismActivationTests(unittest.TestCase):
         (self.host / "opt/prism").symlink_to(outside, target_is_directory=True)
         with self.assertRaisesRegex(RuntimeError, "symlinked parent"):
             activator.activate(self.stage, self.host, self.command_runner(), self.group_output)
-        self.assertEqual([command[1:3] for command in self.commands], [["is-active", "--quiet"]])
+        self.assertEqual([command[1:3] for command in self.commands], [["--no-ask-password", "show"]])
         self.assertEqual(list(outside.iterdir()), [])
 
     def test_new_service_account_is_removed_when_activation_rolls_back(self):
@@ -249,8 +288,9 @@ class PrismActivationTests(unittest.TestCase):
             self.commands.append(list(args))
             if args[:2] in (["getent", "group"], ["getent", "passwd"]):
                 result = subprocess.CompletedProcess(args, 1, stdout="", stderr="not found")
-            elif args[:3] == ["systemctl", "is-active", "--quiet"]:
-                result = subprocess.CompletedProcess(args, 3, stdout="", stderr="")
+            elif args[:3] == ["systemctl", "--no-ask-password", "show"]:
+                status = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n"
+                result = subprocess.CompletedProcess(args, 0, stdout=status, stderr="")
             elif args[0] == "systemd-tmpfiles":
                 result = subprocess.CompletedProcess(args, 1, stdout="", stderr="simulated failure")
             else:
@@ -265,6 +305,50 @@ class PrismActivationTests(unittest.TestCase):
         self.assertIn(["userdel", "prism"], self.commands)
         self.assertIn(["groupdel", "prism"], self.commands)
         self.assertFalse((self.host / "opt/prism/current").exists())
+        self.assertFalse((self.host / "run/prism").exists())
+
+    def test_systemd_quiescence_predicate_accepts_only_inactive_failed_or_missing_pid_zero(self):
+        def runner(output, status=0):
+            return lambda args, **kwargs: subprocess.CompletedProcess(args, status, stdout=output, stderr="")
+
+        accepted = [
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n",
+            "LoadState=loaded\nActiveState=failed\nSubState=failed\nMainPID=0\n",
+            "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\n",
+        ]
+        for output in accepted:
+            activator.assert_prism_quiescent(runner(output))
+        rejected = [
+            ("LoadState=loaded\nActiveState=activating\nSubState=start\nMainPID=0\n", 0),
+            ("LoadState=loaded\nActiveState=deactivating\nSubState=stop\nMainPID=42\n", 0),
+            ("LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=42\n", 0),
+            ("LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n", 1),
+        ]
+        for output, status in rejected:
+            with self.assertRaises(RuntimeError):
+                activator.assert_prism_quiescent(runner(output, status))
+
+    def test_transitional_or_failed_status_query_changes_no_host_paths_or_accounts(self):
+        for state, pid, query_status in (("activating", 0, 0), ("deactivating", 41, 0), ("active", 7, 0), ("inactive", 0, 1)):
+            self.commands.clear()
+            runner = self.command_runner(active_state=state, main_pid=pid, query_status=query_status)
+            with self.assertRaises(RuntimeError):
+                activator.activate(self.stage, self.host, runner, self.group_output)
+            self.assertEqual(len(self.commands), 1)
+            self.assertFalse(self.host.exists())
+
+    def test_partial_tmpfiles_failure_preserves_an_existing_selector_directory(self):
+        runtime = self.host / "run/prism"
+        selector = runtime / "profile"
+        selector.mkdir(parents=True)
+        os.chmod(runtime, 0o710)
+        os.chmod(selector, 0o700)
+        with unittest.mock.patch.object(activator.os, "chown"):
+            with self.assertRaises(subprocess.CalledProcessError):
+                activator.activate(self.stage, self.host, self.command_runner("systemd-tmpfiles"), self.group_output)
+        self.assertTrue(selector.is_dir())
+        self.assertEqual(selector.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(runtime.stat().st_mode & 0o777, 0o710)
 
 
 if __name__ == "__main__":
