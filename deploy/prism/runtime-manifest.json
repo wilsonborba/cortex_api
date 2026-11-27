@@ -23,7 +23,7 @@
       "bytes": 923664,
       "sha256": "c21d4ded39467b4626f36ee87ee3dfa22d89eddf3d59bd5eb0b34f5054f39e9a",
       "symlink": true,
-      "target": "libggml-base.so.0.27.0"
+      "target": "libggml-base.so.0"
     },
     {
       "path": "libggml-base.so.0",
@@ -163,7 +163,7 @@
       "bytes": 51040,
       "sha256": "8643a58bb37af6fb153e2ea98b48efa227855725ee51c05f4ca76b9867956463",
       "symlink": true,
-      "target": "libggml.so.0.27.0"
+      "target": "libggml.so.0"
     },
     {
       "path": "libggml.so.0",
@@ -205,7 +205,7 @@
       "bytes": 6988216,
       "sha256": "27663fe4627930d83214d6aa31e647ddd2182a2ac52b394cd9a595692c4bdff4",
       "symlink": true,
-      "target": "libllama-common.so.0.7.0"
+      "target": "libllama-common.so.0"
     },
     {
       "path": "libllama-common.so.0",
@@ -261,7 +261,7 @@
       "bytes": 5400280,
       "sha256": "0057ee474e118674849f6156d252ed73134ef73c24ef3364b7fefafbb450518f",
       "symlink": true,
-      "target": "libllama.so.0.7.0"
+      "target": "libllama.so.0"
     },
     {
       "path": "libllama.so.0",
@@ -282,7 +282,7 @@
       "bytes": 2047152,
       "sha256": "7645a14471128551272e4cebbb6ea76109b1804d80296306c0b5f9d4d4aed229",
       "symlink": true,
-      "target": "libmtmd.so.0.7.0"
+      "target": "libmtmd.so.0"
     },
     {
       "path": "libmtmd.so.0",

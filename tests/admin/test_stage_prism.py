@@ -39,7 +39,8 @@ class PrismStagingTests(unittest.TestCase):
         (self.runtime / "llama-server").write_bytes(b"pinned server")
         (self.runtime / "llama-server").chmod(0o755)
         (self.runtime / "libllama.so.1").write_bytes(b"library")
-        (self.runtime / "libllama.so").symlink_to("libllama.so.1")
+        (self.runtime / "libllama.so.0").symlink_to("libllama.so.1")
+        (self.runtime / "libllama.so").symlink_to("libllama.so.0")
         self.models = self.root / "models"
         self.models.mkdir()
         (self.models / "uncensored.gguf").write_bytes(b"model one")
@@ -63,7 +64,7 @@ class PrismStagingTests(unittest.TestCase):
             "official.gguf": (9, hashlib.sha256(b"model two").hexdigest()),
         }
         entries = []
-        for name, target in [("llama-server", None), ("libllama.so.1", None), ("libllama.so", "libllama.so.1")]:
+        for name, target in [("llama-server", None), ("libllama.so.1", None), ("libllama.so.0", "libllama.so.1"), ("libllama.so", "libllama.so.0")]:
             content = (self.runtime / (target or name)).read_bytes()
             entries.append({"path": name, "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest(), "symlink": target is not None, "target": target})
         write_contract(self.deploy, entries)
@@ -81,6 +82,8 @@ class PrismStagingTests(unittest.TestCase):
         self.assertIn("User=prism\n", (self.stage / "system/prism.service").read_text())
         self.assertTrue((self.stage / "system/prism.service").read_text().endswith("cortex\n"))
         self.assertTrue((self.stage / "releases" / stager.RUNTIME_RELEASE / "libllama.so").is_symlink())
+        self.assertEqual(os.readlink(self.stage / "releases" / stager.RUNTIME_RELEASE / "libllama.so"), "libllama.so.0")
+        self.assertEqual(os.readlink(self.stage / "releases" / stager.RUNTIME_RELEASE / "libllama.so.0"), "libllama.so.1")
 
     def test_runtime_hash_mismatch_fails_closed(self):
         (self.runtime / "libllama.so.1").write_bytes(b"tampered")
@@ -152,7 +155,8 @@ class PrismActivationTests(unittest.TestCase):
         (self.runtime / "llama-server").write_bytes(b"pinned server")
         (self.runtime / "llama-server").chmod(0o755)
         (self.runtime / "libllama.so.1").write_bytes(b"library")
-        (self.runtime / "libllama.so").symlink_to("libllama.so.1")
+        (self.runtime / "libllama.so.0").symlink_to("libllama.so.1")
+        (self.runtime / "libllama.so").symlink_to("libllama.so.0")
         self.models = self.root / "models"
         self.models.mkdir()
         (self.models / "uncensored.gguf").write_bytes(b"model one")
@@ -175,7 +179,7 @@ class PrismActivationTests(unittest.TestCase):
             "official.gguf": (9, hashlib.sha256(b"model two").hexdigest()),
         }
         entries = []
-        for name, target in [("llama-server", None), ("libllama.so.1", None), ("libllama.so", "libllama.so.1")]:
+        for name, target in [("llama-server", None), ("libllama.so.1", None), ("libllama.so.0", "libllama.so.1"), ("libllama.so", "libllama.so.0")]:
             content = (self.runtime / (target or name)).read_bytes()
             entries.append({"path": name, "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest(), "symlink": target is not None, "target": target})
         write_contract(self.deploy, entries)
