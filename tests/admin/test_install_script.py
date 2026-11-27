@@ -152,6 +152,42 @@ elif args[0]=='is-active':sys.exit(0 if args[-1] in pids else 1)
         self.assertFalse((self.repo / 'var/deploy/prism').exists())
         self.assertNotIn('SupplementaryGroups=prism', (self.repo / 'var/deploy/cortex-api.service').read_text())
 
+    def test_service_runtime_enablement_matches_prepared_prism_choice(self):
+        cases = [
+            ('true', 'false', True),
+            ('false', 'true', False),
+            ('', 'true', False),
+            (None, 'true', True),
+            (None, 'false', False),
+        ]
+        for caller_value, dotenv_value, expected in cases:
+            with self.subTest(caller=caller_value, dotenv=dotenv_value):
+                shutil.rmtree(self.repo / 'var', ignore_errors=True)
+                (self.repo / '.env').write_text(f'CORTEX_BONSAI_ENABLED={dotenv_value}\n')
+                self.env.pop('CORTEX_BONSAI_ENABLED', None)
+                if caller_value is not None:
+                    self.env['CORTEX_BONSAI_ENABLED'] = caller_value
+                if expected:
+                    for key, path in [('CORTEX_PRISM_RUNTIME_SOURCE', 'runtime-input'),
+                                      ('CORTEX_BONSAI_MODEL_SOURCE', 'model-input')]:
+                        source = self.base / path
+                        source.mkdir(exist_ok=True)
+                        self.env[key] = str(source)
+                self.run_script('--prepare')
+                unit = (self.repo / 'var/deploy/cortex-api.service').read_text()
+                self.assertEqual('SupplementaryGroups=prism' in unit, expected)
+                self.assertEqual((self.repo / 'var/deploy/prism').is_dir(), expected)
+                exec_line = next(line.removeprefix('ExecStart=') for line in unit.splitlines()
+                                 if line.startswith('ExecStart='))
+                argv = exec_line.split()
+                self.assertEqual(argv[:2], ['/usr/bin/env', f'CORTEX_BONSAI_ENABLED={str(expected).lower()}'])
+                # Model systemd's EnvironmentFile first, then run the rendered ExecStart.
+                runtime = dict(os.environ, CORTEX_BONSAI_ENABLED=dotenv_value)
+                command = argv[:2] + ['/usr/bin/python3', '-c',
+                                      'import os; print(os.environ["CORTEX_BONSAI_ENABLED"])']
+                result = subprocess.run(command, env=runtime, capture_output=True, text=True, check=True)
+                self.assertEqual(result.stdout.strip(), str(expected).lower())
+
     def test_prism_group_is_rendered_and_assets_install_before_cortex_restart(self):
         self.env['CORTEX_BONSAI_ENABLED'] = 'true'
         self.env['CORTEX_PRISM_RUNTIME_SOURCE'] = str(self.base / 'runtime-input')

@@ -60,7 +60,7 @@ Group=$service_group
 $supplementary_groups
 WorkingDirectory=$root
 EnvironmentFile=$root/.env
-ExecStart=$root/target/release/cortex-api --production
+ExecStart=/usr/bin/env CORTEX_BONSAI_ENABLED=$prism_enabled $root/target/release/cortex-api --production
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
