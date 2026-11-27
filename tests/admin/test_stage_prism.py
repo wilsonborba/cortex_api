@@ -332,8 +332,9 @@ class PrismActivationTests(unittest.TestCase):
         for state, pid, query_status in (("activating", 0, 0), ("deactivating", 41, 0), ("active", 7, 0), ("inactive", 0, 1)):
             self.commands.clear()
             runner = self.command_runner(active_state=state, main_pid=pid, query_status=query_status)
-            with self.assertRaises(RuntimeError):
-                activator.activate(self.stage, self.host, runner, self.group_output)
+            with unittest.mock.patch.object(activator.os, "chown"):
+                with self.assertRaises(RuntimeError):
+                    activator.activate(self.stage, self.host, runner, self.group_output)
             self.assertEqual(len(self.commands), 1)
             self.assertFalse(self.host.exists())
 
